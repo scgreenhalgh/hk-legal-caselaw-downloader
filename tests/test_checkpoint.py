@@ -114,6 +114,32 @@ class TestCheckpointDB:
         db.close()
 
 
+class TestLastEnumerationTs:
+    def test_returns_none_when_never_enumerated(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        assert db.last_enumeration_ts("hkcfi", "en") is None
+
+    def test_returns_max_last_seen_at_for_court_lang(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       lang="en", last_seen_at=1000)
+        db.upsert_case("hkcfi", 2023, 2, "N", "T", "2023-01-01",
+                       lang="en", last_seen_at=2000)
+        db.upsert_case("hkcfi", 2023, 3, "N", "T", "2023-01-01",
+                       lang="tc", last_seen_at=500)
+        assert db.last_enumeration_ts("hkcfi", "en") == 2000
+        assert db.last_enumeration_ts("hkcfi", "tc") == 500
+
+    def test_returns_none_when_all_rows_null(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        # last_seen_at defaults to None
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01", lang="en")
+        assert db.last_enumeration_ts("hkcfi", "en") is None
+
+
 class TestFreshnessAndOrphans:
     def test_upsert_sets_last_seen_at(self, tmp_path):
         from hklii_downloader.checkpoint import CheckpointDB
