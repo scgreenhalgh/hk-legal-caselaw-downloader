@@ -136,15 +136,42 @@ async def enumerate_court(
     return entries
 
 
-_PRESS_SUMMARY_RE = re.compile(
-    r'<a\s[^>]*href="([^"]+)"[^>]*>\s*Press\s+Summary\s*\((\w+)\)\s*</a>',
-    re.DOTALL,
+_PRESS_SUMMARY_TEXT_RE = re.compile(
+    r"press\s+summary\s*\(([^)]+)\)", re.IGNORECASE,
 )
+
+_LANG_CANON = {
+    "english": "English", "en": "English",
+    "chinese": "Chinese", "zh": "Chinese",
+    "zh-hant": "Chinese", "zh-hans": "Chinese",
+    "traditional chinese": "Chinese", "simplified chinese": "Chinese",
+}
 
 
 def extract_press_summary_urls(html: str) -> dict[str, str]:
-    """Return {lang: url} for every Press Summary anchor found."""
-    return {lang: url for url, lang in _PRESS_SUMMARY_RE.findall(html)}
+    """Return {lang: url} for every Press Summary anchor found.
+
+    Uses BeautifulSoup so wrapping tags, single-quoted hrefs, case
+    variations, and extra attributes don't silently break extraction.
+    """
+    if not html:
+        return {}
+    from bs4 import BeautifulSoup
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    result: dict[str, str] = {}
+    for a in soup.find_all("a", href=True):
+        text = a.get_text(" ", strip=True)
+        m = _PRESS_SUMMARY_TEXT_RE.search(text)
+        if not m:
+            continue
+        lang = m.group(1).strip()
+        canonical = _LANG_CANON.get(lang.lower(), lang)
+        result.setdefault(canonical, a["href"])
+    return result
 
 
 def extract_press_summary_url(html: str) -> str | None:
