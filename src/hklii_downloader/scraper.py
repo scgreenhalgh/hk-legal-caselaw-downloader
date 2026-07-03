@@ -60,12 +60,21 @@ class BulkScraper:
     async def enumerate(
         self, courts: list[str], langs: tuple[str, ...] = ("en", "tc"),
     ) -> int:
+        import random
         import time
         run_ts = int(time.time())
+        rng = random.Random()
         seen: set[tuple[str, int, int]] = set()
         for court in courts:
             for lang in langs:
-                entries = await enumerate_court(court, self._get, lang=lang)
+                # itemsPerPage jittered per (court, lang) into the
+                # 20-50 range: matches typical "power user browsing"
+                # UI defaults across large legal databases, avoids the
+                # 10000-per-page scraper tell.
+                page_size = rng.randint(20, 50)
+                entries = await enumerate_court(
+                    court, self._get, lang=lang, items_per_page=page_size,
+                )
                 for entry in entries:
                     self._checkpoint.upsert_case(
                         entry.court, entry.year, entry.number,
