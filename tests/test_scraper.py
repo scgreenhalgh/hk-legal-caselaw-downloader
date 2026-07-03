@@ -275,6 +275,150 @@ class TestBulkScraperDownload:
         assert result.failed == 0
 
 
+SAMPLE_JUDGMENT_WITH_PS = {
+    "cases": [{"title": "HKSAR v Test", "act": "FACC3/2025"}],
+    "db": "hkcfa",
+    "date": "2026-06-17",
+    "neutral": "[2026] HKCFA 25",
+    "parallel_citation": [],
+    "content": (
+        '<a href="/doc/judg/html/vetted/other/en/2025/FACC000003_2025_files/'
+        'FACC000003_2025ES.htm">Press Summary (English)</a>'
+        '<a href="/doc/judg/html/vetted/other/en/2025/FACC000003_2025_files/'
+        'FACC000003_2025CS.htm">Press Summary (Chinese)</a>'
+        "<p>Judgment body</p>"
+    ),
+    "doc": None,
+    "has_translation": False,
+}
+
+SAMPLE_APPEAL_HISTORY = [
+    {"act": "FACC3/2025", "judgments": [
+        {"neutral": "[2026] HKCFA 25", "path": "/en/cases/hkcfa/2026/25",
+         "date": "2026-06-17", "lang": "EN", "remarks": ""}]},
+]
+
+
+class TestBulkScraperEnrichment:
+    async def test_enrichment_disabled_by_default(self, tmp_path):
+        calls = []
+        async def mock_get(url, **kw):
+            calls.append(url)
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_WITH_PS,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-06-17")
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        await scraper.download_all()
+        # Only the judgment API was called — no summary or appeal history
+        assert len(calls) == 1
+        assert "getjudgment" in calls[0]
+
+    async def test_enrichment_downloads_press_summaries(self, tmp_path):
+        calls = []
+        async def mock_get(url, **kw):
+            calls.append(url)
+            if "getjudgment" in url:
+                return httpx.Response(200, json=SAMPLE_JUDGMENT_WITH_PS,
+                                      request=httpx.Request("GET", url))
+            if "ES.htm" in url:
+                return httpx.Response(200, text="<html>EN summary</html>",
+                                      request=httpx.Request("GET", url))
+            if "CS.htm" in url:
+                return httpx.Response(200, text="<html>ZH 摘要</html>",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-06-17")
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            with_summaries=True,
+        )
+        await scraper.download_all()
+        court_dir = tmp_path / "hkcfa" / "2026"
+        assert (court_dir / "hkcfa_2026_25.summary_en.html").exists()
+        assert (court_dir / "hkcfa_2026_25.summary_zh.html").exists()
+        assert "摘要" in (court_dir / "hkcfa_2026_25.summary_zh.html").read_text()
+        enrich = db.get_enrichment("hkcfa", 2026, 25)
+        assert enrich["summary_en"] == "downloaded"
+        assert enrich["summary_zh"] == "downloaded"
+
+    async def test_enrichment_marks_na_when_no_press_summary(self, tmp_path):
+        judgment_no_ps = {**SAMPLE_JUDGMENT_WITH_PS,
+                          "content": "<p>Ordinary judgment, no summary link</p>"}
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=judgment_no_ps,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            with_summaries=True,
+        )
+        await scraper.download_all()
+        enrich = db.get_enrichment("hkcfi", 2023, 1)
+        assert enrich["summary_en"] == "na"
+        assert enrich["summary_zh"] == "na"
+
+    async def test_enrichment_downloads_appeal_history(self, tmp_path):
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=SAMPLE_JUDGMENT_WITH_PS,
+                                      request=httpx.Request("GET", url))
+            if "getappealhistory" in url:
+                assert "FACC3%2F2025" in url
+                return httpx.Response(200, json=SAMPLE_APPEAL_HISTORY,
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-06-17")
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            with_appeal_history=True,
+        )
+        await scraper.download_all()
+        court_dir = tmp_path / "hkcfa" / "2026"
+        path = court_dir / "hkcfa_2026_25.appeal_history.json"
+        assert path.exists()
+        data = json.loads(path.read_text())
+        assert data[0]["act"] == "FACC3/2025"
+        enrich = db.get_enrichment("hkcfa", 2026, 25)
+        assert enrich["appeal_history"] == "downloaded"
+
+    async def test_enrichment_failure_does_not_fail_main_download(self, tmp_path):
+        """If a press summary fetch fails, the main download is still marked
+        downloaded; only the summary's own status flips to failed."""
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=SAMPLE_JUDGMENT_WITH_PS,
+                                      request=httpx.Request("GET", url))
+            if "ES.htm" in url:
+                return httpx.Response(500, text="",
+                                      request=httpx.Request("GET", url))
+            if "CS.htm" in url:
+                return httpx.Response(200, text="<html>ZH 摘要</html>",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-06-17")
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            with_summaries=True,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        assert result.failed == 0
+        enrich = db.get_enrichment("hkcfa", 2026, 25)
+        assert enrich["summary_en"] == "failed"
+        assert enrich["summary_zh"] == "downloaded"
+
+
 class TestBulkScraperConcurrency:
     async def test_multiple_workers_run_concurrently(self, tmp_path):
         in_flight = 0
