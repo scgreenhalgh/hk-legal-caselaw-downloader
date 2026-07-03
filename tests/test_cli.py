@@ -369,6 +369,39 @@ class TestScrapeSubcommand:
         assert captured.get("with_summaries") is False
         assert captured.get("with_appeal_history") is False
 
+class TestVerifySubcommand:
+    def test_verify_in_group_help(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["--help"])
+        assert "verify" in result.output
+
+    def test_verify_help(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["verify", "--help"])
+        assert result.exit_code == 0
+        assert "--output" in result.output or "-o" in result.output
+
+    def test_verify_flips_broken_rows(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.claim_pending()
+        db.mark_downloaded("hkcfi", 2023, 1, ["html"])
+        db.close()
+        # No files exist under out/hkcfi/2023/
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["verify", "-o", str(out)])
+        assert result.exit_code == 0
+        assert "1" in result.output  # broken count somewhere
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        assert db.stats()["pending"] == 1
+        db.close()
+
+
 class TestEnrichSubcommand:
     def test_enrich_in_group_help(self):
         runner = CliRunner()
