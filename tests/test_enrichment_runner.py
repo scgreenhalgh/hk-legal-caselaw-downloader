@@ -26,9 +26,11 @@ def _seed_downloaded_case(
     tmp_path: Path, court: str, year: int, number: int,
     content_html: str = "<p>plain</p>",
     case_number: str = "HCA100/2023",
+    db=None,
 ):
-    """Set up filesystem + return a fresh CheckpointDB with the case in
-    'downloaded' status and all enrichments 'pending'."""
+    """Set up filesystem + return a CheckpointDB with the case in
+    'downloaded' status and all enrichments 'pending'. Pass an existing
+    db to reuse (multiple seedings on the same tmp_path)."""
     from hklii_downloader.checkpoint import CheckpointDB
     d = tmp_path / court / str(year)
     d.mkdir(parents=True, exist_ok=True)
@@ -41,7 +43,8 @@ def _seed_downloaded_case(
         "parallel_citations": [], "doc_url": None,
         "has_translation": False, "url": "https://x",
     }), encoding="utf-8")
-    db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+    if db is None:
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
     db.upsert_case(court, year, number, f"N{number}", "T", f"{year}-01-01")
     db.claim_pending()
     db.mark_downloaded(court, year, number, ["html", "json"])
@@ -159,6 +162,7 @@ class TestEnrichmentRunner:
         for i in range(1, 6):
             db = _seed_downloaded_case(
                 tmp_path, "hkcfi", 2023, i, HTML_WITH_PRESS, "HCA/2023",
+                db=db,
             )
 
         async def mock_get(url, **kw):

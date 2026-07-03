@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import sqlite3
 from dataclasses import dataclass
+
+
+class CheckpointLockError(RuntimeError):
+    """Another process holds the checkpoint DB lock."""
 
 
 @dataclass
@@ -45,12 +51,31 @@ _ENRICHMENT_STATUSES = ("pending", "downloaded", "na", "failed")
 
 class CheckpointDB:
     def __init__(self, path: str):
+        self._lock_fd: int | None = None
+        if path != ":memory:":
+            self._acquire_lock(path)
         self._conn = sqlite3.connect(path)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute(_SCHEMA)
         self._migrate_enrichment_columns()
         self._conn.commit()
+
+    def _acquire_lock(self, path: str) -> None:
+        lock_path = str(path) + ".lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            return  # Can't create lock file — skip locking silently
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise CheckpointLockError(
+                f"Another process holds the checkpoint lock at {lock_path}. "
+                "Wait for it to finish or kill the stale process."
+            )
+        self._lock_fd = fd
 
     def _migrate_enrichment_columns(self) -> None:
         existing = {
@@ -297,3 +322,10 @@ class CheckpointDB:
 
     def close(self) -> None:
         self._conn.close()
+        if self._lock_fd is not None:
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(self._lock_fd)
+            self._lock_fd = None
