@@ -191,9 +191,15 @@ class BulkScraper:
             output_dir = self._output_dir / record.court / str(record.year)
             save_judgment_local(judgment, output_dir, self._formats)
 
+            actually_saved = set(self._formats) - {"doc"}
+            if "doc" in self._formats and judgment.doc_url:
+                saved_doc = await self._fetch_doc(judgment, output_dir)
+                if saved_doc:
+                    actually_saved.add("doc")
+
             self._checkpoint.mark_downloaded(
                 record.court, record.year, record.number,
-                list(self._formats),
+                sorted(actually_saved),
             )
 
             if self._with_summaries:
@@ -204,6 +210,18 @@ class BulkScraper:
             return True
 
         return False
+
+    async def _fetch_doc(self, judgment: Judgment, output_dir: Path) -> bool:
+        try:
+            resp = await self._get(judgment.doc_url)
+            if resp.status_code != 200:
+                return False
+            ext = ".docx" if judgment.doc_url.lower().endswith(".docx") else ".doc"
+            path = output_dir / f"{judgment.case.filename_stem}{ext}"
+            path.write_bytes(resp.content)
+            return True
+        except (httpx.RequestError, OSError):
+            return False
 
     async def _enrich_summaries(
         self, record: CaseRecord, judgment: Judgment, output_dir: Path,
