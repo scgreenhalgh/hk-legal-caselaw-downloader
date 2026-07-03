@@ -52,6 +52,81 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
         db.upsert_case(court, 2023, i, f"[2023] HKCFI {i}", f"Case {i}", "2023-01-01")
 
 
+class TestBulkScraperRetryPolicy:
+    """403 (WAF), 429 (rate limit), 5xx and JSONDecodeError must retry with
+    backoff. Failure reasons include the HTTP status and a body preview
+    so the operator can distinguish 'Cloudflare block page' from real
+    JSON malformation."""
+
+    async def test_403_is_retried(self, tmp_path):
+        call_count = 0
+
+        async def mock_get(url, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(403, text="<html>Cloudflare</html>",
+                                     request=httpx.Request("GET", url))
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert call_count == 2
+        assert result.downloaded == 1
+
+    async def test_json_decode_error_is_retried(self, tmp_path):
+        call_count = 0
+
+        async def mock_get(url, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return httpx.Response(200, text="<html>Not JSON</html>",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert call_count == 2, (
+            f"JSONDecodeError should retry, got {call_count} calls"
+        )
+        assert result.downloaded == 1
+
+    async def test_failure_reason_includes_status_and_body_preview(self, tmp_path):
+        async def mock_get(url, **kw):
+            return httpx.Response(403, text="<html>Access denied</html>",
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            max_retries=1, _backoff_base=0.0,
+        )
+        await scraper.download_all()
+        row = db._conn.execute(
+            "SELECT error FROM cases WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row is not None
+        error = row[0]
+        assert "403" in error, f"expected status 403 in error, got: {error}"
+        assert "Access denied" in error or "Cloudflare" in error or "denied" in error, (
+            f"expected body preview in error, got: {error}"
+        )
+
+
 class TestBulkScraperEmptyContent:
     """A 200 response whose content field is empty must NOT be saved and
     marked downloaded — that produces 0-byte HTML files that poison RAG.
