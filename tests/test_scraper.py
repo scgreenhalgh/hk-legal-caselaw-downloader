@@ -331,10 +331,7 @@ class TestBulkScraperConcurrency:
         def on_progress(stats):
             events.append(dict(stats))
 
-        try:
-            await scraper.download_all(on_progress=on_progress)
-        except TypeError:
-            pass  # will surface as an empty events list
+        await scraper.download_all(on_progress=on_progress)
 
         assert len(events) == 3, (
             f"on_progress should fire once per attempt (3), got {len(events)}"
@@ -352,12 +349,9 @@ class TestBulkScraperConcurrency:
         scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
 
         events = []
-        try:
-            await scraper.download_all(
-                on_progress=lambda s: events.append(dict(s)),
-            )
-        except TypeError:
-            pass
+        await scraper.download_all(
+            on_progress=lambda s: events.append(dict(s)),
+        )
 
         assert len(events) == 2, (
             f"on_progress should fire on failures too, got {len(events)}"
