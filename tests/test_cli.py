@@ -20,6 +20,11 @@ class TestCLIGroup:
         assert result.exit_code == 0
         assert "download" in result.output
 
+    def test_scrape_in_group_help(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["--help"])
+        assert "scrape" in result.output
+
 
 class TestDownloadSubcommand:
     def test_download_help(self):
@@ -61,3 +66,46 @@ class TestDownloadSubcommand:
         runner = CliRunner()
         result = runner.invoke(main, ["download", "--help"])
         assert "--format" in result.output or "-f" in result.output
+
+
+class TestScrapeSubcommand:
+    def test_scrape_help(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape", "--help"])
+        assert result.exit_code == 0
+        assert "--proxy" in result.output
+        assert "--direct" in result.output
+        assert "--limit" in result.output
+        assert "--allow-doc" in result.output
+        assert "--resume" in result.output
+        assert "--courts" in result.output
+
+    def test_scrape_requires_proxy_or_direct(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape"])
+        assert result.exit_code != 0
+        assert "proxy" in result.output.lower() or "direct" in result.output.lower()
+
+    def test_scrape_proxy_and_direct_mutually_exclusive(self):
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "scrape",
+            "--proxy", "http://localhost:8888",
+            "--direct",
+        ])
+        assert result.exit_code != 0
+
+    def test_scrape_direct_requires_yes(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape", "--direct"], input="n\n")
+        assert result.exit_code != 0 or "confirm" in result.output.lower() or "abort" in result.output.lower()
+
+    def test_scrape_direct_with_yes_skips_confirmation(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape", "--direct", "--yes", "--help"])
+        assert result.exit_code == 0
+
+    def test_scrape_multiple_proxies(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape", "--help"])
+        assert "--proxy" in result.output
