@@ -265,16 +265,27 @@ class BulkScraper:
 
     async def _fetch_doc(self, judgment: Judgment, output_dir: Path) -> bool:
         from .atomic_write import atomic_write_bytes
-        try:
-            resp = await self._get(judgment.doc_url)
+        for attempt in range(self._max_retries + 1):
+            try:
+                resp = await self._get(judgment.doc_url)
+            except httpx.RequestError:
+                if attempt >= self._max_retries:
+                    return False
+                await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                continue
             if resp.status_code != 200:
+                if attempt < self._max_retries and resp.status_code >= 500:
+                    await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                    continue
                 return False
             ext = ".docx" if judgment.doc_url.lower().endswith(".docx") else ".doc"
             path = output_dir / f"{judgment.case.filename_stem}{ext}"
-            atomic_write_bytes(path, resp.content)
-            return True
-        except (httpx.RequestError, OSError):
-            return False
+            try:
+                atomic_write_bytes(path, resp.content)
+                return True
+            except OSError:
+                return False
+        return False
 
     async def _enrich_summaries(
         self, record: CaseRecord, judgment: Judgment, output_dir: Path,
