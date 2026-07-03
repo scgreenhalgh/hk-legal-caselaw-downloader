@@ -312,6 +312,95 @@ class TestBulkScraperRetryPolicy:
         )
 
 
+class TestBulkScraperEmptyContentWithDoc:
+    """HCAL / HCCC cases often ship as doc-only: the API returns
+    content='' but doc_url points at the actual judgment. With
+    --allow-doc + doc_url, we should try the doc before mark_failed."""
+
+    async def test_empty_content_with_doc_url_saves_doc(self, tmp_path):
+        judgment_empty_html_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/foo.docx",
+        }
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_empty_html_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=b"real docx bytes",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"},
+        )
+        result = await scraper.download_all()
+
+        assert result.downloaded == 1, (
+            f"expected doc-only case to succeed with --allow-doc, "
+            f"got downloaded={result.downloaded}, failed={result.failed}"
+        )
+        court_dir = tmp_path / "hkcfi" / "2023"
+        doc = court_dir / "hkcfi_2023_1.docx"
+        assert doc.exists(), "expected docx to land on disk"
+        assert not (court_dir / "hkcfi_2023_1.html").exists(), (
+            "no empty HTML should be written"
+        )
+
+    async def test_empty_content_no_allow_doc_still_marks_failed(self, tmp_path):
+        judgment_empty_html_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/foo.docx",
+        }
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=judgment_empty_html_with_doc,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        # No 'doc' in formats — empty content should still fail
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "txt", "json"},
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 0
+        assert result.failed == 1
+
+    async def test_empty_content_with_allow_doc_but_doc_fetch_fails(self, tmp_path):
+        judgment_empty_html_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/foo.docx",
+        }
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_empty_html_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(500, text="doc unreachable",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"},
+        )
+        result = await scraper.download_all()
+        assert result.failed == 1
+        assert result.downloaded == 0
+
+
 class TestBulkScraperEmptyContent:
     """A 200 response whose content field is empty must NOT be saved and
     marked downloaded — that produces 0-byte HTML files that poison RAG.
