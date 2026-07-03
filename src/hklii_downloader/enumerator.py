@@ -142,11 +142,12 @@ _PRESS_SUMMARY_RE = re.compile(
 )
 
 
+def extract_press_summary_urls(html: str) -> dict[str, str]:
+    """Return {lang: url} for every Press Summary anchor found."""
+    return {lang: url for url, lang in _PRESS_SUMMARY_RE.findall(html)}
+
+
 def extract_press_summary_url(html: str) -> str | None:
-    matches = _PRESS_SUMMARY_RE.findall(html)
-    if not matches:
-        return None
-    for url, lang in matches:
-        if lang == "English":
-            return url
-    return matches[0][0]
+    """Return one URL, preferring English. Kept for backwards-compat."""
+    urls = extract_press_summary_urls(html)
+    return urls.get("English") or next(iter(urls.values()), None)
