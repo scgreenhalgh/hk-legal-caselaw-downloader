@@ -1,4 +1,6 @@
 """Tests for press summary URL extraction from judgment HTML."""
+import pytest
+
 from hklii_downloader.enumerator import extract_press_summary_url
 
 
@@ -52,3 +54,49 @@ class TestExtractPressSummaryUrl:
         url = extract_press_summary_url(html)
         assert url is not None
         assert "HCAL001234" in url
+
+
+class TestExtractPressSummaryUrls:
+    """New plural variant that returns both languages when present."""
+
+    def _import(self):
+        try:
+            from hklii_downloader.enumerator import extract_press_summary_urls
+            return extract_press_summary_urls
+        except ImportError:
+            return None
+
+    def test_returns_dict_with_both_when_present(self):
+        fn = self._import()
+        assert fn is not None, "extract_press_summary_urls not implemented yet"
+        html = '''<a href="/doc/judg/html/vetted/other/en/2023/FACC000012_2023_files/FACC000012_2023ES.htm">
+            Press Summary (English)
+           </a>
+           <a href="/doc/judg/html/vetted/other/en/2023/FACC000012_2023_files/FACC000012_2023CS.htm">
+            Press Summary (Chinese)
+           </a>'''
+        result = fn(html)
+        assert result.get("English", "").endswith("ES.htm")
+        assert result.get("Chinese", "").endswith("CS.htm")
+
+    def test_returns_only_english_when_only_english_present(self):
+        fn = self._import()
+        assert fn is not None
+        html = '''<a href="/doc/judg/html/vetted/other/en/2023/FACC000012_2023ES.htm">
+            Press Summary (English)</a>'''
+        result = fn(html)
+        assert set(result.keys()) == {"English"}
+
+    def test_returns_only_chinese_when_only_chinese_present(self):
+        fn = self._import()
+        assert fn is not None
+        html = '''<a href="/doc/judg/html/vetted/other/en/2023/FACC000012_2023CS.htm">
+            Press Summary (Chinese)</a>'''
+        result = fn(html)
+        assert set(result.keys()) == {"Chinese"}
+
+    def test_returns_empty_dict_when_none(self):
+        fn = self._import()
+        assert fn is not None
+        assert fn("<p>no summaries here</p>") == {}
+        assert fn("") == {}
