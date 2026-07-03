@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 import httpx
+
+_log = logging.getLogger("hklii_downloader.scraper")
 
 from .checkpoint import CheckpointDB, CaseRecord
 from .client import Judgment, parse_judgment_response, save_judgment_local
@@ -117,12 +120,20 @@ class BulkScraper:
         try:
             return await self._download_one_impl(record)
         except IPLeakError as e:
+            _log.warning(
+                "IPLeakError on %s/%s/%s: %s",
+                record.court, record.year, record.number, e,
+            )
             self._checkpoint.mark_failed(
                 record.court, record.year, record.number,
                 f"IPLeakError: {e}",
             )
             return False
         except OSError as e:
+            _log.error(
+                "OSError during save %s/%s/%s: %s",
+                record.court, record.year, record.number, e,
+            )
             self._checkpoint.mark_failed(
                 record.court, record.year, record.number,
                 f"OSError during save: {e}",

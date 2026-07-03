@@ -508,6 +508,9 @@ async def _run_scrape(
     langs: tuple[str, ...] = ("en", "tc"),
     retry_failed: bool = False,
 ) -> None:
+    from .logging_setup import setup_logging
+    log_path = setup_logging(output, "scrape")
+    click.echo(f"Logging to {log_path}")
     from .checkpoint import CheckpointDB
     from .proxy_pool import ProxyPool
     from .scraper import BulkScraper
