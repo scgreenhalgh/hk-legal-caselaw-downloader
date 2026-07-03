@@ -14,6 +14,7 @@ class CaseRecord:
     title: str
     date: str
     status: str
+    lang: str = "en"
 
 
 _SCHEMA = """\
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS cases (
     status   TEXT NOT NULL DEFAULT 'pending',
     formats  TEXT,
     error    TEXT,
+    lang     TEXT NOT NULL DEFAULT 'en',
     summary_en_status     TEXT NOT NULL DEFAULT 'pending',
     summary_en_error      TEXT,
     summary_zh_status     TEXT NOT NULL DEFAULT 'pending',
@@ -55,6 +57,10 @@ class CheckpointDB:
             row[1]
             for row in self._conn.execute("PRAGMA table_info(cases)").fetchall()
         }
+        if "lang" not in existing:
+            self._conn.execute(
+                "ALTER TABLE cases ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'"
+            )
         for kind in _ENRICHMENT_KINDS:
             if f"{kind}_status" not in existing:
                 self._conn.execute(
@@ -68,27 +74,31 @@ class CheckpointDB:
 
     def upsert_case(
         self, court: str, year: int, number: int,
-        neutral: str, title: str, date: str,
+        neutral: str, title: str, date: str, lang: str = "en",
     ) -> None:
         self._conn.execute(
-            "INSERT INTO cases (court, year, number, neutral, title, date) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "INSERT INTO cases (court, year, number, neutral, title, date, lang) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (court, year, number) DO UPDATE SET "
-            "neutral=excluded.neutral, title=excluded.title, date=excluded.date",
-            (court, year, number, neutral, title, date),
+            "neutral=excluded.neutral, title=excluded.title, date=excluded.date, "
+            "lang=CASE "
+            "  WHEN cases.lang='en' OR excluded.lang='en' THEN 'en' "
+            "  ELSE excluded.lang "
+            "END",
+            (court, year, number, neutral, title, date, lang),
         )
         self._conn.commit()
 
     def claim_pending(self, court: str | None = None) -> CaseRecord | None:
         if court:
             row = self._conn.execute(
-                "SELECT court, year, number, neutral, title, date "
+                "SELECT court, year, number, neutral, title, date, lang "
                 "FROM cases WHERE status='pending' AND court=? LIMIT 1",
                 (court,),
             ).fetchone()
         else:
             row = self._conn.execute(
-                "SELECT court, year, number, neutral, title, date "
+                "SELECT court, year, number, neutral, title, date, lang "
                 "FROM cases WHERE status='pending' LIMIT 1",
             ).fetchone()
 
@@ -104,7 +114,7 @@ class CheckpointDB:
         return CaseRecord(
             court=row[0], year=row[1], number=row[2],
             neutral=row[3], title=row[4], date=row[5],
-            status="in_progress",
+            status="in_progress", lang=row[6],
         )
 
     def mark_downloaded(
@@ -135,20 +145,20 @@ class CheckpointDB:
         if courts:
             placeholders = ",".join("?" * len(courts))
             rows = self._conn.execute(
-                f"SELECT court, year, number, neutral, title, date "
+                f"SELECT court, year, number, neutral, title, date, lang "
                 f"FROM cases WHERE status='pending' AND court IN ({placeholders})",
                 courts,
             ).fetchall()
         else:
             rows = self._conn.execute(
-                "SELECT court, year, number, neutral, title, date "
+                "SELECT court, year, number, neutral, title, date, lang "
                 "FROM cases WHERE status='pending'",
             ).fetchall()
         return [
             CaseRecord(
                 court=r[0], year=r[1], number=r[2],
                 neutral=r[3], title=r[4], date=r[5],
-                status="pending",
+                status="pending", lang=r[6],
             )
             for r in rows
         ]
@@ -223,7 +233,7 @@ class CheckpointDB:
             where += f" AND court IN ({placeholders})"
             params = tuple(courts)
         rows = self._conn.execute(
-            f"SELECT court, year, number, neutral, title, date "
+            f"SELECT court, year, number, neutral, title, date, lang "
             f"FROM cases WHERE {where}",
             params,
         ).fetchall()
@@ -231,7 +241,7 @@ class CheckpointDB:
             CaseRecord(
                 court=r[0], year=r[1], number=r[2],
                 neutral=r[3], title=r[4], date=r[5],
-                status="downloaded",
+                status="downloaded", lang=r[6],
             )
             for r in rows
         ]
@@ -253,7 +263,7 @@ class CheckpointDB:
             where += f" AND court IN ({placeholders})"
             params = tuple(courts)
         rows = self._conn.execute(
-            f"SELECT court, year, number, neutral, title, date "
+            f"SELECT court, year, number, neutral, title, date, lang "
             f"FROM cases WHERE {where}",
             params,
         ).fetchall()
@@ -261,7 +271,7 @@ class CheckpointDB:
             CaseRecord(
                 court=r[0], year=r[1], number=r[2],
                 neutral=r[3], title=r[4], date=r[5],
-                status="downloaded",
+                status="downloaded", lang=r[6],
             )
             for r in rows
         ]
