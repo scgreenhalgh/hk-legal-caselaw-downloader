@@ -52,6 +52,76 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
         db.upsert_case(court, 2023, i, f"[2023] HKCFI {i}", f"Case {i}", "2023-01-01")
 
 
+class TestBulkScraperBilingualEnumerate:
+    async def test_enumerate_sweeps_both_langs(self, tmp_path):
+        """A tc-only case must be captured by the enumeration sweep even
+        when the case is not present in the lang=en listing."""
+        en_data = {
+            "totalfiles": 1,
+            "judgments": [{
+                "neutral": "[2026] HKDC 100",
+                "path": "/en/cases/hkdc/2026/100",
+                "date": "2026-01-01",
+                "parallel": [],
+                "cases": [{"title": "T-en", "act": "HCA1/2026"}],
+            }],
+        }
+        tc_data = {
+            "totalfiles": 2,
+            "judgments": [
+                {"neutral": "[2026] HKDC 100", "path": "/tc/cases/hkdc/2026/100",
+                 "date": "2026-01-01", "parallel": [],
+                 "cases": [{"title": "T-tc", "act": "HCA1/2026"}]},
+                {"neutral": "[2026] HKDC 5",   "path": "/tc/cases/hkdc/2026/5",
+                 "date": "2026-01-01", "parallel": [],
+                 "cases": [{"title": "T-tc-only", "act": "HCA5/2026"}]},
+            ],
+        }
+
+        async def mock_get(url, **kw):
+            payload = en_data if "lang=en" in url else tc_data
+            return httpx.Response(200, json=payload,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        total = await scraper.enumerate(["hkdc"])
+        assert total == 2, f"expected 2 unique cases after dedupe, got {total}"
+
+        # tc-only case must have lang='tc'
+        db._conn.execute("UPDATE cases SET status='pending' "
+                         "WHERE court='hkdc' AND year=2026 AND number=5")
+        db._conn.commit()
+        recs = db.pending_cases(courts=["hkdc"])
+        by_num = {r.number: r.lang for r in recs}
+        assert by_num[5] == "tc"
+
+    async def test_bilingual_case_kept_as_en(self, tmp_path):
+        """A case present in BOTH sweeps stays lang='en' (English wins)."""
+        en_data = {"totalfiles": 1, "judgments": [
+            {"neutral": "[2026] HKCFI 1", "path": "/en/cases/hkcfi/2026/1",
+             "date": "2026-01-01", "parallel": [],
+             "cases": [{"title": "T-en", "act": "HCA1/2026"}]},
+        ]}
+        tc_data = {"totalfiles": 1, "judgments": [
+            {"neutral": "[2026] HKCFI 1", "path": "/tc/cases/hkcfi/2026/1",
+             "date": "2026-01-01", "parallel": [],
+             "cases": [{"title": "T-tc", "act": "HCA1/2026"}]},
+        ]}
+
+        async def mock_get(url, **kw):
+            payload = en_data if "lang=en" in url else tc_data
+            return httpx.Response(200, json=payload,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        await scraper.enumerate(["hkcfi"])
+        recs = db.pending_cases(courts=["hkcfi"])
+        assert len(recs) == 1
+        assert recs[0].lang == "en"
+
+
 class TestBulkScraperEnumerate:
     async def test_enumerate_populates_checkpoint(self, tmp_path):
         async def mock_get(url, **kw):
