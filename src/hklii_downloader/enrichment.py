@@ -16,6 +16,8 @@ from urllib.parse import quote
 
 import httpx
 
+from .atomic_write import atomic_write_text
+
 _BASE_URL = "https://www.hklii.hk"
 _VALID_LANGS = ("en", "zh")
 
@@ -48,7 +50,7 @@ def save_press_summary_local(
         raise ValueError(f"unknown lang {lang!r}; expected one of {_VALID_LANGS}")
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{stem}.summary_{lang}.html"
-    path.write_text(html, encoding="utf-8")
+    atomic_write_text(path, html)
     return path
 
 
@@ -57,10 +59,7 @@ def save_appeal_history_local(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{stem}.appeal_history.json"
-    path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False))
     return path
 
 

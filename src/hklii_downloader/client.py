@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+from .atomic_write import atomic_write_text
 from .parser import HKLIICase, html_to_text
 
 # The judiciary.hk F5 WAF blocks any UA containing "python" (silent connection hang).
@@ -79,12 +80,12 @@ def save_judgment_local(
 
     if "html" in formats:
         path = output_dir / f"{stem}.html"
-        path.write_text(judgment.content_html, encoding="utf-8")
+        atomic_write_text(path, judgment.content_html)
         saved.append(path)
 
     if "txt" in formats:
         path = output_dir / f"{stem}.txt"
-        path.write_text(judgment.content_text, encoding="utf-8")
+        atomic_write_text(path, judgment.content_text)
         saved.append(path)
 
     if "json" in formats:
@@ -100,7 +101,7 @@ def save_judgment_local(
             "has_translation": judgment.has_translation,
             "url": f"https://www.hklii.hk/{judgment.case.lang}/cases/{judgment.case.court}/{judgment.case.year}/{judgment.case.number}",
         }
-        path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_text(path, json.dumps(meta, indent=2, ensure_ascii=False))
         saved.append(path)
 
     return saved

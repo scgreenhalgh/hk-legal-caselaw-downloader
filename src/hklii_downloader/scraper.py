@@ -212,13 +212,14 @@ class BulkScraper:
         return False
 
     async def _fetch_doc(self, judgment: Judgment, output_dir: Path) -> bool:
+        from .atomic_write import atomic_write_bytes
         try:
             resp = await self._get(judgment.doc_url)
             if resp.status_code != 200:
                 return False
             ext = ".docx" if judgment.doc_url.lower().endswith(".docx") else ".doc"
             path = output_dir / f"{judgment.case.filename_stem}{ext}"
-            path.write_bytes(resp.content)
+            atomic_write_bytes(path, resp.content)
             return True
         except (httpx.RequestError, OSError):
             return False
