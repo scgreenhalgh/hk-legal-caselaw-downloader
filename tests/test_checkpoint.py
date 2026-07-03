@@ -112,3 +112,104 @@ class TestCheckpointDB:
     def test_close(self):
         db = CheckpointDB(":memory:")
         db.close()
+
+
+class TestEnrichmentStatus:
+    """summary_en, summary_zh, appeal_history tracked independently."""
+
+    def _seed(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfa", 2026, 25, "[2026] HKCFA 25", "HKSAR v X", "2026-06-17")
+        return db
+
+    def test_new_case_has_pending_enrichment(self):
+        db = self._seed()
+        row = db.get_enrichment("hkcfa", 2026, 25)
+        assert row == {
+            "summary_en": "pending",
+            "summary_zh": "pending",
+            "appeal_history": "pending",
+        }
+
+    def test_mark_enrichment_downloaded(self):
+        db = self._seed()
+        db.mark_enrichment("hkcfa", 2026, 25, "summary_en", "downloaded")
+        row = db.get_enrichment("hkcfa", 2026, 25)
+        assert row["summary_en"] == "downloaded"
+        assert row["summary_zh"] == "pending"
+        assert row["appeal_history"] == "pending"
+
+    def test_mark_enrichment_na(self):
+        db = self._seed()
+        db.mark_enrichment("hkcfa", 2026, 25, "summary_en", "na")
+        db.mark_enrichment("hkcfa", 2026, 25, "summary_zh", "na")
+        row = db.get_enrichment("hkcfa", 2026, 25)
+        assert row["summary_en"] == "na"
+        assert row["summary_zh"] == "na"
+
+    def test_mark_enrichment_failed_with_error(self):
+        db = self._seed()
+        db.mark_enrichment(
+            "hkcfa", 2026, 25, "appeal_history", "failed",
+            error="ConnectTimeout after 3 retries",
+        )
+        row = db.get_enrichment("hkcfa", 2026, 25)
+        assert row["appeal_history"] == "failed"
+        errs = db.get_enrichment_errors("hkcfa", 2026, 25)
+        assert "appeal_history" in errs
+        assert "ConnectTimeout" in errs["appeal_history"]
+
+    def test_pending_enrichment_iterates_only_pending(self):
+        db = CheckpointDB(":memory:")
+        for i in range(3):
+            db.upsert_case("hkcfa", 2026, i+1, f"N{i+1}", f"T{i+1}", "2026-01-01")
+        db.mark_enrichment("hkcfa", 2026, 1, "summary_en", "downloaded")
+        db.mark_enrichment("hkcfa", 2026, 2, "summary_en", "na")
+        pending = db.pending_enrichment("summary_en")
+        nums = sorted(r.number for r in pending)
+        assert nums == [3]
+
+    def test_enrichment_stats_reports_counts(self):
+        db = CheckpointDB(":memory:")
+        for i in range(4):
+            db.upsert_case("hkcfa", 2026, i+1, f"N{i+1}", f"T{i+1}", "2026-01-01")
+        db.mark_enrichment("hkcfa", 2026, 1, "summary_en", "downloaded")
+        db.mark_enrichment("hkcfa", 2026, 2, "summary_en", "downloaded")
+        db.mark_enrichment("hkcfa", 2026, 3, "summary_en", "na")
+        db.mark_enrichment("hkcfa", 2026, 4, "summary_en", "failed")
+        stats = db.enrichment_stats()
+        assert stats["summary_en"] == {
+            "pending": 0, "downloaded": 2, "na": 1, "failed": 1,
+        }
+
+    def test_invalid_enrichment_kind_raises(self):
+        db = self._seed()
+        with pytest.raises(ValueError, match="kind"):
+            db.mark_enrichment("hkcfa", 2026, 25, "not_a_kind", "downloaded")
+
+    def test_invalid_enrichment_status_raises(self):
+        db = self._seed()
+        with pytest.raises(ValueError, match="status"):
+            db.mark_enrichment("hkcfa", 2026, 25, "summary_en", "weird")
+
+    def test_migration_adds_columns_to_existing_db(self, tmp_path):
+        import sqlite3
+        db_path = tmp_path / "old.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""CREATE TABLE cases (
+            court TEXT NOT NULL, year INTEGER NOT NULL, number INTEGER NOT NULL,
+            neutral TEXT NOT NULL, title TEXT NOT NULL, date TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            formats TEXT, error TEXT,
+            PRIMARY KEY (court, year, number))""")
+        conn.execute("INSERT INTO cases VALUES ('hkcfa', 2026, 1, 'N1', 'T1', '2026-01-01', 'downloaded', NULL, NULL)")
+        conn.commit()
+        conn.close()
+
+        db = CheckpointDB(str(db_path))
+        row = db.get_enrichment("hkcfa", 2026, 1)
+        assert row == {
+            "summary_en": "pending",
+            "summary_zh": "pending",
+            "appeal_history": "pending",
+        }
