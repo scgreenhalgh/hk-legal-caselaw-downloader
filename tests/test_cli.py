@@ -110,6 +110,100 @@ class TestScrapeSubcommand:
         result = runner.invoke(main, ["scrape", "--help"])
         assert "--proxy" in result.output
 
+    def test_scrape_help_lists_enrichment_flags(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape", "--help"])
+        assert "--with-summaries" in result.output
+        assert "--with-appeal-history" in result.output
+
+    def test_scrape_default_no_enrichment(self, tmp_path):
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.close()
+
+        captured = {}
+
+        real_scraper_init = None
+
+        def make_capturing_bulkscraper():
+            from hklii_downloader import scraper as scraper_mod
+            OrigBulkScraper = scraper_mod.BulkScraper
+
+            class CapturingBulkScraper(OrigBulkScraper):
+                def __init__(self, *args, **kwargs):
+                    captured["with_summaries"] = kwargs.get("with_summaries", False)
+                    captured["with_appeal_history"] = kwargs.get("with_appeal_history", False)
+                    super().__init__(*args, **kwargs)
+            return CapturingBulkScraper
+
+        async def ok_preflight(self):
+            return PreflightResult(home_ip="203.0.113.1",
+                                    healthy_proxies=["http://localhost:8888"])
+
+        async def noop_enumerate(self, courts): return 0
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.scraper.BulkScraper", make_capturing_bulkscraper()), \
+             patch("hklii_downloader.cli.BulkScraper",
+                   make_capturing_bulkscraper(), create=True):
+            runner = CliRunner()
+            runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+            ])
+        assert captured.get("with_summaries") is False
+        assert captured.get("with_appeal_history") is False
+
+    def test_scrape_flags_reach_scraper(self, tmp_path):
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.close()
+
+        captured = {}
+
+        def make_capturing_bulkscraper():
+            from hklii_downloader import scraper as scraper_mod
+            OrigBulkScraper = scraper_mod.BulkScraper
+
+            class CapturingBulkScraper(OrigBulkScraper):
+                def __init__(self, *args, **kwargs):
+                    captured["with_summaries"] = kwargs.get("with_summaries", False)
+                    captured["with_appeal_history"] = kwargs.get("with_appeal_history", False)
+                    super().__init__(*args, **kwargs)
+            return CapturingBulkScraper
+
+        async def ok_preflight(self):
+            return PreflightResult(home_ip="203.0.113.1",
+                                    healthy_proxies=["http://localhost:8888"])
+
+        async def noop_enumerate(self, courts): return 0
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.scraper.BulkScraper", make_capturing_bulkscraper()), \
+             patch("hklii_downloader.cli.BulkScraper",
+                   make_capturing_bulkscraper(), create=True):
+            runner = CliRunner()
+            runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--with-summaries",
+                "--with-appeal-history",
+            ])
+        assert captured.get("with_summaries") is True
+        assert captured.get("with_appeal_history") is True
+
     def test_scrape_releases_in_progress_before_reporting_pending(self, tmp_path):
         """Pending count printed before download must include recovered
         in_progress records so the Rich progress bar's target isn't short
