@@ -114,6 +114,37 @@ class TestCheckpointDB:
         db.close()
 
 
+class TestRetryFailed:
+    def test_reset_failed_to_pending(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.claim_pending()
+        db.mark_failed("hkcfi", 2023, 1, "HTTP 403")
+        assert db.stats()["failed"] == 1
+        n = db.reset_failed_to_pending()
+        assert n == 1
+        stats = db.stats()
+        assert stats["pending"] == 1
+        assert stats["failed"] == 0
+
+    def test_reset_clears_error(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.claim_pending()
+        db.mark_failed("hkcfi", 2023, 1, "HTTP 403")
+        db.reset_failed_to_pending()
+        row = db._conn.execute(
+            "SELECT error FROM cases WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row[0] is None
+
+    def test_reset_no_failed_rows_is_noop(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        n = db.reset_failed_to_pending()
+        assert n == 0
+
+
 class TestLangColumn:
     """lang is stored per-case, default 'en'. Enumeration sweeps both
     languages and dedupes by (court, year, number) preferring en."""
