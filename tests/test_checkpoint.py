@@ -160,14 +160,28 @@ class TestEnrichmentStatus:
         assert "ConnectTimeout" in errs["appeal_history"]
 
     def test_pending_enrichment_iterates_only_pending(self):
+        """Enrichment only applies to cases whose judgment is already
+        downloaded — you can't extract summary URLs from a file you don't
+        have. So pending_enrichment filters by both."""
         db = CheckpointDB(":memory:")
         for i in range(3):
             db.upsert_case("hkcfa", 2026, i+1, f"N{i+1}", f"T{i+1}", "2026-01-01")
+            db.claim_pending()
+            db.mark_downloaded("hkcfa", 2026, i+1, ["html"])
         db.mark_enrichment("hkcfa", 2026, 1, "summary_en", "downloaded")
         db.mark_enrichment("hkcfa", 2026, 2, "summary_en", "na")
         pending = db.pending_enrichment("summary_en")
         nums = sorted(r.number for r in pending)
         assert nums == [3]
+
+    def test_pending_enrichment_excludes_undownloaded_cases(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfa", 2026, 1, "N1", "T1", "2026-01-01")
+        db.upsert_case("hkcfa", 2026, 2, "N2", "T2", "2026-01-02")
+        db.claim_pending()
+        db.mark_downloaded("hkcfa", 2026, 1, ["html"])
+        pending = db.pending_enrichment("summary_en")
+        assert [r.number for r in pending] == [1]
 
     def test_enrichment_stats_reports_counts(self):
         db = CheckpointDB(":memory:")
