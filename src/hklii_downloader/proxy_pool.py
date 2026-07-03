@@ -314,6 +314,7 @@ class ProxyPool:
 
     async def _acquire_session(self) -> int:
         while True:
+            self._revive_cooled_down_sessions()
             if not any(s.is_healthy for s in self.sessions):
                 raise AllProxiesDeadError("All proxy sessions are dead")
             try:
@@ -324,6 +325,12 @@ class ProxyPool:
                 continue
             if self.sessions[idx].is_healthy:
                 return idx
+
+    def _revive_cooled_down_sessions(self) -> None:
+        for session in self.sessions:
+            if session.cooldown_elapsed:
+                session.revive()
+                self._available.put_nowait(session.index)
 
     async def _runtime_ip_check(
         self, session: ProxySession, client: httpx.AsyncClient,
