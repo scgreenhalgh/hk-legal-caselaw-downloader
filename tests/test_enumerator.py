@@ -117,3 +117,28 @@ class TestEnumerateCourt:
         await enumerate_court("hkcfi", mock_get, on_page=on_page)
         assert len(pages_seen) == 1
         assert pages_seen[0] == (1, 1, 1)
+
+    async def test_retries_transient_connect_error(self):
+        response_data = {
+            "totalfiles": 1,
+            "judgments": [{**SAMPLE_ENTRY, "path": "/en/cases/hkcfi/2023/1"}],
+        }
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise httpx.ConnectTimeout("upstream timeout")
+            return httpx.Response(200, json=response_data)
+
+        try:
+            cases = await enumerate_court("hkcfi", mock_get)
+        except httpx.ConnectTimeout:
+            cases = None
+
+        assert cases is not None, (
+            "enumerate_court should retry transient ConnectTimeout, not propagate"
+        )
+        assert calls == 3
+        assert len(cases) == 1
