@@ -114,6 +114,63 @@ class TestCheckpointDB:
         db.close()
 
 
+class TestLangColumn:
+    """lang is stored per-case, default 'en'. Enumeration sweeps both
+    languages and dedupes by (court, year, number) preferring en."""
+
+    def test_new_case_defaults_to_en(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkdc", 2026, 5, "N", "T", "2026-01-01")
+        rec = db.claim_pending()
+        assert rec.lang == "en"
+
+    def test_upsert_case_accepts_lang(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkdc", 2026, 5, "N", "T", "2026-01-01", lang="tc")
+        rec = db.claim_pending()
+        assert rec.lang == "tc"
+
+    def test_en_wins_over_tc_when_both_present(self):
+        """Enumerate en first, tc second — en wins."""
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2026, 100, "N", "T-en", "2026-01-01", lang="en")
+        db.upsert_case("hkcfi", 2026, 100, "N", "T-tc", "2026-01-01", lang="tc")
+        rec = db.claim_pending()
+        assert rec.lang == "en"
+
+    def test_en_wins_over_tc_regardless_of_order(self):
+        """Enumerate tc first, en second — en still wins."""
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2026, 100, "N", "T-tc", "2026-01-01", lang="tc")
+        db.upsert_case("hkcfi", 2026, 100, "N", "T-en", "2026-01-01", lang="en")
+        rec = db.claim_pending()
+        assert rec.lang == "en"
+
+    def test_tc_only_case_stays_tc(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkdc", 2026, 5, "N", "T", "2026-01-01", lang="tc")
+        rec = db.claim_pending()
+        assert rec.lang == "tc"
+
+    def test_migration_adds_lang_to_existing_db(self, tmp_path):
+        import sqlite3
+        db_path = tmp_path / "old.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""CREATE TABLE cases (
+            court TEXT NOT NULL, year INTEGER NOT NULL, number INTEGER NOT NULL,
+            neutral TEXT NOT NULL, title TEXT NOT NULL, date TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            formats TEXT, error TEXT,
+            PRIMARY KEY (court, year, number))""")
+        conn.execute("INSERT INTO cases VALUES ('hkcfi',2026,1,'N','T','2026-01-01','pending',NULL,NULL)")
+        conn.commit()
+        conn.close()
+
+        db = CheckpointDB(str(db_path))
+        rec = db.claim_pending()
+        assert rec.lang == "en"
+
+
 class TestEnrichmentStatus:
     """summary_en, summary_zh, appeal_history tracked independently."""
 
