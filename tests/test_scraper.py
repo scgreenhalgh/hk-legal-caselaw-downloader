@@ -319,6 +319,52 @@ class TestBulkScraperConcurrency:
             f"limit=5 exceeded with concurrent workers: {result.downloaded}"
         )
 
+    async def test_on_progress_fires_per_download(self, tmp_path):
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
+
+        db = _make_db()
+        _seed_db(db, count=3)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+
+        events = []
+        def on_progress(stats):
+            events.append(dict(stats))
+
+        try:
+            await scraper.download_all(on_progress=on_progress)
+        except TypeError:
+            pass  # will surface as an empty events list
+
+        assert len(events) == 3, (
+            f"on_progress should fire once per attempt (3), got {len(events)}"
+        )
+        assert events[-1]["downloaded"] == 3
+        assert events[-1]["failed"] == 0
+        assert [e["downloaded"] for e in events] == [1, 2, 3]
+
+    async def test_on_progress_reports_failures(self, tmp_path):
+        async def mock_get(url, **kw):
+            return httpx.Response(404)
+
+        db = _make_db()
+        _seed_db(db, count=2)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+
+        events = []
+        try:
+            await scraper.download_all(
+                on_progress=lambda s: events.append(dict(s)),
+            )
+        except TypeError:
+            pass
+
+        assert len(events) == 2, (
+            f"on_progress should fire on failures too, got {len(events)}"
+        )
+        assert events[-1]["failed"] == 2
+        assert events[-1]["downloaded"] == 0
+
     async def test_single_worker_is_still_sequential(self, tmp_path):
         in_flight = 0
         max_in_flight = 0
