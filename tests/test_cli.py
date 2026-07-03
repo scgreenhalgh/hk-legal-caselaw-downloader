@@ -160,6 +160,82 @@ class TestScrapeSubcommand:
         assert captured.get("with_summaries") is False
         assert captured.get("with_appeal_history") is False
 
+class TestEnrichSubcommand:
+    def test_enrich_in_group_help(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["--help"])
+        assert "enrich" in result.output
+
+    def test_enrich_help(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["enrich", "--help"])
+        assert result.exit_code == 0
+        assert "--proxy" in result.output
+        assert "--summaries" in result.output or "--no-summaries" in result.output
+        assert "--appeal-history" in result.output or "--no-appeal-history" in result.output
+
+    def test_enrich_requires_proxy_or_direct(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["enrich"])
+        assert result.exit_code != 0
+
+    def _real_enrich(self, tmp_path, extra_args=None):
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+
+        captured = {}
+
+        def make_capturing_runner():
+            from hklii_downloader import enrichment as mod
+            OrigRunner = mod.EnrichmentRunner
+
+            class Capture(OrigRunner):
+                def __init__(self, *args, **kwargs):
+                    captured["do_summaries"] = kwargs.get("do_summaries", True)
+                    captured["do_appeal_history"] = kwargs.get("do_appeal_history", True)
+                    super().__init__(*args, **kwargs)
+
+                async def enrich_all(self, on_progress=None):
+                    from hklii_downloader.enrichment import EnrichmentResult
+                    return EnrichmentResult(processed=0, failed=0)
+            return Capture
+
+        async def ok_preflight(self):
+            return PreflightResult(home_ip="203.0.113.1",
+                                    healthy_proxies=["http://localhost:8888"])
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.enrichment.EnrichmentRunner",
+                   make_capturing_runner()), \
+             patch("hklii_downloader.cli.EnrichmentRunner",
+                   make_capturing_runner(), create=True):
+            runner = CliRunner()
+            args = ["enrich", "-p", "http://localhost:8888", "-o", str(out)]
+            if extra_args:
+                args += extra_args
+            result = runner.invoke(main, args)
+        return captured, result
+
+    def test_enrich_default_flags(self, tmp_path):
+        captured, result = self._real_enrich(tmp_path)
+        assert result.exit_code == 0, result.output
+        assert captured.get("do_summaries") is True
+        assert captured.get("do_appeal_history") is True
+
+    def test_enrich_no_summaries(self, tmp_path):
+        captured, result = self._real_enrich(tmp_path, ["--no-summaries"])
+        assert captured.get("do_summaries") is False
+        assert captured.get("do_appeal_history") is True
+
+    def test_enrich_no_appeal_history(self, tmp_path):
+        captured, result = self._real_enrich(tmp_path, ["--no-appeal-history"])
+        assert captured.get("do_summaries") is True
+        assert captured.get("do_appeal_history") is False
+
+
     def test_scrape_flags_reach_scraper(self, tmp_path):
         from unittest.mock import patch
         from hklii_downloader.proxy_pool import PreflightResult
