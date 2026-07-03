@@ -81,7 +81,7 @@ async def enrich_summaries_for_case(
             html = await fetch_press_summary(url, get)
             save_press_summary_local(html, output_dir, stem, lang_short)
             checkpoint.mark_enrichment(court, year, number, kind, "downloaded")
-        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+        except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
             checkpoint.mark_enrichment(
                 court, year, number, kind, "failed",
                 error=f"{type(e).__name__}: {e}",
@@ -99,7 +99,8 @@ async def enrich_appeal_history_for_case(
         checkpoint.mark_enrichment(
             court, year, number, "appeal_history", "downloaded",
         )
-    except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError) as e:
+    except (httpx.RequestError, httpx.HTTPStatusError,
+            json.JSONDecodeError, OSError) as e:
         checkpoint.mark_enrichment(
             court, year, number, "appeal_history", "failed",
             error=f"{type(e).__name__}: {e}",
