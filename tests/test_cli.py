@@ -109,3 +109,37 @@ class TestScrapeSubcommand:
         runner = CliRunner()
         result = runner.invoke(main, ["scrape", "--help"])
         assert "--proxy" in result.output
+
+    def test_scrape_exits_cleanly_when_all_proxies_dead(self, tmp_path):
+        """If preflight kills every proxy (all leaked or unreachable), the
+        CLI must exit with a clear UsageError instead of proceeding with
+        workers=1 and crashing later inside enumerate on AllProxiesDeadError.
+        """
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+
+        async def dead_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=[],
+                leaked_proxies=["http://localhost:8888 returned home IP"],
+                failed_proxies=[],
+            )
+
+        with patch(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", dead_preflight,
+        ):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(tmp_path / "out"),
+            ])
+
+        assert result.exit_code != 0, (
+            f"expected non-zero exit, got 0 with output:\n{result.output}"
+        )
+        msg = (result.output or "").lower()
+        assert "no healthy proxies" in msg or "no healthy proxy" in msg, (
+            f"expected message about no healthy proxies, got:\n{result.output}"
+        )
