@@ -343,6 +343,61 @@ class TestProxyPool:
         )
         await pool.close()
 
+    async def test_killed_session_revived_after_cooldown(self):
+        """cooldown_elapsed + revive() are dead code today. On next
+        _acquire_session poll, killed sessions whose cooldown has passed
+        must be re-added to the available queue and served again."""
+        import time
+        pool = ProxyPool(
+            proxy_urls=["http://a:1", "http://b:2"],
+            cooldown_seconds=0.01,   # tiny for the test
+            _transport_factory=_noop_transport,
+        )
+        pool._preflight_done = True
+        # Kill session 0
+        pool.sessions[0].kill()
+        # Give the cooldown time to elapse (10ms + a bit)
+        await asyncio.sleep(0.05)
+
+        # Session 0 should be revived on next acquire attempt.
+        # Drain the queue of session 1 (in use), then acquire again.
+        # The pool has both sessions in queue at init. Let's just verify
+        # that after cooldown, pool.sessions[0].is_healthy becomes True
+        # after a pool.get()-like acquire call.
+        try:
+            idx1 = await asyncio.wait_for(pool._acquire_session(), timeout=2.0)
+        except asyncio.TimeoutError:
+            idx1 = None
+        try:
+            idx2 = await asyncio.wait_for(pool._acquire_session(), timeout=2.0)
+        except asyncio.TimeoutError:
+            idx2 = None
+
+        indices = {idx1, idx2}
+        assert 0 in indices, (
+            f"session 0 should be revived after cooldown, got acquisitions {indices}"
+        )
+        assert pool.sessions[0].is_healthy, "session 0 should be healthy again"
+
+    async def test_killed_session_not_revived_before_cooldown(self):
+        pool = ProxyPool(
+            proxy_urls=["http://a:1"],
+            cooldown_seconds=60.0,   # long
+            _transport_factory=_noop_transport,
+        )
+        pool._preflight_done = True
+        pool.sessions[0].kill()
+        # Try to acquire — should raise AllProxiesDeadError, not revive
+        raised = None
+        try:
+            await asyncio.wait_for(pool._acquire_session(), timeout=1.0)
+        except AllProxiesDeadError as e:
+            raised = e
+        assert raised is not None, (
+            "sole session killed, cooldown not elapsed, must raise "
+            "AllProxiesDeadError"
+        )
+
     async def test_queue_routes_work_to_fast_session(self):
         """With 2 sessions (fast and slow) and 4 concurrent gets, a queue-based
         dispatcher must route 3 requests to the fast session (which is free 3x
