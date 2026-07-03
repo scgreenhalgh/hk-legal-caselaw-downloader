@@ -56,7 +56,10 @@ class BulkScraper:
             total += len(entries)
         return total
 
-    async def download_all(self) -> ScrapeResult:
+    async def download_all(
+        self,
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> ScrapeResult:
         self._checkpoint.release_in_progress()
 
         counter_lock = asyncio.Lock()
@@ -79,6 +82,8 @@ class BulkScraper:
                         stats["downloaded"] += 1
                     else:
                         stats["failed"] += 1
+                    if on_progress is not None:
+                        on_progress(stats)
 
         await asyncio.gather(*[worker() for _ in range(self._workers)])
         return ScrapeResult(
