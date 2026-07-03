@@ -180,6 +180,16 @@ class CheckpointDB:
         )
         self._conn.commit()
 
+    def last_enumeration_ts(self, court: str, lang: str) -> int | None:
+        """Max last_seen_at for the given (court, lang), or None if never
+        enumerated or all rows have NULL last_seen_at."""
+        row = self._conn.execute(
+            "SELECT MAX(last_seen_at) FROM cases "
+            "WHERE court=? AND lang=?",
+            (court, lang),
+        ).fetchone()
+        return row[0] if row else None
+
     def find_orphans(self, as_of_ts: int) -> list[CaseRecord]:
         """Rows whose last_seen_at is NULL or < as_of_ts — candidates for
         removal from HKLII since our last enumeration."""

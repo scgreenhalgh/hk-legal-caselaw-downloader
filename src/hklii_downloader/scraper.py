@@ -44,6 +44,7 @@ class BulkScraper:
         limit: int | None = None,
         with_summaries: bool = False,
         with_appeal_history: bool = False,
+        enum_max_age_hours: int = 0,
         _backoff_base: float = 1.0,
     ):
         self._get = get
@@ -55,6 +56,7 @@ class BulkScraper:
         self._limit = limit
         self._with_summaries = with_summaries
         self._with_appeal_history = with_appeal_history
+        self._enum_max_age_hours = enum_max_age_hours
         self._backoff_base = _backoff_base
 
     async def enumerate(
@@ -65,6 +67,16 @@ class BulkScraper:
         seen: set[tuple[str, int, int]] = set()
         for court in courts:
             for lang in langs:
+                if self._enum_max_age_hours > 0:
+                    last_ts = self._checkpoint.last_enumeration_ts(court, lang)
+                    if last_ts is not None and (run_ts - last_ts) < self._enum_max_age_hours * 3600:
+                        age_h = (run_ts - last_ts) / 3600
+                        _log.info(
+                            "skip enumerate court=%s lang=%s (last %.1fh ago, cache window %dh)",
+                            court, lang, age_h, self._enum_max_age_hours,
+                        )
+                        continue
+
                 _log.info(
                     "enumerate court=%s lang=%s via %s",
                     court, lang, self._get_path_label(),

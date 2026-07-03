@@ -174,6 +174,12 @@ BULK_FORMATS = {"html", "txt", "json"}
     default=False,
     help="Flip previously-failed cases back to pending before this run.",
 )
+@click.option(
+    "--enum-max-age",
+    type=int,
+    default=0,
+    help="Skip (court, lang) enumeration if it happened within HOURS (default 0 = always re-enumerate).",
+)
 def scrape(
     output: Path,
     formats: tuple[str, ...],
@@ -188,6 +194,7 @@ def scrape(
     with_appeal_history: bool,
     lang: str,
     retry_failed: bool,
+    enum_max_age: int,
 ) -> None:
     """Bulk scrape judgments from HKLII courts.
 
@@ -230,6 +237,7 @@ def scrape(
         with_appeal_history=with_appeal_history,
         langs=langs,
         retry_failed=retry_failed,
+        enum_max_age=enum_max_age,
     ))
 
 
@@ -507,6 +515,7 @@ async def _run_scrape(
     with_appeal_history: bool = False,
     langs: tuple[str, ...] = ("en", "tc"),
     retry_failed: bool = False,
+    enum_max_age: int = 0,
 ) -> None:
     from .logging_setup import setup_logging
     log_path = setup_logging(output, "scrape")
@@ -551,6 +560,7 @@ async def _run_scrape(
             workers=workers,
             with_summaries=with_summaries,
             with_appeal_history=with_appeal_history,
+            enum_max_age_hours=enum_max_age,
         )
 
         if retry_failed:
