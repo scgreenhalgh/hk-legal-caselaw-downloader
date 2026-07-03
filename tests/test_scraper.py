@@ -52,6 +52,92 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
         db.upsert_case(court, 2023, i, f"[2023] HKCFI {i}", f"Case {i}", "2023-01-01")
 
 
+class TestBulkScraperRobustExcept:
+    """The audit found only (ConnectError, TimeoutException) were caught in
+    _download_one. Real proxy failures also raise ReadError, WriteError,
+    RemoteProtocolError, ProxyError — narrow catch escapes and kills the
+    scrape. Fix: broaden to httpx.RequestError. Also catch OSError (disk)
+    and IPLeakError (from pool.get) to mark_failed cleanly."""
+
+    async def test_read_error_is_retried_then_marked_failed(self, tmp_path):
+        call_count = 0
+
+        async def mock_get(url, **kw):
+            nonlocal call_count
+            call_count += 1
+            raise httpx.ReadError("connection reset by peer")
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            max_retries=2, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        # 1 initial + 2 retries = 3 calls
+        assert call_count == 3, (
+            f"ReadError should retry, got {call_count} calls "
+            f"(broad httpx.RequestError not caught?)"
+        )
+        assert result.downloaded == 0
+        assert result.failed == 1
+
+    async def test_remote_protocol_error_is_retried(self, tmp_path):
+        call_count = 0
+
+        async def mock_get(url, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.RemoteProtocolError("server closed mid-header")
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        assert call_count == 2
+
+    async def test_ip_leak_error_marks_failed_not_crashes(self, tmp_path):
+        from hklii_downloader.proxy_pool import IPLeakError
+
+        async def mock_get(url, **kw):
+            raise IPLeakError("proxy leaked home IP")
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        result = await scraper.download_all()
+        assert result.failed == 1, (
+            f"IPLeakError should be caught + marked failed, "
+            f"got downloaded={result.downloaded}, failed={result.failed}"
+        )
+
+    async def test_oserror_during_save_marks_failed(self, tmp_path):
+        """Simulate disk-full: patching Path.write_text to raise OSError
+        must land as mark_failed, not an escaped traceback."""
+        from unittest.mock import patch
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+
+        with patch("pathlib.Path.write_text",
+                   side_effect=OSError("[Errno 28] No space left on device")):
+            result = await scraper.download_all()
+        assert result.failed == 1
+        assert result.downloaded == 0
+
+
 class TestBulkScraperRetryPolicy:
     """403 (WAF), 429 (rate limit), 5xx and JSONDecodeError must retry with
     backoff. Failure reasons include the HTTP status and a body preview
