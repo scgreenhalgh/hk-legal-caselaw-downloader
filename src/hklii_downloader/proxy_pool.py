@@ -171,9 +171,9 @@ class ProxySession:
         return (_monotonic() - self._killed_at) >= self._cooldown_seconds
 
 
-_IP_ECHO_URLS = [
-    "https://httpbin.org/ip",
-    "https://ipinfo.io/json",
+_IP_ECHO_URLS: list[tuple[str, str]] = [
+    ("https://httpbin.org/ip", "origin"),
+    ("https://ipinfo.io/json", "ip"),
 ]
 
 
@@ -258,11 +258,11 @@ class ProxyPool:
         return result
 
     async def _fetch_ip(self, client: httpx.AsyncClient) -> str:
-        for echo_url in _IP_ECHO_URLS:
+        for echo_url, json_key in _IP_ECHO_URLS:
             try:
                 resp = await client.get(echo_url)
                 resp.raise_for_status()
-                return resp.json()["origin"]
+                return resp.json()[json_key]
             except (httpx.RequestError, httpx.HTTPStatusError, KeyError):
                 continue
         raise httpx.ConnectError("All IP echo services unreachable")
