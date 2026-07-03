@@ -531,6 +531,77 @@ class TestBulkScraperDownloadLang:
         assert "lang=en" in judgment_calls[0]
 
 
+class TestBulkScraperEnumFreshness:
+    async def test_skips_recent_enumeration(self, tmp_path):
+        """When enum_max_age_hours>0 and last_seen_at is within window,
+        skip the API call for that (court, lang) sweep."""
+        import time
+        call_urls = []
+
+        async def mock_get(url, **kw):
+            call_urls.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []},
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        # Seed one case with a very recent last_seen_at
+        recent = int(time.time()) - 3600  # 1 hour ago
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       lang="en", last_seen_at=recent)
+
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            enum_max_age_hours=24,
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert call_urls == [], (
+            f"expected no getcasefiles calls with fresh cache, "
+            f"got {len(call_urls)}"
+        )
+
+    async def test_reenumerates_when_cache_stale(self, tmp_path):
+        """If last enumeration was OLDER than the window, do enumerate."""
+        import time
+        call_urls = []
+
+        async def mock_get(url, **kw):
+            call_urls.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []},
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        stale = int(time.time()) - (48 * 3600)  # 48 hours ago
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       lang="en", last_seen_at=stale)
+
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            enum_max_age_hours=24,
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert len(call_urls) >= 1, "expected at least one API call"
+
+    async def test_default_max_age_zero_always_enumerates(self, tmp_path):
+        """Default (0) preserves old behavior — always re-enumerate."""
+        import time
+        call_urls = []
+
+        async def mock_get(url, **kw):
+            call_urls.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []},
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        # Even a very recent enumeration should not be skipped
+        recent = int(time.time()) - 60
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       lang="en", last_seen_at=recent)
+
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert len(call_urls) >= 1
+
+
 class TestBulkScraperEnumerationUsesPool:
     async def test_enumeration_calls_pool_get_not_direct(self, tmp_path):
         """Enumeration must go through the scraper's injected get() (the
