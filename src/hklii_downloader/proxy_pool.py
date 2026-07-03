@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from dataclasses import dataclass, field
@@ -268,7 +269,12 @@ class ProxyPool:
                 resp = await client.get(echo_url)
                 resp.raise_for_status()
                 return resp.json()[json_key]
-            except (httpx.RequestError, httpx.HTTPStatusError, KeyError):
+            except (
+                httpx.RequestError,
+                httpx.HTTPStatusError,
+                KeyError,
+                json.JSONDecodeError,
+            ):
                 continue
         raise httpx.ConnectError("All IP echo services unreachable")
 

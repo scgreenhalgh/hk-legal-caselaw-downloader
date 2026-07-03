@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ import httpx
 
 _BASE_URL = "https://www.hklii.hk"
 _PATH_RE = re.compile(r"/(?:en|tc)/cases/([a-z]+)/(\d{4})/(\d+)")
+_PERMANENT_STATUSES = {404, 410}
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
 @dataclass
@@ -52,19 +55,37 @@ def parse_case_entry(data: dict, court: str) -> CaseEntry:
     )
 
 
-async def _get_with_retry(
+async def _get_json_with_retry(
     get: Callable,
     url: str,
     max_retries: int,
     backoff_base: float,
-) -> httpx.Response:
+) -> dict:
     for attempt in range(max_retries + 1):
         try:
-            return await get(url)
-        except (httpx.ConnectError, httpx.TimeoutException):
+            resp = await get(url)
+        except httpx.RequestError:
             if attempt >= max_retries:
                 raise
             await asyncio.sleep(backoff_base * (2 ** attempt))
+            continue
+
+        status = resp.status_code
+        if status in _PERMANENT_STATUSES:
+            resp.raise_for_status()
+        if status in _RETRYABLE_STATUSES or status >= 500:
+            if attempt >= max_retries:
+                resp.raise_for_status()
+            await asyncio.sleep(backoff_base * (2 ** attempt))
+            continue
+
+        try:
+            return resp.json()
+        except json.JSONDecodeError:
+            if attempt >= max_retries:
+                raise
+            await asyncio.sleep(backoff_base * (2 ** attempt))
+            continue
 
 
 async def enumerate_court(
@@ -82,10 +103,9 @@ async def enumerate_court(
         "itemsPerPage": items_per_page,
         "page": 1,
     })
-    resp = await _get_with_retry(
+    data = await _get_json_with_retry(
         get, f"{_BASE_URL}/api/getcasefiles?{params}", max_retries, backoff_base,
     )
-    data = resp.json()
 
     total = data.get("totalfiles", 0)
     if total == 0:
@@ -104,10 +124,9 @@ async def enumerate_court(
             "itemsPerPage": items_per_page,
             "page": page,
         })
-        resp = await _get_with_retry(
+        page_data = await _get_json_with_retry(
             get, f"{_BASE_URL}/api/getcasefiles?{params}", max_retries, backoff_base,
         )
-        page_data = resp.json()
         page_entries = [parse_case_entry(j, court) for j in page_data.get("judgments", [])]
         entries.extend(page_entries)
 

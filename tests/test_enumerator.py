@@ -223,7 +223,10 @@ class TestEnumerateCourt:
         async def mock_get(url, **kwargs):
             nonlocal calls
             calls += 1
-            return httpx.Response(404, text="not found")
+            return httpx.Response(
+                404, text="not found",
+                request=httpx.Request("GET", url),
+            )
 
         raised = None
         try:
