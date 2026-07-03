@@ -60,20 +60,26 @@ class BulkScraper:
     async def enumerate(
         self, courts: list[str], langs: tuple[str, ...] = ("en", "tc"),
     ) -> int:
-        import random
         import time
         run_ts = int(time.time())
-        rng = random.Random()
         seen: set[tuple[str, int, int]] = set()
         for court in courts:
             for lang in langs:
-                # itemsPerPage jittered per (court, lang) into the
-                # 20-50 range: matches typical "power user browsing"
-                # UI defaults across large legal databases, avoids the
-                # 10000-per-page scraper tell.
-                page_size = rng.randint(20, 50)
+                _log.info(
+                    "enumerate court=%s lang=%s via %s",
+                    court, lang, self._get_path_label(),
+                )
+                # itemsPerPage=10000 — 13 total enumeration calls across
+                # the whole corpus. Trades on-wire pattern realism for
+                # speed + durability: the smaller values I tried earlier
+                # (20-50) turned each court into 2500+ sequential API
+                # calls, which pushed enumeration to 40+ min per court
+                # and any single mid-enum timeout wiped everything since
+                # entries only land in the DB after enumerate_court
+                # returns. Bulk enumeration is inherently scraper-shaped
+                # no matter what page size we pick.
                 entries = await enumerate_court(
-                    court, self._get, lang=lang, items_per_page=page_size,
+                    court, self._get, lang=lang, items_per_page=10_000,
                 )
                 for entry in entries:
                     self._checkpoint.upsert_case(
@@ -83,6 +89,16 @@ class BulkScraper:
                     )
                     seen.add((entry.court, entry.year, entry.number))
         return len(seen)
+
+    def _get_path_label(self) -> str:
+        """Human-readable label for whichever get() this scraper is using —
+        proves at log time that enumeration is routed through the pool."""
+        get = self._get
+        if hasattr(get, "__self__"):
+            owner = type(get.__self__).__name__
+            method = getattr(get, "__name__", "?")
+            return f"{owner}.{method}"
+        return getattr(get, "__qualname__", repr(get))
 
     async def download_all(
         self,

@@ -490,39 +490,26 @@ class TestBulkScraperDownloadLang:
         assert "lang=en" in judgment_calls[0]
 
 
-class TestBulkScraperRealisticPageSize:
-    async def test_enumerate_uses_realistic_page_size(self, tmp_path):
-        """Frontend uses itemsPerPage=10. Our default of 10000 is a
-        scraper tell. Enumerate should pick per-run page sizes in the
-        20-50 range (still 'power user' but not obviously scripted)."""
-        seen_sizes = []
-        page_data = {
-            "totalfiles": 100,
-            "judgments": [
-                {"neutral": f"[2026] X {i}", "path": f"/en/cases/hkcfi/2026/{i}",
-                 "date": "2026-01-01", "parallel": [],
-                 "cases": [{"title": "T", "act": "HCA1/2026"}]}
-                for i in range(1, 101)
-            ],
-        }
+class TestBulkScraperEnumerationUsesPool:
+    async def test_enumeration_calls_pool_get_not_direct(self, tmp_path):
+        """Enumeration must go through the scraper's injected get() (the
+        proxy pool in production), not any direct client. Regression guard
+        against enumeration accidentally leaking home IP."""
+        call_urls = []
 
         async def mock_get(url, **kw):
-            import re
-            m = re.search(r"itemsPerPage=(\d+)", url)
-            if m:
-                seen_sizes.append(int(m.group(1)))
-            return httpx.Response(200, json=page_data,
+            call_urls.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []},
                                   request=httpx.Request("GET", url))
 
         db = _make_db()
         scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
         await scraper.enumerate(["hkcfi"], langs=("en",))
 
-        assert seen_sizes, "expected some getcasefiles calls"
-        for size in seen_sizes:
-            assert 20 <= size <= 50, (
-                f"itemsPerPage {size} outside realistic 20-50 range"
-            )
+        assert call_urls, "no calls made through injected get"
+        # every enumeration URL must be the getcasefiles endpoint
+        for u in call_urls:
+            assert "getcasefiles" in u
 
 
 class TestBulkScraperBilingualEnumerate:
