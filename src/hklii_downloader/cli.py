@@ -240,6 +240,40 @@ def scrape(
     default=Path("./downloads"),
     help="Directory containing existing downloads + .checkpoint.db.",
 )
+def verify(output: Path) -> None:
+    """Reconcile the checkpoint against on-disk files.
+
+    Iterates rows with status='downloaded' and checks each expected
+    format file exists and is non-zero-byte. Rows with missing or
+    empty files are flipped back to status='pending' so a subsequent
+    `hklii scrape --resume` re-downloads them.
+
+    Fixes the silent-file-loss scenario: rm accident, incomplete
+    rsync (`.checkpoint.db` is a dotfile — rsync -r skips by default),
+    bit-rot, or partial disk writes.
+    """
+    from .checkpoint import CheckpointDB
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        raise click.UsageError(f"No checkpoint DB at {db_path}.")
+    db = CheckpointDB(str(db_path))
+    try:
+        broken = db.verify_downloaded_against_files(output)
+        click.echo(f"Verified {output}. Broken rows flipped to pending: {broken}")
+        stats = db.stats()
+        click.echo(f"Post-verify stats: {stats}")
+    finally:
+        db.close()
+
+
+@main.command()
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./downloads"),
+    help="Directory containing existing downloads + .checkpoint.db.",
+)
 @click.option(
     "-p", "--proxy", "proxies",
     multiple=True,

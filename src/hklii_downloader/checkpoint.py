@@ -173,6 +173,33 @@ class CheckpointDB:
         )
         self._conn.commit()
 
+    def verify_downloaded_against_files(self, output_dir) -> int:
+        """Scan status='downloaded' rows; flip any whose expected files are
+        missing or 0-byte back to status='pending'. Returns broken count."""
+        from pathlib import Path
+        output_dir = Path(output_dir)
+        rows = self._conn.execute(
+            "SELECT court, year, number, formats FROM cases WHERE status='downloaded'"
+        ).fetchall()
+        broken = 0
+        for court, year, number, formats_json in rows:
+            formats = json.loads(formats_json) if formats_json else []
+            stem = f"{court}_{year}_{number}"
+            case_dir = output_dir / court / str(year)
+            for fmt in formats:
+                ext = "docx" if fmt == "doc" and (case_dir / f"{stem}.docx").exists() else fmt
+                path = case_dir / f"{stem}.{ext}"
+                if not path.exists() or path.stat().st_size == 0:
+                    self._conn.execute(
+                        "UPDATE cases SET status='pending', formats=NULL "
+                        "WHERE court=? AND year=? AND number=?",
+                        (court, year, number),
+                    )
+                    broken += 1
+                    break
+        self._conn.commit()
+        return broken
+
     def reset_failed_to_pending(self) -> int:
         cur = self._conn.execute(
             "UPDATE cases SET status='pending', error=NULL "
