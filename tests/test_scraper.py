@@ -52,6 +52,68 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
         db.upsert_case(court, 2023, i, f"[2023] HKCFI {i}", f"Case {i}", "2023-01-01")
 
 
+class TestBulkScraperDoc:
+    """--allow-doc in bulk mode was a lie — the checkpoint said 'doc'
+    was downloaded but no .doc file ever landed. Fix: bulk mode fetches
+    doc_url via the pool and writes {stem}.doc[x] when 'doc' is in
+    formats and the judgment has a doc_url."""
+
+    async def test_bulk_downloads_doc_when_url_present(self, tmp_path):
+        judgment_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "doc": "https://legalref.judiciary.hk/doc/foo.docx",
+        }
+        calls = []
+
+        async def mock_get(url, **kw):
+            calls.append(url)
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=b"docbytes",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"},
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        court_dir = tmp_path / "hkcfi" / "2023"
+        assert (court_dir / "hkcfi_2023_1.doc").exists() or \
+               (court_dir / "hkcfi_2023_1.docx").exists()
+
+    async def test_bulk_skips_doc_when_no_url_but_no_lie(self, tmp_path):
+        """When 'doc' is in formats but judgment.doc_url is None, we don't
+        crash and don't record 'doc' as downloaded in the checkpoint."""
+        no_doc = {**SAMPLE_JUDGMENT_RESPONSE, "doc": None}
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=no_doc,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "doc"},
+        )
+        await scraper.download_all()
+        row = db._conn.execute(
+            "SELECT formats FROM cases WHERE court='hkcfi' AND number=1"
+        ).fetchone()
+        import json as _json
+        stored = _json.loads(row[0])
+        assert "html" in stored
+        assert "doc" not in stored, (
+            f"formats should not lie about doc when no doc_url; got {stored}"
+        )
+
+
 class TestBulkScraperWorkerIsolation:
     """A single worker raising an unexpected exception must not cancel
     sibling workers via asyncio.gather. return_exceptions=True (or
