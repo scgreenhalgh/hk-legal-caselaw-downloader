@@ -87,6 +87,174 @@ def download(
     asyncio.run(_run(urls, output, set(formats), proxy, concurrency))
 
 
+DEFAULT_COURTS = ["hkcfi", "hkca", "hkdc", "hkcfa"]
+BULK_FORMATS = {"html", "txt", "json"}
+
+
+@main.command()
+@click.option(
+    "-o", "--output",
+    type=click.Path(path_type=Path),
+    default=Path("downloads"),
+    help="Output directory (default: ./downloads)",
+)
+@click.option(
+    "-f", "--format",
+    "formats",
+    multiple=True,
+    type=click.Choice(sorted(BULK_FORMATS | {"doc"}), case_sensitive=False),
+    default=sorted(BULK_FORMATS),
+    help="Output format(s). Default: html json txt",
+)
+@click.option(
+    "-p", "--proxy",
+    "proxies",
+    multiple=True,
+    type=str,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--courts",
+    type=str,
+    default=None,
+    help=f"Comma-separated court codes. Default: {','.join(DEFAULT_COURTS)}",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N downloads (smoke test).",
+)
+@click.option(
+    "--allow-doc",
+    is_flag=True,
+    default=False,
+    help="Enable .doc format in bulk mode (disabled by default).",
+)
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="Re-enumerate and download remaining cases.",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct mode.",
+)
+def scrape(
+    output: Path,
+    formats: tuple[str, ...],
+    proxies: tuple[str, ...],
+    direct: bool,
+    courts: str | None,
+    limit: int | None,
+    allow_doc: bool,
+    resume: bool,
+    yes: bool,
+) -> None:
+    """Bulk scrape judgments from HKLII courts.
+
+    Enumerates all cases in target courts, then downloads pending cases
+    with retry logic and checkpoint-based resume.
+
+    \b
+    Examples:
+      hklii scrape --proxy http://localhost:8888
+      hklii scrape --courts hkcfi,hkca --proxy http://localhost:8888
+      hklii scrape --direct --yes --limit 10
+      hklii scrape --resume --proxy http://localhost:8888
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+
+    fmt_set = set(formats)
+    if "doc" in fmt_set and not allow_doc:
+        fmt_set.discard("doc")
+        click.secho("Note: .doc disabled in bulk mode. Use --allow-doc to enable.", fg="yellow", err=True)
+
+    court_list = courts.split(",") if courts else DEFAULT_COURTS
+
+    asyncio.run(_run_scrape(
+        output=output,
+        fmt_set=fmt_set,
+        proxies=list(proxies),
+        direct=direct,
+        court_list=court_list,
+        limit=limit,
+        resume=resume,
+    ))
+
+
+async def _run_scrape(
+    output: Path,
+    fmt_set: set[str],
+    proxies: list[str],
+    direct: bool,
+    court_list: list[str],
+    limit: int | None,
+    resume: bool,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .proxy_pool import ProxyPool
+    from .scraper import BulkScraper
+
+    db_path = output / ".checkpoint.db"
+    output.mkdir(parents=True, exist_ok=True)
+    db = CheckpointDB(str(db_path))
+
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True)
+    else:
+        pool = ProxyPool(proxy_urls=proxies)
+        click.echo("Running preflight IP checks...")
+        result = await pool.preflight()
+        click.echo(f"Home IP: {result.home_ip}")
+        click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+        if result.leaked_proxies:
+            click.secho(f"Leaked proxies: {result.leaked_proxies}", fg="red", err=True)
+        if result.failed_proxies:
+            click.secho(f"Failed proxies: {result.failed_proxies}", fg="yellow", err=True)
+
+    scraper = BulkScraper(
+        get=pool.get,
+        checkpoint=db,
+        output_dir=output,
+        formats=fmt_set,
+        limit=limit,
+    )
+
+    click.echo(f"Enumerating courts: {', '.join(court_list)}")
+    total = await scraper.enumerate(court_list)
+    click.echo(f"Found {total} cases.")
+
+    stats = db.stats()
+    click.echo(f"Pending: {stats['pending']}, Downloaded: {stats['downloaded']}, Failed: {stats['failed']}")
+
+    if stats["pending"] == 0:
+        click.echo("Nothing to download.")
+    else:
+        result = await scraper.download_all()
+        click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
+
+    await pool.close()
+    db.close()
+
+
 _print_lock = asyncio.Lock()
 
 
