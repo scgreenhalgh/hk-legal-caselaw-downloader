@@ -73,6 +73,22 @@ class TestHeaderRotator:
         assert "Accept-Language" in headers
         assert "sec-ch-ua" in headers
 
+    def test_includes_accept_encoding_and_connection(self):
+        rotator = HeaderRotator(rng=random.Random(42))
+        headers = rotator.generate()
+        assert "Accept-Encoding" in headers
+        assert "gzip" in headers["Accept-Encoding"]
+        assert "Connection" in headers
+        assert headers["Connection"].lower() == "keep-alive"
+
+    def test_includes_sec_fetch_triad(self):
+        """Real Chrome always sends sec-fetch-site/mode/dest on every request."""
+        rotator = HeaderRotator(rng=random.Random(42))
+        headers = rotator.generate()
+        assert "sec-fetch-site" in headers
+        assert "sec-fetch-mode" in headers
+        assert "sec-fetch-dest" in headers
+
     def test_referer_for_judgment_url(self):
         rotator = HeaderRotator(rng=random.Random(42))
         referer = rotator.referer_for("https://www.hklii.hk/api/getjudgment?abbr=hkcfi&year=2024&num=1")
