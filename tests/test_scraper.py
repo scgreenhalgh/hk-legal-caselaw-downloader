@@ -52,6 +52,43 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
         db.upsert_case(court, 2023, i, f"[2023] HKCFI {i}", f"Case {i}", "2023-01-01")
 
 
+class TestBulkScraperWorkerIsolation:
+    """A single worker raising an unexpected exception must not cancel
+    sibling workers via asyncio.gather. return_exceptions=True (or
+    per-worker try/except) contains the crash."""
+
+    async def test_worker_crash_does_not_kill_others(self, tmp_path):
+        from unittest.mock import patch
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=5)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path, workers=3,
+        )
+
+        orig = BulkScraper._download_one
+        call_count = 0
+
+        async def flaky_download(self, record):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated bug — should not cancel siblings")
+            return await orig(self, record)
+
+        with patch.object(BulkScraper, "_download_one", flaky_download):
+            result = await scraper.download_all()
+
+        assert result.downloaded >= 4, (
+            f"expected >= 4 downloaded despite the crash, "
+            f"got downloaded={result.downloaded}, failed={result.failed}"
+        )
+
+
 class TestBulkScraperRobustExcept:
     """The audit found only (ConnectError, TimeoutException) were caught in
     _download_one. Real proxy failures also raise ReadError, WriteError,
