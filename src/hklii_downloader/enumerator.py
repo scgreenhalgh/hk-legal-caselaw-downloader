@@ -91,3 +91,7 @@ async def enumerate_court(
             on_page(page, total_pages, len(page_entries))
 
     return entries
+
+
+def extract_press_summary_url(html: str) -> str | None:
+    raise NotImplementedError
