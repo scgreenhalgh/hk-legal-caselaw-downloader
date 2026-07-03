@@ -52,6 +52,44 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
         db.upsert_case(court, 2023, i, f"[2023] HKCFI {i}", f"Case {i}", "2023-01-01")
 
 
+class TestBulkScraperDownloadLang:
+    async def test_download_uses_record_lang_for_tc_case(self, tmp_path):
+        """A record with lang='tc' must hit getjudgment?lang=tc."""
+        called_urls = []
+
+        async def mock_get(url, **kw):
+            called_urls.append(url)
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        db.upsert_case("hkdc", 2026, 5, "N", "T", "2026-01-01", lang="tc")
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        await scraper.download_all()
+
+        judgment_calls = [u for u in called_urls if "getjudgment" in u]
+        assert judgment_calls, "no getjudgment call was made"
+        assert "lang=tc" in judgment_calls[0], (
+            f"expected lang=tc in URL, got: {judgment_calls[0]}"
+        )
+
+    async def test_download_uses_en_for_en_case(self, tmp_path):
+        called_urls = []
+
+        async def mock_get(url, **kw):
+            called_urls.append(url)
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01", lang="en")
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        await scraper.download_all()
+
+        judgment_calls = [u for u in called_urls if "getjudgment" in u]
+        assert "lang=en" in judgment_calls[0]
+
+
 class TestBulkScraperBilingualEnumerate:
     async def test_enumerate_sweeps_both_langs(self, tmp_path):
         """A tc-only case must be captured by the enumeration sweep even
