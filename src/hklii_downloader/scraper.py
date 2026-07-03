@@ -16,6 +16,7 @@ from .enrichment import (
 )
 from .enumerator import enumerate_court
 from .parser import HKLIICase
+from .proxy_pool import IPLeakError
 
 _PERMANENT_ERRORS = {404, 410}
 _RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
@@ -104,6 +105,22 @@ class BulkScraper:
         )
 
     async def _download_one(self, record: CaseRecord) -> bool:
+        try:
+            return await self._download_one_impl(record)
+        except IPLeakError as e:
+            self._checkpoint.mark_failed(
+                record.court, record.year, record.number,
+                f"IPLeakError: {e}",
+            )
+            return False
+        except OSError as e:
+            self._checkpoint.mark_failed(
+                record.court, record.year, record.number,
+                f"OSError during save: {e}",
+            )
+            return False
+
+    async def _download_one_impl(self, record: CaseRecord) -> bool:
         case = HKLIICase(
             lang=record.lang, court=record.court,
             year=record.year, number=record.number,
@@ -112,13 +129,13 @@ class BulkScraper:
         for attempt in range(self._max_retries + 1):
             try:
                 resp = await self._get(case.api_url)
-            except (httpx.ConnectError, httpx.TimeoutException):
+            except httpx.RequestError as e:
                 if attempt < self._max_retries:
                     await asyncio.sleep(self._backoff_base * (2 ** attempt))
                     continue
                 self._checkpoint.mark_failed(
                     record.court, record.year, record.number,
-                    "Connection error after retries",
+                    f"{type(e).__name__} after {self._max_retries} retries: {e}",
                 )
                 return False
 
