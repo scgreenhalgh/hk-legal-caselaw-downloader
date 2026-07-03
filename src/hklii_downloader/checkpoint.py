@@ -236,6 +236,36 @@ class CheckpointDB:
             for r in rows
         ]
 
+    def pending_any_enrichment(
+        self,
+        kinds: list[str],
+        courts: list[str] | None = None,
+    ) -> list[CaseRecord]:
+        """Return downloaded cases with any of the given enrichment kinds pending."""
+        for k in kinds:
+            if k not in _ENRICHMENT_KINDS:
+                raise ValueError(f"unknown enrichment kind {k!r}")
+        or_clauses = " OR ".join(f"{k}_status='pending'" for k in kinds)
+        where = f"status='downloaded' AND ({or_clauses})"
+        params: tuple = ()
+        if courts:
+            placeholders = ",".join("?" * len(courts))
+            where += f" AND court IN ({placeholders})"
+            params = tuple(courts)
+        rows = self._conn.execute(
+            f"SELECT court, year, number, neutral, title, date "
+            f"FROM cases WHERE {where}",
+            params,
+        ).fetchall()
+        return [
+            CaseRecord(
+                court=r[0], year=r[1], number=r[2],
+                neutral=r[3], title=r[4], date=r[5],
+                status="downloaded",
+            )
+            for r in rows
+        ]
+
     def enrichment_stats(self) -> dict[str, dict[str, int]]:
         result: dict[str, dict[str, int]] = {}
         for kind in _ENRICHMENT_KINDS:
