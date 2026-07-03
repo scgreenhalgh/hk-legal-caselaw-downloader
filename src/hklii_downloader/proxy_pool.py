@@ -231,21 +231,22 @@ class ProxyPool:
         if direct:
             self._direct_client = self._make_client(None)
 
-    def _make_client(self, proxy_url: str | None) -> httpx.AsyncClient:
+    def _make_client(self, proxy_url: str | None):
+        # Tests inject an httpx.MockTransport via _transport_factory; keep
+        # that path on httpx so existing test infrastructure works.
         if self._transport_factory:
             return httpx.AsyncClient(
                 transport=self._transport_factory(proxy_url),
                 trust_env=False,
                 timeout=httpx.Timeout(30.0),
             )
-        kwargs: dict = {
-            "trust_env": False,
-            "follow_redirects": True,
-            "timeout": httpx.Timeout(30.0),
-        }
-        if proxy_url:
-            kwargs["proxy"] = proxy_url
-        return httpx.AsyncClient(**kwargs)
+        # Production: curl_cffi with a browser TLS/HTTP2 fingerprint,
+        # random-picked per session for diversity.
+        from .impersonate_client import ImpersonateAsyncClient
+        return ImpersonateAsyncClient(
+            proxy=proxy_url, timeout=30.0,
+            rng=random.Random(hash((proxy_url, "impersonate"))),
+        )
 
     async def preflight(self) -> PreflightResult:
         home_ip = await self._fetch_ip(self._make_client(None))

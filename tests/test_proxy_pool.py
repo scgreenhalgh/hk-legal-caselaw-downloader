@@ -337,20 +337,23 @@ class TestProxyPool:
         assert result.healthy_proxies == ["http://localhost:8888"]
 
     def test_client_uses_generous_timeout(self):
-        """Real getcasefiles requests via VPN take 10+s; httpx default of 5s
-        times out. Client must be built with a larger timeout."""
+        """Real getcasefiles requests via VPN take 10+s; the client must
+        be built with a timeout comfortably above that. Works for both the
+        production (curl_cffi) and test (httpx.MockTransport) paths."""
         pool = ProxyPool(
             proxy_urls=["http://localhost:8888"],
         )
         client = pool._clients[0]
-        connect_t = client.timeout.connect
-        read_t = client.timeout.read
-        assert connect_t is not None and connect_t >= 20, (
-            f"connect timeout {connect_t}s too tight for slow proxy handshake"
-        )
-        assert read_t is not None and read_t >= 20, (
-            f"read timeout {read_t}s too tight for slow enumeration API"
-        )
+        if hasattr(client, "timeout") and hasattr(client.timeout, "connect"):
+            # httpx.AsyncClient — inspect Timeout object
+            assert client.timeout.connect >= 20
+            assert client.timeout.read >= 20
+        else:
+            # ImpersonateAsyncClient (curl_cffi) — timeout is on the session
+            session_timeout = getattr(client._session, "timeout", None)
+            assert session_timeout is not None
+            # curl_cffi timeout is a plain float
+            assert float(session_timeout) >= 20
 
     async def test_close_cleans_up(self):
         pool = ProxyPool(
