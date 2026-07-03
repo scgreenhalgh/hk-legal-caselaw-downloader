@@ -173,7 +173,6 @@ class TestProxyPool:
         with pytest.raises(AllProxiesDeadError):
             pool._next_healthy_session()
 
-    @pytest.mark.asyncio
     async def test_preflight_detects_ip_leak(self):
         home_ip = "203.0.113.1"
 
@@ -191,7 +190,6 @@ class TestProxyPool:
         assert not pool.sessions[0].is_healthy
         assert home_ip in result.leaked_proxies[0]
 
-    @pytest.mark.asyncio
     async def test_preflight_marks_healthy(self):
         home_ip = "203.0.113.1"
         proxy_ip = "198.51.100.5"
@@ -212,7 +210,6 @@ class TestProxyPool:
         assert len(result.leaked_proxies) == 0
         assert result.home_ip == home_ip
 
-    @pytest.mark.asyncio
     async def test_preflight_required_before_requests(self):
         pool = ProxyPool(
             proxy_urls=["http://localhost:8888"],
@@ -221,7 +218,6 @@ class TestProxyPool:
         with pytest.raises(RuntimeError, match="preflight"):
             await pool.get("https://example.com")
 
-    @pytest.mark.asyncio
     async def test_direct_mode_skips_preflight(self):
         def make_transport(proxy_url):
             def handler(request):
@@ -235,7 +231,6 @@ class TestProxyPool:
         resp = await pool.get("https://example.com")
         assert resp.status_code == 200
 
-    @pytest.mark.asyncio
     async def test_runtime_ip_check_detects_leak(self):
         home_ip = "203.0.113.1"
 
@@ -261,7 +256,6 @@ class TestProxyPool:
             with pytest.raises(IPLeakError):
                 await pool.get("https://www.hklii.hk/api/test")
 
-    @pytest.mark.asyncio
     async def test_preflight_handles_unreachable_proxy(self):
         home_ip = "203.0.113.1"
 
@@ -284,7 +278,6 @@ class TestProxyPool:
         assert len(result.failed_proxies) == 1
         assert "8889" in result.failed_proxies[0]
 
-    @pytest.mark.asyncio
     async def test_close_cleans_up(self):
         pool = ProxyPool(
             proxy_urls=["http://localhost:8888"],

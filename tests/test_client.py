@@ -90,7 +90,6 @@ class TestMakeAsyncClient:
 
 
 class TestFetchJudgment:
-    @pytest.mark.asyncio
     async def test_parses_full_response(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=SAMPLE_API_RESPONSE)
@@ -113,7 +112,6 @@ class TestFetchJudgment:
         )
         assert judgment.has_translation is True
 
-    @pytest.mark.asyncio
     async def test_empty_cases_list_defaults(self):
         data = {**SAMPLE_API_RESPONSE, "cases": []}
 
@@ -128,7 +126,6 @@ class TestFetchJudgment:
         assert judgment.title == ""
         assert judgment.case_number == ""
 
-    @pytest.mark.asyncio
     async def test_missing_optional_fields(self):
         data = {"cases": [{"title": "Test"}]}
 
@@ -148,7 +145,6 @@ class TestFetchJudgment:
         assert judgment.doc_url is None
         assert judgment.has_translation is False
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("falsy_val", ["", None, 0, False])
     async def test_falsy_doc_url_becomes_none(self, falsy_val):
         """data.get("doc") or None converts all falsy values to None."""
@@ -164,7 +160,6 @@ class TestFetchJudgment:
 
         assert judgment.doc_url is None
 
-    @pytest.mark.asyncio
     async def test_http_error_propagates(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(404)
@@ -175,7 +170,6 @@ class TestFetchJudgment:
             with pytest.raises(httpx.HTTPStatusError):
                 await fetch_judgment(SAMPLE_CASE, client)
 
-    @pytest.mark.asyncio
     async def test_uses_case_api_url(self):
         captured = []
 
@@ -196,7 +190,6 @@ class TestFetchJudgment:
 
 
 class TestSaveJudgment:
-    @pytest.mark.asyncio
     async def test_creates_nested_output_dir(self, tmp_path):
         judgment = _make_judgment()
         out = tmp_path / "nested" / "deep"
@@ -206,7 +199,6 @@ class TestSaveJudgment:
             await save_judgment(judgment, out, {"html"}, client=client)
         assert out.is_dir()
 
-    @pytest.mark.asyncio
     async def test_save_html(self, tmp_path):
         judgment = _make_judgment()
         async with httpx.AsyncClient(
@@ -217,7 +209,6 @@ class TestSaveJudgment:
         assert saved[0].name == "hkcfi_2023_1234.html"
         assert saved[0].read_text() == "<p>Judgment content.</p>"
 
-    @pytest.mark.asyncio
     async def test_save_txt(self, tmp_path):
         judgment = _make_judgment()
         async with httpx.AsyncClient(
@@ -228,7 +219,6 @@ class TestSaveJudgment:
         assert saved[0].name == "hkcfi_2023_1234.txt"
         assert "Judgment content." in saved[0].read_text()
 
-    @pytest.mark.asyncio
     async def test_save_json_structure(self, tmp_path):
         judgment = _make_judgment()
         async with httpx.AsyncClient(
@@ -250,7 +240,6 @@ class TestSaveJudgment:
             "url": "https://www.hklii.hk/en/cases/hkcfi/2023/1234",
         }
 
-    @pytest.mark.asyncio
     async def test_json_indent_and_unicode(self, tmp_path):
         judgment = _make_judgment(title="陳大文 v. 香港特區政府")
         async with httpx.AsyncClient(
@@ -261,7 +250,6 @@ class TestSaveJudgment:
         assert "\n  " in raw
         assert "陳大文" in raw
 
-    @pytest.mark.asyncio
     async def test_save_doc_downloads_binary(self, tmp_path):
         judgment = _make_judgment()
         doc_bytes = b"\xd0\xcf\x11\xe0fake-doc-content"
@@ -277,7 +265,6 @@ class TestSaveJudgment:
         assert saved[0].name == "hkcfi_2023_1234.doc"
         assert saved[0].read_bytes() == doc_bytes
 
-    @pytest.mark.asyncio
     async def test_doc_skipped_when_no_url(self, tmp_path):
         judgment = _make_judgment(doc_url=None)
         async with httpx.AsyncClient(
@@ -286,7 +273,6 @@ class TestSaveJudgment:
             saved = await save_judgment(judgment, tmp_path, {"doc"}, client=client)
         assert saved == []
 
-    @pytest.mark.asyncio
     async def test_doc_download_raises_on_http_error(self, tmp_path):
         judgment = _make_judgment()
 
@@ -299,7 +285,6 @@ class TestSaveJudgment:
             with pytest.raises(httpx.HTTPStatusError):
                 await save_judgment(judgment, tmp_path, {"doc"}, client=client)
 
-    @pytest.mark.asyncio
     async def test_multiple_formats_all_saved(self, tmp_path):
         judgment = _make_judgment(doc_url=None)
         async with httpx.AsyncClient(
@@ -315,7 +300,6 @@ class TestSaveJudgment:
             "hkcfi_2023_1234.json",
         }
 
-    @pytest.mark.asyncio
     async def test_format_order_is_html_txt_json_doc(self, tmp_path):
         """Paths returned in code order: html, txt, json, doc."""
         judgment = _make_judgment(doc_url=None)
@@ -327,7 +311,6 @@ class TestSaveJudgment:
             )
         assert [p.suffix for p in saved] == [".html", ".txt", ".json"]
 
-    @pytest.mark.asyncio
     async def test_empty_formats_saves_nothing(self, tmp_path):
         judgment = _make_judgment()
         async with httpx.AsyncClient(

@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 
 import httpx
-import pytest
 
 from hklii_downloader.enumerator import (
     CaseEntry,
@@ -52,7 +51,6 @@ class TestParseCaseEntry:
 
 
 class TestEnumerateCourt:
-    @pytest.mark.asyncio
     async def test_single_page(self):
         response_data = {
             "totalfiles": 2,
@@ -70,7 +68,6 @@ class TestEnumerateCourt:
         assert cases[0].number == 1
         assert cases[1].number == 2
 
-    @pytest.mark.asyncio
     async def test_pagination(self):
         page1 = {
             "totalfiles": 3,
@@ -98,7 +95,6 @@ class TestEnumerateCourt:
         assert len(cases) == 3
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_empty_court(self):
         async def mock_get(url, **kwargs):
             return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
@@ -106,7 +102,6 @@ class TestEnumerateCourt:
         cases = await enumerate_court("hkcfi", mock_get)
         assert cases == []
 
-    @pytest.mark.asyncio
     async def test_on_page_callback(self):
         pages_seen = []
 

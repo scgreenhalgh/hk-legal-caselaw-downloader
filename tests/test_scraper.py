@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 
 import httpx
-import pytest
 
 from hklii_downloader.checkpoint import CheckpointDB
 from hklii_downloader.scraper import BulkScraper, ScrapeResult
@@ -53,7 +52,6 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
 
 
 class TestBulkScraperEnumerate:
-    @pytest.mark.asyncio
     async def test_enumerate_populates_checkpoint(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, json=SAMPLE_GETCASEFILES_RESPONSE)
@@ -66,7 +64,6 @@ class TestBulkScraperEnumerate:
         assert count == 2
         assert db.stats()["pending"] == 2
 
-    @pytest.mark.asyncio
     async def test_enumerate_multiple_courts(self, tmp_path):
         court_data = {
             "hkcfi": {
@@ -101,7 +98,6 @@ class TestBulkScraperEnumerate:
 
 
 class TestBulkScraperDownload:
-    @pytest.mark.asyncio
     async def test_downloads_pending_cases(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
@@ -114,7 +110,6 @@ class TestBulkScraperDownload:
         assert result.failed == 0
         assert db.stats()["downloaded"] == 2
 
-    @pytest.mark.asyncio
     async def test_saves_files_in_court_year_dirs(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
@@ -127,7 +122,6 @@ class TestBulkScraperDownload:
         assert court_dir.exists()
         assert (court_dir / "hkcfi_2023_1.html").exists()
 
-    @pytest.mark.asyncio
     async def test_respects_format_selection(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
@@ -144,7 +138,6 @@ class TestBulkScraperDownload:
         assert (court_dir / "hkcfi_2023_1.json").exists()
         assert not (court_dir / "hkcfi_2023_1.txt").exists()
 
-    @pytest.mark.asyncio
     async def test_limit_stops_after_n(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
@@ -158,7 +151,6 @@ class TestBulkScraperDownload:
         assert result.downloaded == 2
         assert db.stats()["pending"] == 3
 
-    @pytest.mark.asyncio
     async def test_mark_failed_on_404(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(404)
@@ -171,7 +163,6 @@ class TestBulkScraperDownload:
         assert result.failed == 1
         assert db.stats()["failed"] == 1
 
-    @pytest.mark.asyncio
     async def test_mark_failed_on_json_decode_error(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, text="<html>Error page</html>")
@@ -183,7 +174,6 @@ class TestBulkScraperDownload:
         assert result.downloaded == 0
         assert result.failed == 1
 
-    @pytest.mark.asyncio
     async def test_retries_on_429_then_succeeds(self, tmp_path):
         call_count = 0
 
@@ -204,7 +194,6 @@ class TestBulkScraperDownload:
         assert result.downloaded == 1
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_retries_on_5xx_then_succeeds(self, tmp_path):
         call_count = 0
 
@@ -225,7 +214,6 @@ class TestBulkScraperDownload:
         assert result.downloaded == 1
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_mark_failed_after_retry_exhaustion(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(500)
@@ -240,7 +228,6 @@ class TestBulkScraperDownload:
         assert result.downloaded == 0
         assert result.failed == 1
 
-    @pytest.mark.asyncio
     async def test_retries_on_connection_error(self, tmp_path):
         call_count = 0
 
@@ -261,7 +248,6 @@ class TestBulkScraperDownload:
         assert result.downloaded == 1
         assert call_count == 2
 
-    @pytest.mark.asyncio
     async def test_releases_in_progress_on_start(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
@@ -276,7 +262,6 @@ class TestBulkScraperDownload:
         result = await scraper.download_all()
         assert result.downloaded == 2
 
-    @pytest.mark.asyncio
     async def test_scrape_result_fields(self, tmp_path):
         async def mock_get(url, **kw):
             return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
