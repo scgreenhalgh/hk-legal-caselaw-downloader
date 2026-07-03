@@ -16,7 +16,8 @@ class TestFetchPressSummary:
 
         async def mock_get(url, **kw):
             captured["url"] = url
-            return httpx.Response(200, text="<html>Press Summary Body</html>")
+            return httpx.Response(200, text="<html>Press Summary Body</html>",
+                                  request=httpx.Request("GET", url))
 
         html = await fetch_press_summary(
             "/doc/judg/html/vetted/other/en/2025/FACC000003_2025_files/FACC000003_2025ES.htm",
@@ -32,7 +33,8 @@ class TestFetchPressSummary:
 
         async def mock_get(url, **kw):
             captured["url"] = url
-            return httpx.Response(200, text="<html>ok</html>")
+            return httpx.Response(200, text="<html>ok</html>",
+                                  request=httpx.Request("GET", url))
 
         await fetch_press_summary("https://www.hklii.hk/xyz.htm", mock_get)
         assert captured["url"] == "https://www.hklii.hk/xyz.htm"
@@ -58,7 +60,7 @@ class TestFetchAppealHistory:
                 {"act": "FACC3/2025", "judgments": [
                     {"neutral": "[2026] HKCFA 25", "path": "/en/cases/hkcfa/2026/25",
                      "date": "2026-06-17", "lang": "EN", "remarks": ""}]},
-            ])
+            ], request=httpx.Request("GET", url))
 
         result = await fetch_appeal_history("FACC3/2025", mock_get)
         assert isinstance(result, list)
@@ -72,7 +74,8 @@ class TestFetchAppealHistory:
 
         async def mock_get(url, **kw):
             captured["url"] = url
-            return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[],
+                                  request=httpx.Request("GET", url))
 
         await fetch_appeal_history("HCA2268/2025", mock_get)
         # slash must be percent-encoded so it's a caseno value, not a path segment
@@ -82,7 +85,8 @@ class TestFetchAppealHistory:
         from hklii_downloader.enrichment import fetch_appeal_history
 
         async def mock_get(url, **kw):
-            return httpx.Response(200, json=[])
+            return httpx.Response(200, json=[],
+                                  request=httpx.Request("GET", url))
 
         result = await fetch_appeal_history("X/2025", mock_get)
         assert result == []
