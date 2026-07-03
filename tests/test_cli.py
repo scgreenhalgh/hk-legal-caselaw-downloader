@@ -110,6 +110,107 @@ class TestScrapeSubcommand:
         result = runner.invoke(main, ["scrape", "--help"])
         assert "--proxy" in result.output
 
+    def test_scrape_releases_in_progress_before_reporting_pending(self, tmp_path):
+        """Pending count printed before download must include recovered
+        in_progress records so the Rich progress bar's target isn't short
+        by N after a Ctrl-C-then-resume (finding #4)."""
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db_path = out / ".checkpoint.db"
+        db = CheckpointDB(str(db_path))
+        for i in range(5):
+            db.upsert_case("hkcfi", 2023, i + 1, f"[2023] HKCFI {i+1}",
+                           f"Case {i+1}", "2023-01-01")
+        db.claim_pending()
+        db.claim_pending()
+        assert db.stats()["in_progress"] == 2
+        assert db.stats()["pending"] == 3
+        db.close()
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+                leaked_proxies=[],
+                failed_proxies=[],
+            )
+
+        async def noop_enumerate(self, courts):
+            return 0  # skip enumeration, use existing DB rows
+
+        async def noop_download_all(self, on_progress=None):
+            from hklii_downloader.scraper import ScrapeResult
+            return ScrapeResult(downloaded=0, failed=0)
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.scraper.BulkScraper.enumerate", noop_enumerate), \
+             patch("hklii_downloader.scraper.BulkScraper.download_all",
+                   noop_download_all):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+            ])
+
+        assert "Pending: 5" in result.output, (
+            f"expected Pending count to include released in_progress rows, "
+            f"got:\n{result.output}"
+        )
+
+    def test_scrape_target_clamps_limit_to_pending(self, tmp_path):
+        """When --limit exceeds pending, target must clamp to pending so
+        the Rich progress bar total matches what download_all can actually
+        do (finding #8)."""
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        for i in range(3):
+            db.upsert_case("hkcfi", 2023, i + 1, f"[2023] HKCFI {i+1}",
+                           f"Case {i+1}", "2023-01-01")
+        db.close()
+
+        captured = {}
+
+        async def capture_download_with_progress(scraper, target):
+            from hklii_downloader.scraper import ScrapeResult
+            captured["target"] = target
+            return ScrapeResult(downloaded=0, failed=0)
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        async def noop_enumerate(self, courts):
+            return 0
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.scraper.BulkScraper.enumerate", noop_enumerate), \
+             patch("hklii_downloader.cli._download_with_progress",
+                   capture_download_with_progress):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--limit", "100",
+            ])
+
+        assert captured.get("target") == 3, (
+            f"target should clamp to pending=3 when --limit=100, "
+            f"got target={captured.get('target')}. Output:\n{result.output}"
+        )
+
     def test_scrape_exits_cleanly_when_all_proxies_dead(self, tmp_path):
         """If preflight kills every proxy (all leaked or unreachable), the
         CLI must exit with a clear UsageError instead of proceeding with
