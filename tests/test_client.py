@@ -16,7 +16,9 @@ from hklii_downloader.client import (
     _BROWSER_HEADERS,
     fetch_judgment,
     make_async_client,
+    parse_judgment_response,
     save_judgment,
+    save_judgment_local,
 )
 from hklii_downloader.parser import HKLIICase
 
@@ -79,14 +81,12 @@ class TestMakeAsyncClient:
         client = make_async_client()
         assert isinstance(client._transport, httpx.AsyncHTTPTransport)
 
-    def test_trust_env_not_disabled(self):
-        """Current behavior: trust_env is not set, so it defaults to True.
-        Step 1 will change this to trust_env=False."""
-        # Verify the source code doesn't pass trust_env
+    def test_trust_env_disabled(self):
+        """trust_env=False prevents httpx from honoring proxy env vars."""
         import inspect
 
         source = inspect.getsource(make_async_client)
-        assert "trust_env" not in source
+        assert "trust_env=False" in source
 
 
 class TestFetchJudgment:
@@ -346,3 +346,103 @@ class TestJudgmentContentText:
         j = _make_judgment(content_html="<div><span>Test</span></div>")
         assert "<div>" not in j.content_text
         assert "Test" in j.content_text
+
+
+class TestParseJudgmentResponse:
+    def test_parses_full_response(self):
+        judgment = parse_judgment_response(SAMPLE_CASE, SAMPLE_API_RESPONSE)
+        assert judgment.case == SAMPLE_CASE
+        assert judgment.title == "HKSAR v. Chan Tai Man"
+        assert judgment.case_number == "HCCC123/2023"
+        assert judgment.court_name == "hkcfi"
+        assert judgment.date == "2023-06-15T00:00:00+08:00"
+        assert judgment.neutral_citation == "[2023] HKCFI 1234"
+        assert judgment.parallel_citations == ["[2023] 5 HKC 789"]
+        assert judgment.content_html == "<p>Judgment content.</p>"
+        assert judgment.doc_url == (
+            "https://legalref.judiciary.hk/doc/hkcfi_2023_1234.doc"
+        )
+        assert judgment.has_translation is True
+
+    def test_empty_cases_list(self):
+        data = {**SAMPLE_API_RESPONSE, "cases": []}
+        judgment = parse_judgment_response(SAMPLE_CASE, data)
+        assert judgment.title == ""
+        assert judgment.case_number == ""
+
+    def test_missing_fields(self):
+        data = {"cases": [{"title": "Test"}]}
+        judgment = parse_judgment_response(SAMPLE_CASE, data)
+        assert judgment.court_name == ""
+        assert judgment.date == ""
+        assert judgment.neutral_citation == ""
+        assert judgment.parallel_citations == []
+        assert judgment.content_html == ""
+        assert judgment.doc_url is None
+        assert judgment.has_translation is False
+
+    @pytest.mark.parametrize("falsy_val", ["", None, 0, False])
+    def test_falsy_doc_url_becomes_none(self, falsy_val):
+        data = {**SAMPLE_API_RESPONSE, "doc": falsy_val}
+        judgment = parse_judgment_response(SAMPLE_CASE, data)
+        assert judgment.doc_url is None
+
+
+class TestSaveJudgmentLocal:
+    def test_save_html(self, tmp_path):
+        judgment = _make_judgment()
+        saved = save_judgment_local(judgment, tmp_path, {"html"})
+        assert len(saved) == 1
+        assert saved[0].name == "hkcfi_2023_1234.html"
+        assert saved[0].read_text() == "<p>Judgment content.</p>"
+
+    def test_save_txt(self, tmp_path):
+        judgment = _make_judgment()
+        saved = save_judgment_local(judgment, tmp_path, {"txt"})
+        assert len(saved) == 1
+        assert saved[0].name == "hkcfi_2023_1234.txt"
+        assert "Judgment content." in saved[0].read_text()
+
+    def test_save_json_structure(self, tmp_path):
+        judgment = _make_judgment()
+        saved = save_judgment_local(judgment, tmp_path, {"json"})
+        assert len(saved) == 1
+        meta = json.loads(saved[0].read_text())
+        assert meta == {
+            "title": "HKSAR v. Chan Tai Man",
+            "case_number": "HCCC123/2023",
+            "court": "hkcfi",
+            "date": "2023-06-15T00:00:00+08:00",
+            "neutral_citation": "[2023] HKCFI 1234",
+            "parallel_citations": ["[2023] 5 HKC 789"],
+            "doc_url": "https://legalref.judiciary.hk/doc/hkcfi_2023_1234.doc",
+            "has_translation": True,
+            "url": "https://www.hklii.hk/en/cases/hkcfi/2023/1234",
+        }
+
+    def test_creates_output_dir(self, tmp_path):
+        judgment = _make_judgment()
+        out = tmp_path / "nested" / "deep"
+        save_judgment_local(judgment, out, {"html"})
+        assert out.is_dir()
+
+    def test_doc_format_ignored(self, tmp_path):
+        judgment = _make_judgment()
+        saved = save_judgment_local(judgment, tmp_path, {"doc"})
+        assert saved == []
+
+    def test_format_order_html_txt_json(self, tmp_path):
+        judgment = _make_judgment()
+        saved = save_judgment_local(judgment, tmp_path, {"html", "txt", "json"})
+        assert [p.suffix for p in saved] == [".html", ".txt", ".json"]
+
+    def test_empty_formats(self, tmp_path):
+        judgment = _make_judgment()
+        saved = save_judgment_local(judgment, tmp_path, set())
+        assert saved == []
+
+    def test_json_preserves_unicode(self, tmp_path):
+        judgment = _make_judgment(title="陳大文 v. 香港特區政府")
+        save_judgment_local(judgment, tmp_path, {"json"})
+        raw = (tmp_path / "hkcfi_2023_1234.json").read_text(encoding="utf-8")
+        assert "陳大文" in raw

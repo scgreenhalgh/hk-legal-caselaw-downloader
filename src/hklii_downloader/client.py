@@ -51,6 +51,20 @@ class Judgment:
         return html_to_text(self.content_html)
 
 
+def parse_judgment_response(case: HKLIICase, data: dict) -> Judgment:
+    return Judgment(
+        case=case, title="", case_number="", court_name="", date="",
+        neutral_citation="", parallel_citations=[], content_html="",
+        doc_url=None, has_translation=False,
+    )
+
+
+def save_judgment_local(
+    judgment: Judgment, output_dir: Path, formats: set[str],
+) -> list[Path]:
+    return []
+
+
 async def fetch_judgment(case: HKLIICase, client: httpx.AsyncClient) -> Judgment:
     resp = await client.get(case.api_url)
     resp.raise_for_status()
