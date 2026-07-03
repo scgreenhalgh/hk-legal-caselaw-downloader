@@ -182,9 +182,12 @@ class TestEnrichSubcommand:
     def _real_enrich(self, tmp_path, extra_args=None):
         from unittest.mock import patch
         from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.checkpoint import CheckpointDB
 
         out = tmp_path / "out"
         out.mkdir()
+        # enrich requires the DB to exist
+        CheckpointDB(str(out / ".checkpoint.db")).close()
 
         captured = {}
 

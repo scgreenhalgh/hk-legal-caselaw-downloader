@@ -216,6 +216,198 @@ def scrape(
     ))
 
 
+@main.command()
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./downloads"),
+    help="Directory containing existing downloads + .checkpoint.db.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--summaries/--no-summaries",
+    default=True,
+    help="Backfill Press Summary (English + Chinese). Default: on.",
+)
+@click.option(
+    "--appeal-history/--no-appeal-history",
+    default=True,
+    help="Backfill appeal history JSON. Default: on.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N cases (smoke test).",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct mode.",
+)
+def enrich(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    summaries: bool,
+    appeal_history: bool,
+    limit: int | None,
+    yes: bool,
+) -> None:
+    """Backfill press summaries + appeal history for already-downloaded cases.
+
+    Reads existing judgment HTML/JSON from the output directory and fetches
+    the missing enrichment artifacts. Useful when you scraped without
+    --with-summaries / --with-appeal-history and want to add them later,
+    or when re-running after extraction logic changed.
+
+    \b
+    Examples:
+      hklii enrich --proxy http://localhost:8888
+      hklii enrich --no-appeal-history --proxy http://localhost:8888
+      hklii enrich --direct --yes --limit 10
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+
+    if direct and not yes:
+        click.confirm(
+            "Enriching without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+
+    if not summaries and not appeal_history:
+        raise click.UsageError(
+            "Nothing to do — pass --summaries or --appeal-history (or both)."
+        )
+
+    asyncio.run(_run_enrich(
+        output=output,
+        proxies=list(proxies),
+        direct=direct,
+        do_summaries=summaries,
+        do_appeal_history=appeal_history,
+        limit=limit,
+    ))
+
+
+async def _run_enrich(
+    output: Path,
+    proxies: list[str],
+    direct: bool,
+    do_summaries: bool,
+    do_appeal_history: bool,
+    limit: int | None,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .enrichment import EnrichmentRunner
+    from .proxy_pool import ProxyPool
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        raise click.UsageError(
+            f"No checkpoint DB at {db_path}. Run `hklii scrape` first."
+        )
+    db = CheckpointDB(str(db_path))
+
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies)
+
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight — every proxy was "
+                    "leaked or unreachable."
+                )
+            workers = max(1, len(result.healthy_proxies))
+
+        runner = EnrichmentRunner(
+            get=pool.get,
+            checkpoint=db,
+            output_dir=output,
+            do_summaries=do_summaries,
+            do_appeal_history=do_appeal_history,
+            workers=workers,
+            limit=limit,
+        )
+
+        pending_kinds = []
+        if do_summaries:
+            pending_kinds += ["summary_en", "summary_zh"]
+        if do_appeal_history:
+            pending_kinds.append("appeal_history")
+        pending_cases = db.pending_any_enrichment(pending_kinds)
+        target = len(pending_cases) if limit is None else min(limit, len(pending_cases))
+        click.echo(f"Pending enrichment for {len(pending_cases)} case(s); target {target}.")
+
+        if target == 0:
+            click.echo("Nothing to enrich.")
+        else:
+            result = await _enrich_with_progress(runner, target)
+            click.echo(
+                f"\nDone. Processed: {result.processed}, "
+                f"Failed: {result.failed}"
+            )
+    finally:
+        await pool.close()
+        db.close()
+
+
+async def _enrich_with_progress(runner, target: int):
+    from rich.progress import (
+        Progress,
+        TextColumn,
+        BarColumn,
+        MofNCompleteColumn,
+        TaskProgressColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    with Progress(
+        TextColumn("[bold blue]enrich"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[processed]}"),
+        TextColumn("[red]fail {task.fields[failed]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "cases", total=target, processed=0, failed=0,
+        )
+
+        def on_progress(stats: dict) -> None:
+            progress.update(
+                task_id,
+                completed=stats["processed"] + stats["failed"],
+                processed=stats["processed"],
+                failed=stats["failed"],
+            )
+
+        return await runner.enrich_all(on_progress=on_progress)
+
+
 async def _download_with_progress(scraper, target: int):
     from rich.progress import (
         Progress,
