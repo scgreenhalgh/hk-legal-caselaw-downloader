@@ -135,6 +135,14 @@ class CheckpointDB:
         )
         self._conn.commit()
 
+    def reset_failed_to_pending(self) -> int:
+        cur = self._conn.execute(
+            "UPDATE cases SET status='pending', error=NULL "
+            "WHERE status='failed'"
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def release_in_progress(self) -> None:
         self._conn.execute(
             "UPDATE cases SET status='pending' WHERE status='in_progress'",

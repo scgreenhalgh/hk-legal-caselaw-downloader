@@ -168,6 +168,12 @@ BULK_FORMATS = {"html", "txt", "json"}
     default="both",
     help="Which language(s) to enumerate. Default: both (English + Chinese, en wins for bilingual cases).",
 )
+@click.option(
+    "--retry-failed",
+    is_flag=True,
+    default=False,
+    help="Flip previously-failed cases back to pending before this run.",
+)
 def scrape(
     output: Path,
     formats: tuple[str, ...],
@@ -181,6 +187,7 @@ def scrape(
     with_summaries: bool,
     with_appeal_history: bool,
     lang: str,
+    retry_failed: bool,
 ) -> None:
     """Bulk scrape judgments from HKLII courts.
 
@@ -222,6 +229,7 @@ def scrape(
         with_summaries=with_summaries,
         with_appeal_history=with_appeal_history,
         langs=langs,
+        retry_failed=retry_failed,
     ))
 
 
@@ -464,6 +472,7 @@ async def _run_scrape(
     with_summaries: bool = False,
     with_appeal_history: bool = False,
     langs: tuple[str, ...] = ("en", "tc"),
+    retry_failed: bool = False,
 ) -> None:
     from .checkpoint import CheckpointDB
     from .proxy_pool import ProxyPool
@@ -506,6 +515,10 @@ async def _run_scrape(
             with_summaries=with_summaries,
             with_appeal_history=with_appeal_history,
         )
+
+        if retry_failed:
+            n = db.reset_failed_to_pending()
+            click.echo(f"Reset {n} failed case(s) to pending for retry.")
 
         click.echo(f"Enumerating courts: {', '.join(court_list)}  langs: {', '.join(langs)}")
         total = await scraper.enumerate(court_list, langs=langs)
