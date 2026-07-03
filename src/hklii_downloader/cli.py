@@ -289,13 +289,17 @@ async def _run_scrape(
         total = await scraper.enumerate(court_list)
         click.echo(f"Found {total} cases.")
 
+        db.release_in_progress()
         stats = db.stats()
         click.echo(f"Pending: {stats['pending']}, Downloaded: {stats['downloaded']}, Failed: {stats['failed']}")
 
         if stats["pending"] == 0:
             click.echo("Nothing to download.")
         else:
-            target = limit if limit is not None else stats["pending"]
+            target = (
+                min(limit, stats["pending"]) if limit is not None
+                else stats["pending"]
+            )
             result = await _download_with_progress(scraper, target)
             click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
     finally:
