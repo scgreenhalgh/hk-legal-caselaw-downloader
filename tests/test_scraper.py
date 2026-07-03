@@ -52,6 +52,57 @@ def _seed_db(db: CheckpointDB, count: int = 1, court: str = "hkcfi") -> None:
         db.upsert_case(court, 2023, i, f"[2023] HKCFI {i}", f"Case {i}", "2023-01-01")
 
 
+class TestBulkScraperEmptyContent:
+    """A 200 response whose content field is empty must NOT be saved and
+    marked downloaded — that produces 0-byte HTML files that poison RAG.
+    Instead the case is marked failed with a distinctive reason."""
+
+    async def test_empty_content_marks_failed_not_downloaded(self, tmp_path):
+        empty_response = {**SAMPLE_JUDGMENT_RESPONSE, "content": ""}
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=empty_response,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        result = await scraper.download_all()
+
+        assert result.downloaded == 0
+        assert result.failed == 1
+        # No 0-byte HTML on disk
+        html_files = list(tmp_path.rglob("*.html"))
+        assert html_files == [], f"expected no HTML written, got {html_files}"
+
+    async def test_whitespace_only_content_marks_failed(self, tmp_path):
+        empty_response = {**SAMPLE_JUDGMENT_RESPONSE, "content": "   \n\t  "}
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=empty_response,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        result = await scraper.download_all()
+
+        assert result.downloaded == 0
+        assert result.failed == 1
+
+    async def test_normal_content_still_saved(self, tmp_path):
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        assert result.failed == 0
+
+
 class TestBulkScraperDownloadLang:
     async def test_download_uses_record_lang_for_tc_case(self, tmp_path):
         """A record with lang='tc' must hit getjudgment?lang=tc."""
