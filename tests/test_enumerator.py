@@ -102,6 +102,67 @@ class TestEnumerateCourt:
         cases = await enumerate_court("hkcfi", mock_get)
         assert cases == []
 
+    async def test_saves_raw_response_when_dir_given(self, tmp_path):
+        """save_response_to writes the raw JSON body for each page — audit
+        trail so an operator can reproduce 'what did HKLII list on this
+        date' from disk alone."""
+        response_data = {
+            "totalfiles": 1,
+            "judgments": [{**SAMPLE_ENTRY, "path": "/en/cases/hkcfi/2023/1"}],
+        }
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json=response_data)
+
+        await enumerate_court(
+            "hkcfi", mock_get, save_response_to=tmp_path,
+        )
+        # Expect exactly one file for this single-page response
+        court_dir = tmp_path / "hkcfi_en"
+        assert court_dir.exists()
+        files = list(court_dir.glob("*.json"))
+        assert len(files) == 1, f"expected 1 saved response, got {files}"
+        # Filename should include the page number
+        assert "page" in files[0].name
+        # Content is the full response
+        import json as _json
+        stored = _json.loads(files[0].read_text())
+        assert stored["totalfiles"] == 1
+
+    async def test_saves_one_file_per_page(self, tmp_path):
+        page1 = {
+            "totalfiles": 3,
+            "judgments": [{**SAMPLE_ENTRY, "path": f"/en/cases/hkcfi/2023/{i}"}
+                          for i in [1, 2]],
+        }
+        page2 = {
+            "totalfiles": 3,
+            "judgments": [{**SAMPLE_ENTRY, "path": "/en/cases/hkcfi/2023/3"}],
+        }
+        pages = [page1, page2]
+        idx = 0
+
+        async def mock_get(url, **kw):
+            nonlocal idx
+            data = pages[idx]
+            idx += 1
+            return httpx.Response(200, json=data)
+
+        await enumerate_court(
+            "hkcfi", mock_get, items_per_page=2, save_response_to=tmp_path,
+        )
+        files = sorted((tmp_path / "hkcfi_en").glob("*.json"))
+        assert len(files) == 2
+
+    async def test_no_save_when_dir_is_none(self, tmp_path):
+        response_data = {"totalfiles": 0, "judgments": []}
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json=response_data)
+
+        await enumerate_court("hkcfi", mock_get, save_response_to=None)
+        assert list(tmp_path.iterdir()) == []
+
     async def test_on_page_callback(self):
         pages_seen = []
 
