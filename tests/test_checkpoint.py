@@ -114,6 +114,49 @@ class TestCheckpointDB:
         db.close()
 
 
+class TestIntegrityCheck:
+    def test_healthy_db_opens_fine(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db_path = tmp_path / "cp.db"
+        db = CheckpointDB(str(db_path))
+        db.close()
+        # And reopens cleanly
+        db2 = CheckpointDB(str(db_path))
+        db2.close()
+
+    def test_corrupt_db_raises(self, tmp_path):
+        """A DB whose integrity_check returns anything but 'ok' must
+        refuse to open — better a loud abort than silent bad state."""
+        from unittest.mock import patch
+        from hklii_downloader.checkpoint import (
+            CheckpointDB, CheckpointCorruptError,
+        )
+        import sqlite3
+
+        db_path = tmp_path / "cp.db"
+        CheckpointDB(str(db_path)).close()
+
+        real_execute = sqlite3.Connection.execute
+
+        class FakeCursor:
+            def fetchone(self):
+                return ("corruption in root page 3",)
+
+        def patched_execute(self, sql, *args, **kw):
+            if "integrity_check" in sql.lower():
+                return FakeCursor()
+            return real_execute(self, sql, *args, **kw)
+
+        with patch.object(sqlite3.Connection, "execute", patched_execute):
+            raised = None
+            try:
+                CheckpointDB(str(db_path))
+            except CheckpointCorruptError as e:
+                raised = e
+        assert raised is not None
+        assert "corruption" in str(raised)
+
+
 class TestProcessLock:
     def test_second_open_on_same_path_raises(self, tmp_path):
         from hklii_downloader.checkpoint import CheckpointDB, CheckpointLockError
