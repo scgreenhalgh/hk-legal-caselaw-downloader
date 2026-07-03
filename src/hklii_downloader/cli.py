@@ -162,6 +162,12 @@ BULK_FORMATS = {"html", "txt", "json"}
     default=False,
     help="Fetch appeal history JSON for each judgment.",
 )
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "tc", "both"]),
+    default="both",
+    help="Which language(s) to enumerate. Default: both (English + Chinese, en wins for bilingual cases).",
+)
 def scrape(
     output: Path,
     formats: tuple[str, ...],
@@ -174,6 +180,7 @@ def scrape(
     yes: bool,
     with_summaries: bool,
     with_appeal_history: bool,
+    lang: str,
 ) -> None:
     """Bulk scrape judgments from HKLII courts.
 
@@ -202,6 +209,7 @@ def scrape(
         click.secho("Note: .doc disabled in bulk mode. Use --allow-doc to enable.", fg="yellow", err=True)
 
     court_list = courts.split(",") if courts else DEFAULT_COURTS
+    langs: tuple[str, ...] = ("en", "tc") if lang == "both" else (lang,)
 
     asyncio.run(_run_scrape(
         output=output,
@@ -213,6 +221,7 @@ def scrape(
         resume=resume,
         with_summaries=with_summaries,
         with_appeal_history=with_appeal_history,
+        langs=langs,
     ))
 
 
@@ -454,6 +463,7 @@ async def _run_scrape(
     resume: bool,
     with_summaries: bool = False,
     with_appeal_history: bool = False,
+    langs: tuple[str, ...] = ("en", "tc"),
 ) -> None:
     from .checkpoint import CheckpointDB
     from .proxy_pool import ProxyPool
@@ -497,8 +507,8 @@ async def _run_scrape(
             with_appeal_history=with_appeal_history,
         )
 
-        click.echo(f"Enumerating courts: {', '.join(court_list)}")
-        total = await scraper.enumerate(court_list)
+        click.echo(f"Enumerating courts: {', '.join(court_list)}  langs: {', '.join(langs)}")
+        total = await scraper.enumerate(court_list, langs=langs)
         click.echo(f"Found {total} cases.")
 
         db.release_in_progress()

@@ -220,7 +220,7 @@ class TestScrapeSubcommand:
             return PreflightResult(home_ip="203.0.113.1",
                                     healthy_proxies=["http://localhost:8888"])
 
-        async def noop_enumerate(self, courts): return 0
+        async def noop_enumerate(self, courts, langs=("en", "tc")): return 0
 
         with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
              patch("hklii_downloader.scraper.BulkScraper", make_capturing_bulkscraper()), \
@@ -341,7 +341,7 @@ class TestEnrichSubcommand:
             return PreflightResult(home_ip="203.0.113.1",
                                     healthy_proxies=["http://localhost:8888"])
 
-        async def noop_enumerate(self, courts): return 0
+        async def noop_enumerate(self, courts, langs=("en", "tc")): return 0
 
         with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
              patch("hklii_downloader.scraper.BulkScraper", make_capturing_bulkscraper()), \
@@ -387,7 +387,7 @@ class TestEnrichSubcommand:
                 failed_proxies=[],
             )
 
-        async def noop_enumerate(self, courts):
+        async def noop_enumerate(self, courts, langs=("en", "tc")):
             return 0  # skip enumeration, use existing DB rows
 
         async def noop_download_all(self, on_progress=None):
@@ -439,7 +439,7 @@ class TestEnrichSubcommand:
                 healthy_proxies=["http://localhost:8888"],
             )
 
-        async def noop_enumerate(self, courts):
+        async def noop_enumerate(self, courts, langs=("en", "tc")):
             return 0
 
         with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
