@@ -90,7 +90,13 @@ class BulkScraper:
                         return
                     stats["dispatched"] += 1
 
-                success = await self._download_one(record)
+                try:
+                    success = await self._download_one(record)
+                except Exception:
+                    # Belt-and-braces: _download_one catches known errors
+                    # already; this guard prevents an unforeseen bug from
+                    # cancelling sibling workers via asyncio.gather.
+                    success = False
                 async with counter_lock:
                     if success:
                         stats["downloaded"] += 1
@@ -99,7 +105,10 @@ class BulkScraper:
                     if on_progress is not None:
                         on_progress(stats)
 
-        await asyncio.gather(*[worker() for _ in range(self._workers)])
+        await asyncio.gather(
+            *[worker() for _ in range(self._workers)],
+            return_exceptions=True,
+        )
         return ScrapeResult(
             downloaded=stats["downloaded"], failed=stats["failed"],
         )
