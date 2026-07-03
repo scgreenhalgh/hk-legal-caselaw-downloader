@@ -11,6 +11,10 @@ class CheckpointLockError(RuntimeError):
     """Another process holds the checkpoint DB lock."""
 
 
+class CheckpointCorruptError(RuntimeError):
+    """PRAGMA integrity_check reported corruption."""
+
+
 @dataclass
 class CaseRecord:
     court: str
@@ -57,9 +61,18 @@ class CheckpointDB:
         self._conn = sqlite3.connect(path)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        self._check_integrity(path)
         self._conn.execute(_SCHEMA)
         self._migrate_enrichment_columns()
         self._conn.commit()
+
+    def _check_integrity(self, path: str) -> None:
+        row = self._conn.execute("PRAGMA integrity_check").fetchone()
+        if row and row[0] != "ok":
+            self._conn.close()
+            raise CheckpointCorruptError(
+                f"integrity_check failed for {path}: {row[0]}"
+            )
 
     def _acquire_lock(self, path: str) -> None:
         lock_path = str(path) + ".lock"

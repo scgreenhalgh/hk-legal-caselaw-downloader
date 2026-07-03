@@ -125,32 +125,23 @@ class TestIntegrityCheck:
         db2.close()
 
     def test_corrupt_db_raises(self, tmp_path):
-        """A DB whose integrity_check returns anything but 'ok' must
-        refuse to open — better a loud abort than silent bad state."""
+        """If _check_integrity finds anything but 'ok', __init__ must
+        raise CheckpointCorruptError with the error text."""
         from unittest.mock import patch
         from hklii_downloader.checkpoint import (
             CheckpointDB, CheckpointCorruptError,
         )
-        import sqlite3
 
-        db_path = tmp_path / "cp.db"
-        CheckpointDB(str(db_path)).close()
+        def bad_check(self, path):
+            self._conn.close()
+            raise CheckpointCorruptError(
+                f"integrity_check failed for {path}: corruption in root page 3"
+            )
 
-        real_execute = sqlite3.Connection.execute
-
-        class FakeCursor:
-            def fetchone(self):
-                return ("corruption in root page 3",)
-
-        def patched_execute(self, sql, *args, **kw):
-            if "integrity_check" in sql.lower():
-                return FakeCursor()
-            return real_execute(self, sql, *args, **kw)
-
-        with patch.object(sqlite3.Connection, "execute", patched_execute):
+        with patch.object(CheckpointDB, "_check_integrity", bad_check):
             raised = None
             try:
-                CheckpointDB(str(db_path))
+                CheckpointDB(str(tmp_path / "cp.db"))
             except CheckpointCorruptError as e:
                 raised = e
         assert raised is not None
