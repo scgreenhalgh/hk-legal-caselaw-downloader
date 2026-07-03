@@ -100,3 +100,38 @@ class TestExtractPressSummaryUrls:
         assert fn is not None
         assert fn("<p>no summaries here</p>") == {}
         assert fn("") == {}
+
+
+class TestExtractPressSummaryUrlsRobust:
+    """Regex-only extraction silently returns {} on plausible markup tweaks.
+    BS4-based extractor should handle case, wrapping tags, single-quoted
+    href, and lang name variants."""
+
+    def _fn(self):
+        from hklii_downloader.enumerator import extract_press_summary_urls
+        return extract_press_summary_urls
+
+    def test_case_insensitive_press_summary(self):
+        html = '''<a href="/x/en.htm">press summary (English)</a>'''
+        assert "English" in self._fn()(html)
+
+    def test_wrapping_span_inside_anchor(self):
+        html = '''<a href="/x/en.htm"><span>Press Summary (English)</span></a>'''
+        result = self._fn()(html)
+        assert result.get("English", "").endswith("en.htm")
+
+    def test_single_quoted_href(self):
+        html = "<a href='/x/en.htm'>Press Summary (English)</a>"
+        assert self._fn()(html).get("English", "").endswith("en.htm")
+
+    def test_extra_attrs_before_href(self):
+        html = '''<a class="foo" title="prev>next" href="/x/en.htm" onclick="x()">Press Summary (English)</a>'''
+        assert self._fn()(html).get("English", "").endswith("en.htm")
+
+    def test_extracts_from_real_hklii_markup(self):
+        """Actual anchor from CFA case 25 with newlines and extra whitespace."""
+        html = '''<a href="/doc/judg/html/vetted/other/en/2025/FACC000003_2025_files/FACC000003_2025ES.htm" onclick="window.open(this.href,'popupwindow');return false;">
+        Press Summary (English)
+       </a>'''
+        result = self._fn()(html)
+        assert result.get("English", "").endswith("ES.htm")
