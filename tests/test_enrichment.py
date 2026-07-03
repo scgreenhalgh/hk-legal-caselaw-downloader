@@ -123,6 +123,62 @@ class TestSavePressSummaryLocal:
             save_press_summary_local("<p>x</p>", tmp_path, "stem", "fr")
 
 
+class TestEnrichSummariesForCase:
+    async def test_oserror_during_save_marks_failed(self, tmp_path):
+        """Disk-full (or EACCES/EROFS) during save must mark_enrichment
+        failed with a descriptive error, not silently leave 'pending'."""
+        from unittest.mock import patch
+        from hklii_downloader.enrichment import enrich_summaries_for_case
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-01-01")
+        html = ('<a href="/doc/foo/es.htm">Press Summary (English)</a>')
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, text="<html>en body</html>",
+                                  request=httpx.Request("GET", url))
+
+        with patch("pathlib.Path.write_text",
+                   side_effect=OSError("[Errno 28] No space left on device")):
+            await enrich_summaries_for_case(
+                mock_get, db, "hkcfa", 2026, 25,
+                "hkcfa_2026_25", tmp_path, html,
+            )
+
+        row = db.get_enrichment("hkcfa", 2026, 25)
+        assert row["summary_en"] == "failed", (
+            f"OSError during save should mark failed, got {row['summary_en']}"
+        )
+        errs = db.get_enrichment_errors("hkcfa", 2026, 25)
+        assert "summary_en" in errs
+        assert "No space" in errs["summary_en"] or "Errno 28" in errs["summary_en"]
+
+
+class TestEnrichAppealHistoryForCase:
+    async def test_oserror_during_save_marks_failed(self, tmp_path):
+        from unittest.mock import patch
+        from hklii_downloader.enrichment import enrich_appeal_history_for_case
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-01-01")
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=[{"act": "FACC3/2025", "judgments": []}],
+                                  request=httpx.Request("GET", url))
+
+        with patch("pathlib.Path.write_text",
+                   side_effect=OSError("[Errno 30] Read-only file system")):
+            await enrich_appeal_history_for_case(
+                mock_get, db, "hkcfa", 2026, 25,
+                "hkcfa_2026_25", tmp_path, "FACC3/2025",
+            )
+
+        row = db.get_enrichment("hkcfa", 2026, 25)
+        assert row["appeal_history"] == "failed"
+
+
 class TestSaveAppealHistoryLocal:
     def test_saves_as_json(self, tmp_path):
         from hklii_downloader.enrichment import save_appeal_history_local
