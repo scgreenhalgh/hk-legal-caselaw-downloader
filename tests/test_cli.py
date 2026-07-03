@@ -116,6 +116,81 @@ class TestScrapeSubcommand:
         assert "--with-summaries" in result.output
         assert "--with-appeal-history" in result.output
 
+    def test_scrape_help_lists_lang_flag(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape", "--help"])
+        assert "--lang" in result.output
+
+    def test_scrape_lang_flag_reaches_enumerate(self, tmp_path):
+        """--lang en should skip the tc sweep."""
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+        captured = {}
+
+        def make_capturing_bulkscraper():
+            from hklii_downloader import scraper as scraper_mod
+            OrigBulkScraper = scraper_mod.BulkScraper
+
+            class CapturingBulkScraper(OrigBulkScraper):
+                async def enumerate(self, courts, langs=("en", "tc")):
+                    captured["langs"] = tuple(langs)
+                    return 0
+            return CapturingBulkScraper
+
+        async def ok_preflight(self):
+            return PreflightResult(home_ip="203.0.113.1",
+                                    healthy_proxies=["http://localhost:8888"])
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.scraper.BulkScraper", make_capturing_bulkscraper()), \
+             patch("hklii_downloader.cli.BulkScraper",
+                   make_capturing_bulkscraper(), create=True):
+            runner = CliRunner()
+            runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--lang", "en",
+            ])
+        assert captured.get("langs") == ("en",)
+
+    def test_scrape_lang_default_is_both(self, tmp_path):
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+        captured = {}
+
+        def make_capturing_bulkscraper():
+            from hklii_downloader import scraper as scraper_mod
+            OrigBulkScraper = scraper_mod.BulkScraper
+
+            class CapturingBulkScraper(OrigBulkScraper):
+                async def enumerate(self, courts, langs=("en", "tc")):
+                    captured["langs"] = tuple(langs)
+                    return 0
+            return CapturingBulkScraper
+
+        async def ok_preflight(self):
+            return PreflightResult(home_ip="203.0.113.1",
+                                    healthy_proxies=["http://localhost:8888"])
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.scraper.BulkScraper", make_capturing_bulkscraper()), \
+             patch("hklii_downloader.cli.BulkScraper",
+                   make_capturing_bulkscraper(), create=True):
+            runner = CliRunner()
+            runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+            ])
+        assert captured.get("langs") == ("en", "tc")
+
     def test_scrape_default_no_enrichment(self, tmp_path):
         from unittest.mock import patch
         from hklii_downloader.proxy_pool import PreflightResult
