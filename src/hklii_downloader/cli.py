@@ -13,7 +13,22 @@ VALID_FORMATS = {"html", "txt", "json", "doc"}
 DEFAULT_CONCURRENCY = 5
 
 
-@click.command()
+class MutuallyExclusiveOption(click.Option):
+    def handle_parse_result(self, ctx, opts, args):
+        if "proxy" in opts and "direct" in opts:
+            raise click.UsageError("--proxy and --direct are mutually exclusive.")
+        return super().handle_parse_result(ctx, opts, args)
+
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def main(ctx):
+    """HKLII judgment downloader."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+@main.command()
 @click.argument("urls", nargs=-1, required=True)
 @click.option(
     "-o", "--output",
@@ -33,7 +48,14 @@ DEFAULT_CONCURRENCY = 5
     "-p", "--proxy",
     type=str,
     default=None,
+    cls=MutuallyExclusiveOption,
     help="Proxy URL, e.g. socks5://127.0.0.1:1080 or http://user:pass@host:port",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
 )
 @click.option(
     "-c", "--concurrency",
@@ -41,23 +63,27 @@ DEFAULT_CONCURRENCY = 5
     default=DEFAULT_CONCURRENCY,
     help=f"Max concurrent downloads (default: {DEFAULT_CONCURRENCY})",
 )
-def main(
+def download(
     urls: tuple[str, ...],
     output: Path,
     formats: tuple[str, ...],
     proxy: str | None,
+    direct: bool,
     concurrency: int,
 ) -> None:
-    """Download judgments from HKLII.
+    """Download specific judgments from HKLII.
 
     Pass one or more HKLII case URLs, e.g.:
 
-      hklii https://www.hklii.hk/en/cases/hkcfa/2023/32
+      hklii download https://www.hklii.hk/en/cases/hkcfa/2023/32
 
     Multiple URLs can be provided:
 
-      hklii URL1 URL2 URL3
+      hklii download URL1 URL2 URL3
     """
+    if not proxy and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+
     asyncio.run(_run(urls, output, set(formats), proxy, concurrency))
 
 
