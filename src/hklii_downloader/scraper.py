@@ -104,7 +104,7 @@ class BulkScraper:
 
     async def _download_one(self, record: CaseRecord) -> bool:
         case = HKLIICase(
-            lang="en", court=record.court,
+            lang=record.lang, court=record.court,
             year=record.year, number=record.number,
         )
 
