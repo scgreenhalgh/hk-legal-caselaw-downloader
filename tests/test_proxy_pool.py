@@ -278,6 +278,30 @@ class TestProxyPool:
         assert len(result.failed_proxies) == 1
         assert "8889" in result.failed_proxies[0]
 
+    async def test_preflight_falls_back_when_primary_echo_is_down(self):
+        home_ip = "203.0.113.1"
+        proxy_ip = "198.51.100.5"
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin.org" in url:
+                    return httpx.Response(503, text="Service unavailable")
+                if "ipinfo.io" in url:
+                    ip = home_ip if proxy_url is None else proxy_ip
+                    return httpx.Response(200, json={"ip": ip})
+                return httpx.Response(404)
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=make_transport,
+        )
+        result = await pool.preflight()
+
+        assert result.home_ip == home_ip
+        assert result.healthy_proxies == ["http://localhost:8888"]
+
     async def test_close_cleans_up(self):
         pool = ProxyPool(
             proxy_urls=["http://localhost:8888"],
