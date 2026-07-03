@@ -302,6 +302,34 @@ class TestProxyPool:
         assert result.home_ip == home_ip
         assert result.healthy_proxies == ["http://localhost:8888"]
 
+    async def test_preflight_falls_back_when_primary_returns_non_json(self):
+        """Corporate SSL-intercepting proxies and captive portals often return
+        200 + HTML. Preflight must fall through to ipinfo.io."""
+        home_ip = "203.0.113.1"
+        proxy_ip = "198.51.100.5"
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin.org" in url:
+                    return httpx.Response(
+                        200,
+                        text="<html><title>Captive portal login</title></html>",
+                    )
+                if "ipinfo.io" in url:
+                    ip = home_ip if proxy_url is None else proxy_ip
+                    return httpx.Response(200, json={"ip": ip})
+                return httpx.Response(404)
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=make_transport,
+        )
+        result = await pool.preflight()
+        assert result.home_ip == home_ip
+        assert result.healthy_proxies == ["http://localhost:8888"]
+
     def test_client_uses_generous_timeout(self):
         """Real getcasefiles requests via VPN take 10+s; httpx default of 5s
         times out. Client must be built with a larger timeout."""

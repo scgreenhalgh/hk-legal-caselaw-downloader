@@ -142,3 +142,98 @@ class TestEnumerateCourt:
         )
         assert calls == 3
         assert len(cases) == 1
+
+    async def test_retries_transient_read_error(self):
+        response_data = {
+            "totalfiles": 1,
+            "judgments": [{**SAMPLE_ENTRY, "path": "/en/cases/hkcfi/2023/1"}],
+        }
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 2:
+                raise httpx.ReadError("connection reset by peer")
+            return httpx.Response(200, json=response_data)
+
+        cases = await enumerate_court("hkcfi", mock_get, backoff_base=0.0)
+        assert calls == 2, (
+            f"expected ReadError to be retried, got calls={calls}"
+        )
+        assert len(cases) == 1
+
+    async def test_retries_transient_remote_protocol_error(self):
+        response_data = {
+            "totalfiles": 1,
+            "judgments": [{**SAMPLE_ENTRY, "path": "/en/cases/hkcfi/2023/1"}],
+        }
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 2:
+                raise httpx.RemoteProtocolError("server closed mid-header")
+            return httpx.Response(200, json=response_data)
+
+        cases = await enumerate_court("hkcfi", mock_get, backoff_base=0.0)
+        assert calls == 2
+        assert len(cases) == 1
+
+    async def test_retries_on_429(self):
+        response_data = {
+            "totalfiles": 1,
+            "judgments": [{**SAMPLE_ENTRY, "path": "/en/cases/hkcfi/2023/1"}],
+        }
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 2:
+                return httpx.Response(429, text="<html>Rate limited</html>")
+            return httpx.Response(200, json=response_data)
+
+        cases = await enumerate_court("hkcfi", mock_get, backoff_base=0.0)
+        assert calls == 2, f"expected 429 to be retried, got calls={calls}"
+        assert len(cases) == 1
+
+    async def test_retries_on_5xx(self):
+        response_data = {
+            "totalfiles": 1,
+            "judgments": [{**SAMPLE_ENTRY, "path": "/en/cases/hkcfi/2023/1"}],
+        }
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return httpx.Response(503, text="<html>Bad gateway</html>")
+            return httpx.Response(200, json=response_data)
+
+        cases = await enumerate_court("hkcfi", mock_get, backoff_base=0.0)
+        assert calls == 3, f"expected 503 to be retried, got calls={calls}"
+        assert len(cases) == 1
+
+    async def test_permanent_404_does_not_retry(self):
+        calls = 0
+
+        async def mock_get(url, **kwargs):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(404, text="not found")
+
+        raised = None
+        try:
+            await enumerate_court(
+                "hkcfi", mock_get, max_retries=3, backoff_base=0.0,
+            )
+        except Exception as e:
+            raised = e
+        assert raised is not None, "404 must raise, not silently return empty"
+        assert isinstance(raised, httpx.HTTPStatusError), (
+            f"expected HTTPStatusError on 404, got {type(raised).__name__}"
+        )
+        assert calls == 1, f"404 must not be retried, got calls={calls}"
