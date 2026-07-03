@@ -258,41 +258,49 @@ async def _run_scrape(
         workers = 1
     else:
         pool = ProxyPool(proxy_urls=proxies)
-        click.echo("Running preflight IP checks...")
-        result = await pool.preflight()
-        click.echo(f"Home IP: {result.home_ip}")
-        click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
-        if result.leaked_proxies:
-            click.secho(f"Leaked proxies: {result.leaked_proxies}", fg="red", err=True)
-        if result.failed_proxies:
-            click.secho(f"Failed proxies: {result.failed_proxies}", fg="yellow", err=True)
-        workers = max(1, len(result.healthy_proxies))
 
-    scraper = BulkScraper(
-        get=pool.get,
-        checkpoint=db,
-        output_dir=output,
-        formats=fmt_set,
-        limit=limit,
-        workers=workers,
-    )
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if result.leaked_proxies:
+                click.secho(f"Leaked proxies: {result.leaked_proxies}", fg="red", err=True)
+            if result.failed_proxies:
+                click.secho(f"Failed proxies: {result.failed_proxies}", fg="yellow", err=True)
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight — every proxy was leaked "
+                    "or unreachable. Fix the pool (or use --direct) and retry."
+                )
+            workers = max(1, len(result.healthy_proxies))
 
-    click.echo(f"Enumerating courts: {', '.join(court_list)}")
-    total = await scraper.enumerate(court_list)
-    click.echo(f"Found {total} cases.")
+        scraper = BulkScraper(
+            get=pool.get,
+            checkpoint=db,
+            output_dir=output,
+            formats=fmt_set,
+            limit=limit,
+            workers=workers,
+        )
 
-    stats = db.stats()
-    click.echo(f"Pending: {stats['pending']}, Downloaded: {stats['downloaded']}, Failed: {stats['failed']}")
+        click.echo(f"Enumerating courts: {', '.join(court_list)}")
+        total = await scraper.enumerate(court_list)
+        click.echo(f"Found {total} cases.")
 
-    if stats["pending"] == 0:
-        click.echo("Nothing to download.")
-    else:
-        target = limit if limit is not None else stats["pending"]
-        result = await _download_with_progress(scraper, target)
-        click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
+        stats = db.stats()
+        click.echo(f"Pending: {stats['pending']}, Downloaded: {stats['downloaded']}, Failed: {stats['failed']}")
 
-    await pool.close()
-    db.close()
+        if stats["pending"] == 0:
+            click.echo("Nothing to download.")
+        else:
+            target = limit if limit is not None else stats["pending"]
+            result = await _download_with_progress(scraper, target)
+            click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
+    finally:
+        await pool.close()
+        db.close()
 
 
 _print_lock = asyncio.Lock()
