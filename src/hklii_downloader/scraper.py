@@ -18,7 +18,8 @@ from .enumerator import enumerate_court
 from .parser import HKLIICase
 
 _PERMANENT_ERRORS = {404, 410}
-_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
+_BODY_PREVIEW_LEN = 200
 
 
 @dataclass
@@ -132,18 +133,24 @@ class BulkScraper:
                 if attempt < self._max_retries:
                     await asyncio.sleep(self._backoff_base * (2 ** attempt))
                     continue
+                preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
                 self._checkpoint.mark_failed(
                     record.court, record.year, record.number,
-                    f"HTTP {resp.status_code} after {self._max_retries} retries",
+                    f"HTTP {resp.status_code} after {self._max_retries} retries; body: {preview}",
                 )
                 return False
 
             try:
                 data = resp.json()
             except json.JSONDecodeError:
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                    continue
+                preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
                 self._checkpoint.mark_failed(
                     record.court, record.year, record.number,
-                    "JSONDecodeError",
+                    f"JSONDecodeError after {self._max_retries} retries; "
+                    f"HTTP {resp.status_code}; body: {preview}",
                 )
                 return False
 
