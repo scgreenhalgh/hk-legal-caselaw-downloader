@@ -152,34 +152,16 @@ class TestProxyPool:
         )
         assert len(pool.sessions) == 2
 
-    def test_round_robin_cycles(self):
-        pool = ProxyPool(
-            proxy_urls=["http://a:1", "http://b:2", "http://c:3"],
-            _transport_factory=_noop_transport,
-        )
-        picks = [pool._next_healthy_session() for _ in range(6)]
-        urls = [s.proxy_url for s in picks]
-        assert urls == ["http://a:1", "http://b:2", "http://c:3"] * 2
-
-    def test_round_robin_skips_dead(self):
-        pool = ProxyPool(
-            proxy_urls=["http://a:1", "http://b:2", "http://c:3"],
-            _transport_factory=_noop_transport,
-        )
-        pool.sessions[1].kill()
-        picks = [pool._next_healthy_session() for _ in range(4)]
-        urls = [s.proxy_url for s in picks]
-        assert urls == ["http://a:1", "http://c:3", "http://a:1", "http://c:3"]
-
-    def test_all_dead_raises(self):
+    async def test_all_dead_raises(self):
         pool = ProxyPool(
             proxy_urls=["http://a:1", "http://b:2"],
             _transport_factory=_noop_transport,
         )
+        pool._preflight_done = True
         pool.sessions[0].kill()
         pool.sessions[1].kill()
         with pytest.raises(AllProxiesDeadError):
-            pool._next_healthy_session()
+            await pool.get("https://example.com")
 
     async def test_preflight_detects_ip_leak(self):
         home_ip = "203.0.113.1"

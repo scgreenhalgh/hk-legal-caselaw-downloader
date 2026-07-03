@@ -197,13 +197,12 @@ class ProxyPool:
         self._transport_factory = _transport_factory
         self._preflight_done = direct
         self._home_ip: str | None = None
-        self._round_robin_index = 0
 
         self.sessions: list[ProxySession] = []
         self._clients: dict[int, httpx.AsyncClient] = {}
         self._throttlers: dict[int, RequestThrottler] = {}
         self._headers: dict[int, HeaderRotator] = {}
-        self._locks: dict[int, asyncio.Lock] = {}
+        self._available: asyncio.Queue[int] = asyncio.Queue()
 
         for i, url in enumerate(proxy_urls):
             session = ProxySession(
@@ -215,7 +214,7 @@ class ProxyPool:
             self._clients[i] = self._make_client(url)
             self._throttlers[i] = RequestThrottler(rng=random.Random(i))
             self._headers[i] = HeaderRotator(rng=random.Random(i + 1000))
-            self._locks[i] = asyncio.Lock()
+            self._available.put_nowait(i)
 
         if direct:
             self._direct_client = self._make_client(None)
@@ -285,12 +284,13 @@ class ProxyPool:
         if self.direct:
             return await self._direct_client.get(url, **kwargs)
 
-        session = self._next_healthy_session()
-        client = self._clients[session.index]
-        throttler = self._throttlers[session.index]
-        headers = self._headers[session.index]
+        idx = await self._acquire_session()
+        session = self.sessions[idx]
+        client = self._clients[idx]
+        throttler = self._throttlers[idx]
+        headers = self._headers[idx]
 
-        async with self._locks[session.index]:
+        try:
             delay = throttler.next_delay()
             await asyncio.sleep(delay)
 
@@ -308,6 +308,22 @@ class ProxyPool:
             except httpx.RequestError:
                 session.record_failure()
                 raise
+        finally:
+            if session.is_healthy:
+                self._available.put_nowait(idx)
+
+    async def _acquire_session(self) -> int:
+        while True:
+            if not any(s.is_healthy for s in self.sessions):
+                raise AllProxiesDeadError("All proxy sessions are dead")
+            try:
+                idx = await asyncio.wait_for(
+                    self._available.get(), timeout=0.5,
+                )
+            except asyncio.TimeoutError:
+                continue
+            if self.sessions[idx].is_healthy:
+                return idx
 
     async def _runtime_ip_check(
         self, session: ProxySession, client: httpx.AsyncClient,
@@ -331,16 +347,6 @@ class ProxyPool:
                 f"Proxy {session.proxy_url} leaking home IP {self._home_ip} "
                 f"(verified twice)"
             )
-
-    def _next_healthy_session(self) -> ProxySession:
-        start = self._round_robin_index
-        n = len(self.sessions)
-        for _ in range(n):
-            session = self.sessions[self._round_robin_index % n]
-            self._round_robin_index = (self._round_robin_index + 1) % n
-            if session.is_healthy:
-                return session
-        raise AllProxiesDeadError("All proxy sessions are dead")
 
     async def close(self) -> None:
         for client in self._clients.values():
