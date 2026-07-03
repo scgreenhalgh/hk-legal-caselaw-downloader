@@ -59,23 +59,31 @@ class BulkScraper:
     async def download_all(self) -> ScrapeResult:
         self._checkpoint.release_in_progress()
 
-        downloaded = 0
-        failed = 0
+        counter_lock = asyncio.Lock()
+        stats = {"downloaded": 0, "failed": 0, "dispatched": 0}
 
-        while True:
-            if self._limit is not None and downloaded >= self._limit:
-                break
+        async def worker() -> None:
+            while True:
+                async with counter_lock:
+                    if (self._limit is not None
+                            and stats["dispatched"] >= self._limit):
+                        return
+                    record = self._checkpoint.claim_pending()
+                    if record is None:
+                        return
+                    stats["dispatched"] += 1
 
-            record = self._checkpoint.claim_pending()
-            if record is None:
-                break
+                success = await self._download_one(record)
+                async with counter_lock:
+                    if success:
+                        stats["downloaded"] += 1
+                    else:
+                        stats["failed"] += 1
 
-            if await self._download_one(record):
-                downloaded += 1
-            else:
-                failed += 1
-
-        return ScrapeResult(downloaded=downloaded, failed=failed)
+        await asyncio.gather(*[worker() for _ in range(self._workers)])
+        return ScrapeResult(
+            downloaded=stats["downloaded"], failed=stats["failed"],
+        )
 
     async def _download_one(self, record: CaseRecord) -> bool:
         case = HKLIICase(

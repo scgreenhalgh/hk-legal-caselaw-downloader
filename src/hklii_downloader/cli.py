@@ -219,6 +219,7 @@ async def _run_scrape(
 
     if direct:
         pool = ProxyPool(proxy_urls=[], direct=True)
+        workers = 1
     else:
         pool = ProxyPool(proxy_urls=proxies)
         click.echo("Running preflight IP checks...")
@@ -229,6 +230,7 @@ async def _run_scrape(
             click.secho(f"Leaked proxies: {result.leaked_proxies}", fg="red", err=True)
         if result.failed_proxies:
             click.secho(f"Failed proxies: {result.failed_proxies}", fg="yellow", err=True)
+        workers = max(1, len(result.healthy_proxies))
 
     scraper = BulkScraper(
         get=pool.get,
@@ -236,6 +238,7 @@ async def _run_scrape(
         output_dir=output,
         formats=fmt_set,
         limit=limit,
+        workers=workers,
     )
 
     click.echo(f"Enumerating courts: {', '.join(court_list)}")
