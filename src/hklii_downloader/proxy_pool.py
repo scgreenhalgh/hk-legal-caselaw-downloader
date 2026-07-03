@@ -224,8 +224,13 @@ class ProxyPool:
             return httpx.AsyncClient(
                 transport=self._transport_factory(proxy_url),
                 trust_env=False,
+                timeout=httpx.Timeout(30.0),
             )
-        kwargs: dict = {"trust_env": False, "follow_redirects": True}
+        kwargs: dict = {
+            "trust_env": False,
+            "follow_redirects": True,
+            "timeout": httpx.Timeout(30.0),
+        }
         if proxy_url:
             kwargs["proxy"] = proxy_url
         return httpx.AsyncClient(**kwargs)
