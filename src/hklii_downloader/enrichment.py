@@ -7,7 +7,9 @@ array of related judgments across the appeal chain.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 from urllib.parse import quote
@@ -16,6 +18,12 @@ import httpx
 
 _BASE_URL = "https://www.hklii.hk"
 _VALID_LANGS = ("en", "zh")
+
+
+@dataclass
+class EnrichmentResult:
+    processed: int
+    failed: int
 
 
 async def fetch_press_summary(url_or_path: str, get: Callable) -> str:
@@ -96,3 +104,123 @@ async def enrich_appeal_history_for_case(
             court, year, number, "appeal_history", "failed",
             error=f"{type(e).__name__}: {e}",
         )
+
+
+class EnrichmentRunner:
+    """Backfill missing summaries / appeal history for already-downloaded
+    judgments by re-reading the on-disk HTML + JSON files.
+
+    Contrast with BulkScraper — this runner never fetches judgments itself;
+    it operates on cases already marked status='downloaded' in the checkpoint.
+    """
+
+    def __init__(
+        self,
+        get: Callable,
+        checkpoint,
+        output_dir: Path,
+        do_summaries: bool = True,
+        do_appeal_history: bool = True,
+        workers: int = 1,
+        limit: int | None = None,
+    ):
+        self._get = get
+        self._checkpoint = checkpoint
+        self._output_dir = Path(output_dir)
+        self._do_summaries = do_summaries
+        self._do_appeal_history = do_appeal_history
+        self._workers = workers
+        self._limit = limit
+
+    async def enrich_all(
+        self, on_progress: Callable[[dict], None] | None = None,
+    ) -> EnrichmentResult:
+        kinds: list[str] = []
+        if self._do_summaries:
+            kinds += ["summary_en", "summary_zh"]
+        if self._do_appeal_history:
+            kinds.append("appeal_history")
+        if not kinds:
+            return EnrichmentResult(processed=0, failed=0)
+
+        cases = self._checkpoint.pending_any_enrichment(kinds)
+        if self._limit is not None:
+            cases = cases[: self._limit]
+
+        counter_lock = asyncio.Lock()
+        stats = {"processed": 0, "failed": 0}
+        idx = {"i": 0}
+
+        async def worker() -> None:
+            while True:
+                async with counter_lock:
+                    if idx["i"] >= len(cases):
+                        return
+                    case = cases[idx["i"]]
+                    idx["i"] += 1
+                try:
+                    await self._enrich_one(case)
+                    async with counter_lock:
+                        stats["processed"] += 1
+                except Exception:
+                    async with counter_lock:
+                        stats["failed"] += 1
+                async with counter_lock:
+                    if on_progress is not None:
+                        on_progress(stats)
+
+        await asyncio.gather(*[worker() for _ in range(self._workers)])
+        return EnrichmentResult(
+            processed=stats["processed"], failed=stats["failed"],
+        )
+
+    async def _enrich_one(self, case) -> None:
+        court_dir = self._output_dir / case.court / str(case.year)
+        stem = f"{case.court}_{case.year}_{case.number}"
+        enrich = self._checkpoint.get_enrichment(
+            case.court, case.year, case.number,
+        )
+
+        if self._do_summaries and (
+            enrich["summary_en"] == "pending"
+            or enrich["summary_zh"] == "pending"
+        ):
+            html_path = court_dir / f"{stem}.html"
+            if not html_path.exists():
+                for kind in ("summary_en", "summary_zh"):
+                    if enrich[kind] == "pending":
+                        self._checkpoint.mark_enrichment(
+                            case.court, case.year, case.number, kind, "failed",
+                            error="html file missing on disk",
+                        )
+                return
+            content_html = html_path.read_text(encoding="utf-8")
+            await enrich_summaries_for_case(
+                self._get, self._checkpoint,
+                case.court, case.year, case.number,
+                stem, court_dir, content_html,
+            )
+
+        if self._do_appeal_history and enrich["appeal_history"] == "pending":
+            json_path = court_dir / f"{stem}.json"
+            if not json_path.exists():
+                self._checkpoint.mark_enrichment(
+                    case.court, case.year, case.number,
+                    "appeal_history", "failed",
+                    error="json sidecar missing on disk",
+                )
+                return
+            meta = json.loads(json_path.read_text(encoding="utf-8"))
+            case_number = meta.get("case_number", "")
+            if not case_number:
+                self._checkpoint.mark_enrichment(
+                    case.court, case.year, case.number,
+                    "appeal_history", "failed",
+                    error="case_number missing in json sidecar",
+                )
+                return
+            await enrich_appeal_history_for_case(
+                self._get, self._checkpoint,
+                case.court, case.year, case.number,
+                stem, court_dir, case_number,
+            )
