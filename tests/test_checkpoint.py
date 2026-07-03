@@ -114,6 +114,62 @@ class TestCheckpointDB:
         db.close()
 
 
+class TestFreshnessAndOrphans:
+    def test_upsert_sets_last_seen_at(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       last_seen_at=1700000000)
+        row = db._conn.execute(
+            "SELECT last_seen_at FROM cases WHERE court='hkcfi' AND number=1"
+        ).fetchone()
+        assert row[0] == 1700000000
+
+    def test_reupsert_updates_last_seen_at(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       last_seen_at=1000)
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       last_seen_at=2000)
+        row = db._conn.execute(
+            "SELECT last_seen_at FROM cases WHERE court='hkcfi' AND number=1"
+        ).fetchone()
+        assert row[0] == 2000
+
+    def test_find_orphans_returns_rows_older_than_ts(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       last_seen_at=1000)
+        db.upsert_case("hkcfi", 2023, 2, "N", "T", "2023-01-01",
+                       last_seen_at=2000)
+        orphans = db.find_orphans(as_of_ts=1500)
+        assert len(orphans) == 1
+        assert orphans[0].number == 1
+
+    def test_find_orphans_migration_treats_missing_ts_as_orphan(self, tmp_path):
+        """Rows migrated from an old DB (no last_seen_at) should surface
+        as orphans on the first freshness check so they get re-enumerated."""
+        import sqlite3
+        db_path = tmp_path / "cp.db"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""CREATE TABLE cases (
+            court TEXT NOT NULL, year INTEGER NOT NULL, number INTEGER NOT NULL,
+            neutral TEXT NOT NULL, title TEXT NOT NULL, date TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            formats TEXT, error TEXT,
+            PRIMARY KEY (court, year, number))""")
+        conn.execute("INSERT INTO cases VALUES ('hkcfi',2023,1,'N','T','2023-01-01','pending',NULL,NULL)")
+        conn.commit()
+        conn.close()
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(db_path))
+        orphans = db.find_orphans(as_of_ts=1000)
+        assert len(orphans) == 1
+
+
 class TestVerifyDownloaded:
     def test_missing_file_flips_row_to_pending(self, tmp_path):
         from hklii_downloader.checkpoint import CheckpointDB
