@@ -180,6 +180,12 @@ BULK_FORMATS = {"html", "txt", "json"}
     default=0,
     help="Skip (court, lang) enumeration if it happened within HOURS (default 0 = always re-enumerate).",
 )
+@click.option(
+    "--save-enum-responses",
+    is_flag=True,
+    default=False,
+    help="Save raw getcasefiles JSON responses to <output>/.enum_cache/ for provenance / audit.",
+)
 def scrape(
     output: Path,
     formats: tuple[str, ...],
@@ -195,6 +201,7 @@ def scrape(
     lang: str,
     retry_failed: bool,
     enum_max_age: int,
+    save_enum_responses: bool,
 ) -> None:
     """Bulk scrape judgments from HKLII courts.
 
@@ -238,6 +245,7 @@ def scrape(
         langs=langs,
         retry_failed=retry_failed,
         enum_max_age=enum_max_age,
+        save_enum_responses=save_enum_responses,
     ))
 
 
@@ -516,6 +524,7 @@ async def _run_scrape(
     langs: tuple[str, ...] = ("en", "tc"),
     retry_failed: bool = False,
     enum_max_age: int = 0,
+    save_enum_responses: bool = False,
 ) -> None:
     from .logging_setup import setup_logging
     log_path = setup_logging(output, "scrape")
@@ -561,6 +570,7 @@ async def _run_scrape(
             with_summaries=with_summaries,
             with_appeal_history=with_appeal_history,
             enum_max_age_hours=enum_max_age,
+            save_enum_responses=save_enum_responses,
         )
 
         if retry_failed:

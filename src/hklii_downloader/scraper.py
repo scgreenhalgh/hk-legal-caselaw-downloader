@@ -45,6 +45,7 @@ class BulkScraper:
         with_summaries: bool = False,
         with_appeal_history: bool = False,
         enum_max_age_hours: int = 0,
+        save_enum_responses: bool = False,
         _backoff_base: float = 1.0,
     ):
         self._get = get
@@ -57,6 +58,7 @@ class BulkScraper:
         self._with_summaries = with_summaries
         self._with_appeal_history = with_appeal_history
         self._enum_max_age_hours = enum_max_age_hours
+        self._save_enum_responses = save_enum_responses
         self._backoff_base = _backoff_base
 
     async def enumerate(
@@ -92,6 +94,10 @@ class BulkScraper:
                 # no matter what page size we pick.
                 entries = await enumerate_court(
                     court, self._get, lang=lang, items_per_page=10_000,
+                    save_response_to=(
+                        self._output_dir / ".enum_cache"
+                        if self._save_enum_responses else None
+                    ),
                 )
                 for entry in entries:
                     self._checkpoint.upsert_case(

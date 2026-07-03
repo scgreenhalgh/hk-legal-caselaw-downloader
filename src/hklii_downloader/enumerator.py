@@ -96,16 +96,35 @@ async def enumerate_court(
     on_page: Callable | None = None,
     max_retries: int = 3,
     backoff_base: float = 1.0,
+    save_response_to=None,
 ) -> list[CaseEntry]:
-    params = urlencode({
-        "caseDb": court,
-        "lang": lang,
-        "itemsPerPage": items_per_page,
-        "page": 1,
-    })
-    data = await _get_json_with_retry(
-        get, f"{_BASE_URL}/api/getcasefiles?{params}", max_retries, backoff_base,
-    )
+    from pathlib import Path
+    import time
+    save_dir: Path | None = None
+    ts = int(time.time())
+    if save_response_to is not None:
+        save_dir = Path(save_response_to) / f"{court}_{lang}"
+
+    async def _fetch_and_maybe_save(page_num: int) -> dict:
+        params = urlencode({
+            "caseDb": court,
+            "lang": lang,
+            "itemsPerPage": items_per_page,
+            "page": page_num,
+        })
+        data = await _get_json_with_retry(
+            get, f"{_BASE_URL}/api/getcasefiles?{params}",
+            max_retries, backoff_base,
+        )
+        if save_dir is not None:
+            save_dir.mkdir(parents=True, exist_ok=True)
+            out = save_dir / f"{ts}_page{page_num:04d}.json"
+            out.write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8",
+            )
+        return data
+
+    data = await _fetch_and_maybe_save(1)
 
     total = data.get("totalfiles", 0)
     if total == 0:
@@ -118,15 +137,7 @@ async def enumerate_court(
         on_page(1, total_pages, len(entries))
 
     for page in range(2, total_pages + 1):
-        params = urlencode({
-            "caseDb": court,
-            "lang": lang,
-            "itemsPerPage": items_per_page,
-            "page": page,
-        })
-        page_data = await _get_json_with_retry(
-            get, f"{_BASE_URL}/api/getcasefiles?{params}", max_retries, backoff_base,
-        )
+        page_data = await _fetch_and_maybe_save(page)
         page_entries = [parse_case_entry(j, court) for j in page_data.get("judgments", [])]
         entries.extend(page_entries)
 
