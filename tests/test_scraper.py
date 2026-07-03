@@ -312,6 +312,47 @@ class TestBulkScraperRetryPolicy:
         )
 
 
+class TestBulkScraperDocRetry:
+    """Doc URLs go to legalref.judiciary.hk — a different host with its own
+    reachability characteristics. A single proxy hiccup shouldn't sink the
+    fetch; _fetch_doc must retry through fresh sessions the same way the
+    main getjudgment call does."""
+
+    async def test_doc_fetch_retries_on_transient_error(self, tmp_path):
+        judgment = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "doc": "https://legalref.judiciary.hk/x/foo.docx",
+        }
+        doc_calls = 0
+
+        async def mock_get(url, **kw):
+            nonlocal doc_calls
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                doc_calls += 1
+                if doc_calls == 1:
+                    raise httpx.TimeoutException("first proxy timed out")
+                return httpx.Response(200, content=b"docx bytes",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        assert doc_calls == 2, (
+            f"expected doc fetch to retry after transient, "
+            f"got {doc_calls} attempts"
+        )
+        assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.docx").exists()
+
+
 class TestBulkScraperEmptyContentWithDoc:
     """HCAL / HCCC cases often ship as doc-only: the API returns
     content='' but doc_url points at the actual judgment. With
