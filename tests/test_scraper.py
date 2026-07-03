@@ -602,6 +602,46 @@ class TestBulkScraperEnumFreshness:
         assert len(call_urls) >= 1
 
 
+class TestBulkScraperEnumResponseCache:
+    async def test_save_enum_responses_writes_to_output_enum_cache(self, tmp_path):
+        response_data = {
+            "totalfiles": 1,
+            "judgments": [{
+                "neutral": "[2023] X 1", "path": "/en/cases/hkcfi/2023/1",
+                "date": "2023-01-01", "parallel": [],
+                "cases": [{"title": "T", "act": "HCA1/2023"}],
+            }],
+        }
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=response_data,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            save_enum_responses=True,
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        cache_dir = tmp_path / ".enum_cache" / "hkcfi_en"
+        assert cache_dir.exists()
+        files = list(cache_dir.glob("*.json"))
+        assert len(files) == 1
+
+    async def test_no_enum_cache_when_flag_false(self, tmp_path):
+        response_data = {"totalfiles": 0, "judgments": []}
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=response_data,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        # .enum_cache dir shouldn't exist
+        assert not (tmp_path / ".enum_cache").exists()
+
+
 class TestBulkScraperEnumerationUsesPool:
     async def test_enumeration_calls_pool_get_not_direct(self, tmp_path):
         """Enumeration must go through the scraper's injected get() (the
