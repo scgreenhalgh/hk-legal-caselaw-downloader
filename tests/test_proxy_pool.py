@@ -128,6 +128,14 @@ def _noop_transport(proxy_url):
     return httpx.MockTransport(lambda r: httpx.Response(200))
 
 
+class _StubThrottler:
+    def __init__(self, delay: float):
+        self._delay = delay
+
+    def next_delay(self) -> float:
+        return self._delay
+
+
 class TestProxyPool:
     def test_requires_proxies_or_direct(self):
         with pytest.raises(ValueError, match="proxy.*--direct"):
@@ -352,3 +360,49 @@ class TestProxyPool:
             _transport_factory=_noop_transport,
         )
         await pool.close()
+
+    async def test_queue_routes_work_to_fast_session(self):
+        """With 2 sessions (fast and slow) and 4 concurrent gets, a queue-based
+        dispatcher must route 3 requests to the fast session (which is free 3x
+        during the slow session's single request) and 1 to the slow one.
+
+        Round-robin, by contrast, statically assigns 2 requests to each session
+        and blocks 2 workers waiting on the slow one — half as much fast-session
+        usage. This test discriminates queue vs round-robin under uneven
+        latency.
+        """
+        counts = {"fast": 0, "slow": 0}
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    ip = "10.0.0.1" if proxy_url is None else (
+                        "1.1.1.1" if "fast" in proxy_url else "2.2.2.2"
+                    )
+                    return httpx.Response(200, json={"origin": ip})
+                key = "fast" if "fast" in (proxy_url or "") else "slow"
+                counts[key] += 1
+                return httpx.Response(200, json={})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://fast:1", "http://slow:2"],
+            _transport_factory=make_transport,
+        )
+        await pool.preflight()
+
+        # Simulate uneven latency by making the "slow" session's throttler
+        # return long delays and the "fast" one's short ones.
+        pool._throttlers[0] = _StubThrottler(delay=0.001)   # fast
+        pool._throttlers[1] = _StubThrottler(delay=0.500)   # slow: 500x fast
+
+        results = await asyncio.gather(*[
+            pool.get(f"https://example.com/{i}") for i in range(4)
+        ])
+        assert len(results) == 4
+        assert counts["fast"] + counts["slow"] == 4
+        assert counts["fast"] >= 3, (
+            f"queue should reuse the fast session while the slow one is busy; "
+            f"got fast={counts['fast']}, slow={counts['slow']}"
+        )
