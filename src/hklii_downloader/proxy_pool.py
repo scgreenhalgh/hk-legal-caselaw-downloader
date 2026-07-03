@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import time
+from dataclasses import dataclass, field
+
+import httpx
 
 _monotonic = time.monotonic
 
@@ -12,6 +16,14 @@ class IPLeakError(Exception):
 
 class AllProxiesDeadError(Exception):
     pass
+
+
+@dataclass
+class PreflightResult:
+    home_ip: str
+    healthy_proxies: list[str] = field(default_factory=list)
+    leaked_proxies: list[str] = field(default_factory=list)
+    failed_proxies: list[str] = field(default_factory=list)
 
 
 class RequestThrottler:
@@ -159,19 +171,168 @@ class ProxySession:
         return (_monotonic() - self._killed_at) >= self._cooldown_seconds
 
 
+_IP_ECHO_URLS = [
+    "https://httpbin.org/ip",
+    "https://ipinfo.io/json",
+]
+
+
 class ProxyPool:
-    def __init__(self, proxy_urls: list[str] | None = None, direct: bool = False,
-                 ip_check_interval: int = 50, **kwargs):
-        pass
+    def __init__(
+        self,
+        proxy_urls: list[str] | None = None,
+        direct: bool = False,
+        ip_check_interval: int = 50,
+        max_failures: int = 5,
+        cooldown_seconds: float = 300.0,
+        _transport_factory=None,
+    ):
+        proxy_urls = proxy_urls or []
+        if not proxy_urls and not direct:
+            raise ValueError("Must provide proxy URLs or use --direct")
 
-    async def preflight(self):
-        pass
+        self.direct = direct
+        self._ip_check_interval = ip_check_interval
+        self._transport_factory = _transport_factory
+        self._preflight_done = direct
+        self._home_ip: str | None = None
+        self._round_robin_index = 0
 
-    async def get(self, url: str, **kwargs):
-        pass
+        self.sessions: list[ProxySession] = []
+        self._clients: dict[int, httpx.AsyncClient] = {}
+        self._throttlers: dict[int, RequestThrottler] = {}
+        self._headers: dict[int, HeaderRotator] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
 
-    def _next_healthy_session(self):
-        pass
+        for i, url in enumerate(proxy_urls):
+            session = ProxySession(
+                proxy_url=url, index=i,
+                max_failures=max_failures,
+                cooldown_seconds=cooldown_seconds,
+            )
+            self.sessions.append(session)
+            self._clients[i] = self._make_client(url)
+            self._throttlers[i] = RequestThrottler(rng=random.Random(i))
+            self._headers[i] = HeaderRotator(rng=random.Random(i + 1000))
+            self._locks[i] = asyncio.Lock()
+
+        if direct:
+            self._direct_client = self._make_client(None)
+
+    def _make_client(self, proxy_url: str | None) -> httpx.AsyncClient:
+        if self._transport_factory:
+            return httpx.AsyncClient(
+                transport=self._transport_factory(proxy_url),
+                trust_env=False,
+            )
+        kwargs: dict = {"trust_env": False, "follow_redirects": True}
+        if proxy_url:
+            kwargs["proxy"] = proxy_url
+        return httpx.AsyncClient(**kwargs)
+
+    async def preflight(self) -> PreflightResult:
+        home_ip = await self._fetch_ip(self._make_client(None))
+        self._home_ip = home_ip
+        result = PreflightResult(home_ip=home_ip)
+
+        for session in self.sessions:
+            client = self._clients[session.index]
+            try:
+                proxy_ip = await self._fetch_ip(client)
+            except (httpx.RequestError, KeyError) as exc:
+                result.failed_proxies.append(
+                    f"{session.proxy_url} unreachable: {exc}"
+                )
+                session.kill()
+                continue
+
+            if proxy_ip == home_ip:
+                result.leaked_proxies.append(
+                    f"{session.proxy_url} returned home IP {home_ip}"
+                )
+                session.kill()
+            else:
+                result.healthy_proxies.append(session.proxy_url)
+
+        self._preflight_done = True
+        return result
+
+    async def _fetch_ip(self, client: httpx.AsyncClient) -> str:
+        for echo_url in _IP_ECHO_URLS:
+            try:
+                resp = await client.get(echo_url)
+                resp.raise_for_status()
+                return resp.json()["origin"]
+            except (httpx.RequestError, httpx.HTTPStatusError, KeyError):
+                continue
+        raise httpx.ConnectError("All IP echo services unreachable")
+
+    async def get(self, url: str, **kwargs) -> httpx.Response:
+        if not self._preflight_done:
+            raise RuntimeError("Must call preflight() before making requests")
+
+        if self.direct:
+            return await self._direct_client.get(url, **kwargs)
+
+        session = self._next_healthy_session()
+        client = self._clients[session.index]
+        throttler = self._throttlers[session.index]
+        headers = self._headers[session.index]
+
+        async with self._locks[session.index]:
+            delay = throttler.next_delay()
+            await asyncio.sleep(delay)
+
+            if (session.request_count > 0
+                    and session.request_count % self._ip_check_interval == 0):
+                await self._runtime_ip_check(session, client)
+
+            req_headers = headers.generate()
+            req_headers["Referer"] = headers.referer_for(url)
+
+            try:
+                resp = await client.get(url, headers=req_headers, **kwargs)
+                session.record_success()
+                return resp
+            except httpx.RequestError:
+                session.record_failure()
+                raise
+
+    async def _runtime_ip_check(
+        self, session: ProxySession, client: httpx.AsyncClient,
+    ) -> None:
+        try:
+            current_ip = await self._fetch_ip(client)
+        except httpx.RequestError:
+            return
+
+        if current_ip != self._home_ip:
+            return
+
+        try:
+            verify_ip = await self._fetch_ip(client)
+        except httpx.RequestError:
+            return
+
+        if verify_ip == self._home_ip:
+            session.kill()
+            raise IPLeakError(
+                f"Proxy {session.proxy_url} leaking home IP {self._home_ip} "
+                f"(verified twice)"
+            )
+
+    def _next_healthy_session(self) -> ProxySession:
+        start = self._round_robin_index
+        n = len(self.sessions)
+        for _ in range(n):
+            session = self.sessions[self._round_robin_index % n]
+            self._round_robin_index = (self._round_robin_index + 1) % n
+            if session.is_healthy:
+                return session
+        raise AllProxiesDeadError("All proxy sessions are dead")
 
     async def close(self) -> None:
-        pass
+        for client in self._clients.values():
+            await client.aclose()
+        if hasattr(self, "_direct_client"):
+            await self._direct_client.aclose()

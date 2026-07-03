@@ -1,15 +1,15 @@
+import asyncio
 import random
-import re
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-import pytest_asyncio
 
 from hklii_downloader.proxy_pool import (
     AllProxiesDeadError,
     HeaderRotator,
     IPLeakError,
+    PreflightResult,
     ProxyPool,
     ProxySession,
     RequestThrottler,
@@ -124,34 +124,50 @@ class TestProxySession:
         assert not session.is_healthy
 
 
+def _noop_transport(proxy_url):
+    return httpx.MockTransport(lambda r: httpx.Response(200))
+
+
 class TestProxyPool:
     def test_requires_proxies_or_direct(self):
         with pytest.raises(ValueError, match="proxy.*--direct"):
             ProxyPool(proxy_urls=[], direct=False)
 
     def test_direct_mode_no_proxies_ok(self):
-        pool = ProxyPool(proxy_urls=[], direct=True)
+        pool = ProxyPool(proxy_urls=[], direct=True, _transport_factory=_noop_transport)
         assert pool.direct
 
     def test_proxy_mode_creates_sessions(self):
-        pool = ProxyPool(proxy_urls=["http://localhost:8888", "http://localhost:8889"])
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888", "http://localhost:8889"],
+            _transport_factory=_noop_transport,
+        )
         assert len(pool.sessions) == 2
 
     def test_round_robin_cycles(self):
-        pool = ProxyPool(proxy_urls=["http://a:1", "http://b:2", "http://c:3"])
+        pool = ProxyPool(
+            proxy_urls=["http://a:1", "http://b:2", "http://c:3"],
+            _transport_factory=_noop_transport,
+        )
         picks = [pool._next_healthy_session() for _ in range(6)]
         urls = [s.proxy_url for s in picks]
         assert urls == ["http://a:1", "http://b:2", "http://c:3"] * 2
 
     def test_round_robin_skips_dead(self):
-        pool = ProxyPool(proxy_urls=["http://a:1", "http://b:2", "http://c:3"])
+        pool = ProxyPool(
+            proxy_urls=["http://a:1", "http://b:2", "http://c:3"],
+            _transport_factory=_noop_transport,
+        )
         pool.sessions[1].kill()
         picks = [pool._next_healthy_session() for _ in range(4)]
         urls = [s.proxy_url for s in picks]
         assert urls == ["http://a:1", "http://c:3", "http://a:1", "http://c:3"]
 
     def test_all_dead_raises(self):
-        pool = ProxyPool(proxy_urls=["http://a:1", "http://b:2"])
+        pool = ProxyPool(
+            proxy_urls=["http://a:1", "http://b:2"],
+            _transport_factory=_noop_transport,
+        )
         pool.sessions[0].kill()
         pool.sessions[1].kill()
         with pytest.raises(AllProxiesDeadError):
@@ -159,79 +175,119 @@ class TestProxyPool:
 
     @pytest.mark.asyncio
     async def test_preflight_detects_ip_leak(self):
-        pool = ProxyPool(proxy_urls=["http://localhost:8888"])
         home_ip = "203.0.113.1"
 
-        mock_response = AsyncMock()
-        mock_response.json.return_value = {"origin": home_ip}
-        mock_response.raise_for_status = lambda: None
+        def make_transport(proxy_url):
+            def handler(request):
+                return httpx.Response(200, json={"origin": home_ip})
+            return httpx.MockTransport(handler)
 
-        with patch.object(pool, "_fetch_home_ip", return_value=home_ip):
-            with patch("httpx.AsyncClient.get", return_value=mock_response):
-                result = await pool.preflight()
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=make_transport,
+        )
+        result = await pool.preflight()
 
         assert not pool.sessions[0].is_healthy
         assert home_ip in result.leaked_proxies[0]
 
     @pytest.mark.asyncio
     async def test_preflight_marks_healthy(self):
-        pool = ProxyPool(proxy_urls=["http://localhost:8888"])
         home_ip = "203.0.113.1"
         proxy_ip = "198.51.100.5"
 
-        mock_response = AsyncMock()
-        mock_response.json.return_value = {"origin": proxy_ip}
-        mock_response.raise_for_status = lambda: None
+        def make_transport(proxy_url):
+            def handler(request):
+                ip = home_ip if proxy_url is None else proxy_ip
+                return httpx.Response(200, json={"origin": ip})
+            return httpx.MockTransport(handler)
 
-        with patch.object(pool, "_fetch_home_ip", return_value=home_ip):
-            with patch("httpx.AsyncClient.get", return_value=mock_response):
-                result = await pool.preflight()
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=make_transport,
+        )
+        result = await pool.preflight()
 
         assert pool.sessions[0].is_healthy
         assert len(result.leaked_proxies) == 0
+        assert result.home_ip == home_ip
 
     @pytest.mark.asyncio
     async def test_preflight_required_before_requests(self):
-        pool = ProxyPool(proxy_urls=["http://localhost:8888"])
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=_noop_transport,
+        )
         with pytest.raises(RuntimeError, match="preflight"):
             await pool.get("https://example.com")
 
     @pytest.mark.asyncio
     async def test_direct_mode_skips_preflight(self):
-        pool = ProxyPool(proxy_urls=[], direct=True)
-        mock_response = AsyncMock()
-        mock_response.status_code = 200
-        mock_response.raise_for_status = lambda: None
+        def make_transport(proxy_url):
+            def handler(request):
+                return httpx.Response(200, json={"data": "test"})
+            return httpx.MockTransport(handler)
 
-        with patch("httpx.AsyncClient.get", return_value=mock_response):
-            resp = await pool.get("https://example.com")
-            assert resp.status_code == 200
+        pool = ProxyPool(
+            proxy_urls=[], direct=True,
+            _transport_factory=make_transport,
+        )
+        resp = await pool.get("https://example.com")
+        assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_runtime_ip_check_kills_leaking_proxy(self):
+    async def test_runtime_ip_check_detects_leak(self):
+        home_ip = "203.0.113.1"
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    return httpx.Response(200, json={"origin": home_ip})
+                return httpx.Response(200, json={"content": "test"})
+            return httpx.MockTransport(handler)
+
         pool = ProxyPool(
-            proxy_urls=["http://localhost:8888", "http://localhost:8889"],
+            proxy_urls=["http://localhost:8888"],
             ip_check_interval=2,
+            _transport_factory=make_transport,
         )
         pool._preflight_done = True
-        pool._home_ip = "203.0.113.1"
+        pool._home_ip = home_ip
 
-        call_count = 0
-
-        async def mock_get(url, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            resp = AsyncMock()
-            resp.raise_for_status = lambda: None
-            if "httpbin" in url or "ifconfig" in url:
-                resp.json.return_value = {"origin": "203.0.113.1"}
-            else:
-                resp.status_code = 200
-                resp.json.return_value = {"content": "test"}
-            return resp
-
-        with patch("httpx.AsyncClient.get", side_effect=mock_get):
+        with patch("hklii_downloader.proxy_pool.asyncio.sleep", new_callable=AsyncMock):
             await pool.get("https://www.hklii.hk/api/test")
             await pool.get("https://www.hklii.hk/api/test")
             with pytest.raises(IPLeakError):
                 await pool.get("https://www.hklii.hk/api/test")
+
+    @pytest.mark.asyncio
+    async def test_preflight_handles_unreachable_proxy(self):
+        home_ip = "203.0.113.1"
+
+        def make_transport(proxy_url):
+            def handler(request):
+                if proxy_url == "http://localhost:8889":
+                    raise httpx.ConnectError("connection refused")
+                ip = home_ip if proxy_url is None else "198.51.100.5"
+                return httpx.Response(200, json={"origin": ip})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888", "http://localhost:8889"],
+            _transport_factory=make_transport,
+        )
+        result = await pool.preflight()
+
+        assert pool.sessions[0].is_healthy
+        assert not pool.sessions[1].is_healthy
+        assert len(result.failed_proxies) == 1
+        assert "8889" in result.failed_proxies[0]
+
+    @pytest.mark.asyncio
+    async def test_close_cleans_up(self):
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=_noop_transport,
+        )
+        await pool.close()
