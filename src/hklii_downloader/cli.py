@@ -200,6 +200,42 @@ def scrape(
     ))
 
 
+async def _download_with_progress(scraper, target: int):
+    from rich.progress import (
+        Progress,
+        TextColumn,
+        BarColumn,
+        MofNCompleteColumn,
+        TaskProgressColumn,
+        TimeElapsedColumn,
+        TimeRemainingColumn,
+    )
+
+    with Progress(
+        TextColumn("[bold blue]scrape"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[downloaded]}"),
+        TextColumn("[red]fail {task.fields[failed]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "downloads", total=target, downloaded=0, failed=0,
+        )
+
+        def on_progress(stats: dict) -> None:
+            progress.update(
+                task_id,
+                completed=stats["downloaded"] + stats["failed"],
+                downloaded=stats["downloaded"],
+                failed=stats["failed"],
+            )
+
+        return await scraper.download_all(on_progress=on_progress)
+
+
 async def _run_scrape(
     output: Path,
     fmt_set: set[str],
@@ -251,7 +287,8 @@ async def _run_scrape(
     if stats["pending"] == 0:
         click.echo("Nothing to download.")
     else:
-        result = await scraper.download_all()
+        target = limit if limit is not None else stats["pending"]
+        result = await _download_with_progress(scraper, target)
         click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
 
     await pool.close()
