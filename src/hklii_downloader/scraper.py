@@ -148,6 +148,13 @@ class BulkScraper:
                 return False
 
             judgment = parse_judgment_response(case, data)
+            if not judgment.content_html.strip():
+                doc_hint = f", doc_url={judgment.doc_url}" if judgment.doc_url else ""
+                self._checkpoint.mark_failed(
+                    record.court, record.year, record.number,
+                    f"empty-content{doc_hint}",
+                )
+                return False
             output_dir = self._output_dir / record.court / str(record.year)
             save_judgment_local(judgment, output_dir, self._formats)
 
