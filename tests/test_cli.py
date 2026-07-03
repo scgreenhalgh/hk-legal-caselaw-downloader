@@ -121,6 +121,56 @@ class TestScrapeSubcommand:
         result = runner.invoke(main, ["scrape", "--help"])
         assert "--lang" in result.output
 
+    def test_scrape_help_lists_retry_failed_flag(self):
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape", "--help"])
+        assert "--retry-failed" in result.output
+
+    def test_scrape_retry_failed_resets_before_enumeration(self, tmp_path):
+        """--retry-failed calls reset_failed_to_pending BEFORE the
+        enumerate step, so the retried rows are already pending when
+        the download loop starts."""
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.claim_pending()
+        db.mark_failed("hkcfi", 2023, 1, "HTTP 403")
+        assert db.stats()["failed"] == 1
+        db.close()
+
+        async def ok_preflight(self):
+            return PreflightResult(home_ip="203.0.113.1",
+                                    healthy_proxies=["http://localhost:8888"])
+
+        async def noop_enumerate(self, courts, langs=("en", "tc")): return 0
+        async def noop_download_all(self, on_progress=None):
+            from hklii_downloader.scraper import ScrapeResult
+            return ScrapeResult(downloaded=0, failed=0)
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight), \
+             patch("hklii_downloader.scraper.BulkScraper.enumerate", noop_enumerate), \
+             patch("hklii_downloader.scraper.BulkScraper.download_all",
+                   noop_download_all):
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--retry-failed",
+            ])
+        assert result.exit_code == 0, result.output
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        stats = db.stats()
+        assert stats["pending"] == 1, f"expected 1 pending, got {stats}"
+        assert stats["failed"] == 0
+        db.close()
+
     def test_scrape_lang_flag_reaches_enumerate(self, tmp_path):
         """--lang en should skip the tc sweep."""
         from unittest.mock import patch
