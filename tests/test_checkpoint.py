@@ -114,6 +114,60 @@ class TestCheckpointDB:
         db.close()
 
 
+class TestVerifyDownloaded:
+    def test_missing_file_flips_row_to_pending(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        (out / "hkcfi" / "2023").mkdir(parents=True)
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.claim_pending()
+        db.mark_downloaded("hkcfi", 2023, 1, ["html", "txt", "json"])
+        # No files actually written
+        broken = db.verify_downloaded_against_files(out)
+        assert broken == 1
+        stats = db.stats()
+        assert stats["pending"] == 1
+        assert stats["downloaded"] == 0
+
+    def test_zero_byte_file_flips_row_to_pending(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        d = out / "hkcfi" / "2023"
+        d.mkdir(parents=True)
+        (d / "hkcfi_2023_1.html").write_text("")  # 0-byte
+        (d / "hkcfi_2023_1.txt").write_text("body")
+        (d / "hkcfi_2023_1.json").write_text("{}")
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.claim_pending()
+        db.mark_downloaded("hkcfi", 2023, 1, ["html", "txt", "json"])
+
+        broken = db.verify_downloaded_against_files(out)
+        assert broken == 1
+        assert db.stats()["pending"] == 1
+
+    def test_intact_files_left_alone(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        d = out / "hkcfi" / "2023"
+        d.mkdir(parents=True)
+        (d / "hkcfi_2023_1.html").write_text("body")
+        (d / "hkcfi_2023_1.txt").write_text("body")
+        (d / "hkcfi_2023_1.json").write_text("{}")
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.claim_pending()
+        db.mark_downloaded("hkcfi", 2023, 1, ["html", "txt", "json"])
+
+        broken = db.verify_downloaded_against_files(out)
+        assert broken == 0
+        assert db.stats()["downloaded"] == 1
+
+
 class TestIntegrityCheck:
     def test_healthy_db_opens_fine(self, tmp_path):
         from hklii_downloader.checkpoint import CheckpointDB
