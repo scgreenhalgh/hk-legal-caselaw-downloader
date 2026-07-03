@@ -114,6 +114,42 @@ class TestCheckpointDB:
         db.close()
 
 
+class TestProcessLock:
+    def test_second_open_on_same_path_raises(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB, CheckpointLockError
+
+        db_path = tmp_path / "cp.db"
+        first = CheckpointDB(str(db_path))
+        raised = None
+        try:
+            CheckpointDB(str(db_path))
+        except CheckpointLockError as e:
+            raised = e
+        assert raised is not None, (
+            "opening the same checkpoint DB twice must raise CheckpointLockError"
+        )
+        first.close()
+
+    def test_second_open_after_first_close_ok(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        db_path = tmp_path / "cp.db"
+        first = CheckpointDB(str(db_path))
+        first.close()
+        # Now the lock is released
+        second = CheckpointDB(str(db_path))
+        second.close()
+
+    def test_in_memory_db_does_not_lock(self):
+        """`:memory:` DBs are per-process and shouldn't attempt file lock."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        # Two in-memory instances open independently — no error
+        a = CheckpointDB(":memory:")
+        b = CheckpointDB(":memory:")
+        a.close()
+        b.close()
+
+
 class TestRetryFailed:
     def test_reset_failed_to_pending(self):
         db = CheckpointDB(":memory:")
