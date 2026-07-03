@@ -22,9 +22,24 @@ class RequestThrottler:
         burst_gap_range: tuple[float, float] = (2.0, 4.0),
     ):
         self._rng = rng or random.Random()
+        self._base_range = base_range
+        self._pause_range = pause_range
+        self._pause_chance = pause_chance
+        self._burst_size_range = burst_size_range
+        self._burst_gap_range = burst_gap_range
+        self._burst_remaining = self._rng.randint(*burst_size_range)
 
     def next_delay(self) -> float:
-        return 0.0
+        if self._burst_remaining <= 0:
+            self._burst_remaining = self._rng.randint(*self._burst_size_range)
+            return self._rng.uniform(*self._burst_gap_range)
+
+        self._burst_remaining -= 1
+
+        if self._rng.random() < self._pause_chance:
+            return self._rng.uniform(*self._pause_range)
+
+        return self._rng.uniform(*self._base_range)
 
 
 class HeaderRotator:

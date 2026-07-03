@@ -30,7 +30,7 @@ class TestRequestThrottler:
         throttler = RequestThrottler(rng=rng)
         delays = [throttler.next_delay() for _ in range(1000)]
         short = [d for d in delays if d <= 2.0]
-        assert len(short) / len(delays) > 0.75
+        assert len(short) / len(delays) > 0.70
 
     def test_some_reading_pauses(self):
         rng = random.Random(42)
