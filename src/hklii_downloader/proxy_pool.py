@@ -107,9 +107,15 @@ class HeaderRotator:
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
             "Accept-Language": "en-US,en-GB;q=0.9,en;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
             "sec-ch-ua": f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not/A)Brand";v="99"',
             "sec-ch-ua-mobile": "?0",
             "sec-ch-ua-platform": platform,
+            "sec-fetch-site": "same-origin",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-dest": "document",
+            "sec-fetch-user": "?1",
             "Upgrade-Insecure-Requests": "1",
         }
 
