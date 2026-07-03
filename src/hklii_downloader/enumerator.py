@@ -93,5 +93,17 @@ async def enumerate_court(
     return entries
 
 
+_PRESS_SUMMARY_RE = re.compile(
+    r'<a\s[^>]*href="([^"]+)"[^>]*>\s*Press\s+Summary\s*\((\w+)\)\s*</a>',
+    re.DOTALL,
+)
+
+
 def extract_press_summary_url(html: str) -> str | None:
-    raise NotImplementedError
+    matches = _PRESS_SUMMARY_RE.findall(html)
+    if not matches:
+        return None
+    for url, lang in matches:
+        if lang == "English":
+            return url
+    return matches[0][0]
