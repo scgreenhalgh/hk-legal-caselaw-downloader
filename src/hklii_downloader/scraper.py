@@ -52,17 +52,21 @@ class BulkScraper:
         self._with_appeal_history = with_appeal_history
         self._backoff_base = _backoff_base
 
-    async def enumerate(self, courts: list[str]) -> int:
-        total = 0
+    async def enumerate(
+        self, courts: list[str], langs: tuple[str, ...] = ("en", "tc"),
+    ) -> int:
+        seen: set[tuple[str, int, int]] = set()
         for court in courts:
-            entries = await enumerate_court(court, self._get)
-            for entry in entries:
-                self._checkpoint.upsert_case(
-                    entry.court, entry.year, entry.number,
-                    entry.neutral, entry.title, entry.date,
-                )
-            total += len(entries)
-        return total
+            for lang in langs:
+                entries = await enumerate_court(court, self._get, lang=lang)
+                for entry in entries:
+                    self._checkpoint.upsert_case(
+                        entry.court, entry.year, entry.number,
+                        entry.neutral, entry.title, entry.date,
+                        lang=lang,
+                    )
+                    seen.add((entry.court, entry.year, entry.number))
+        return len(seen)
 
     async def download_all(
         self,

@@ -171,20 +171,28 @@ class TestFullPipeline:
         assert (tmp_path / "hkca" / "2023" / "hkca_2023_1.html").exists()
 
     async def test_re_enumerate_upserts(self, tmp_path):
-        """Re-enumerating upserts new cases without duplicating existing ones."""
+        """Re-enumerating upserts new cases without duplicating existing ones.
+
+        Enumeration sweeps both lang=en and lang=tc; this mock returns the
+        real payload only for the en sweep and an empty listing for tc so
+        the assertions match the en-only test intent.
+        """
         initial = _make_getcasefiles("hkcfi", [{"year": 2023, "num": 1}])
         expanded = _make_getcasefiles("hkcfi", [
             {"year": 2023, "num": 1},
             {"year": 2023, "num": 2},
         ])
+        empty = {"totalfiles": 0, "judgments": []}
 
-        call_count = 0
+        en_calls = 0
 
         async def mock_get(url, **kw):
-            nonlocal call_count
+            nonlocal en_calls
             if "getcasefiles" in url:
-                call_count += 1
-                return httpx.Response(200, json=initial if call_count == 1 else expanded)
+                if "lang=tc" in url:
+                    return httpx.Response(200, json=empty)
+                en_calls += 1
+                return httpx.Response(200, json=initial if en_calls == 1 else expanded)
             if "getjudgment" in url:
                 return httpx.Response(200, json=_make_judgment("hkcfi", 2023, 1))
             return httpx.Response(404)
