@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS cases (
     formats  TEXT,
     error    TEXT,
     lang     TEXT NOT NULL DEFAULT 'en',
+    last_seen_at INTEGER,
     summary_en_status     TEXT NOT NULL DEFAULT 'pending',
     summary_en_error      TEXT,
     summary_zh_status     TEXT NOT NULL DEFAULT 'pending',
@@ -99,6 +100,10 @@ class CheckpointDB:
             self._conn.execute(
                 "ALTER TABLE cases ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'"
             )
+        if "last_seen_at" not in existing:
+            self._conn.execute(
+                "ALTER TABLE cases ADD COLUMN last_seen_at INTEGER"
+            )
         for kind in _ENRICHMENT_KINDS:
             if f"{kind}_status" not in existing:
                 self._conn.execute(
@@ -113,17 +118,19 @@ class CheckpointDB:
     def upsert_case(
         self, court: str, year: int, number: int,
         neutral: str, title: str, date: str, lang: str = "en",
+        last_seen_at: int | None = None,
     ) -> None:
         self._conn.execute(
-            "INSERT INTO cases (court, year, number, neutral, title, date, lang) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO cases (court, year, number, neutral, title, date, lang, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (court, year, number) DO UPDATE SET "
             "neutral=excluded.neutral, title=excluded.title, date=excluded.date, "
             "lang=CASE "
             "  WHEN cases.lang='en' OR excluded.lang='en' THEN 'en' "
             "  ELSE excluded.lang "
-            "END",
-            (court, year, number, neutral, title, date, lang),
+            "END, "
+            "last_seen_at=COALESCE(excluded.last_seen_at, cases.last_seen_at)",
+            (court, year, number, neutral, title, date, lang, last_seen_at),
         )
         self._conn.commit()
 
@@ -172,6 +179,23 @@ class CheckpointDB:
             (error, court, year, number),
         )
         self._conn.commit()
+
+    def find_orphans(self, as_of_ts: int) -> list[CaseRecord]:
+        """Rows whose last_seen_at is NULL or < as_of_ts — candidates for
+        removal from HKLII since our last enumeration."""
+        rows = self._conn.execute(
+            "SELECT court, year, number, neutral, title, date, lang, status "
+            "FROM cases WHERE last_seen_at IS NULL OR last_seen_at < ?",
+            (as_of_ts,),
+        ).fetchall()
+        return [
+            CaseRecord(
+                court=r[0], year=r[1], number=r[2],
+                neutral=r[3], title=r[4], date=r[5],
+                status=r[7], lang=r[6],
+            )
+            for r in rows
+        ]
 
     def verify_downloaded_against_files(self, output_dir) -> int:
         """Scan status='downloaded' rows; flip any whose expected files are

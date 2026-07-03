@@ -60,6 +60,8 @@ class BulkScraper:
     async def enumerate(
         self, courts: list[str], langs: tuple[str, ...] = ("en", "tc"),
     ) -> int:
+        import time
+        run_ts = int(time.time())
         seen: set[tuple[str, int, int]] = set()
         for court in courts:
             for lang in langs:
@@ -68,7 +70,7 @@ class BulkScraper:
                     self._checkpoint.upsert_case(
                         entry.court, entry.year, entry.number,
                         entry.neutral, entry.title, entry.date,
-                        lang=lang,
+                        lang=lang, last_seen_at=run_ts,
                     )
                     seen.add((entry.court, entry.year, entry.number))
         return len(seen)
