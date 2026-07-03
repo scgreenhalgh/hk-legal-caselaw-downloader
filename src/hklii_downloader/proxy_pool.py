@@ -177,6 +177,12 @@ _IP_ECHO_URLS: list[tuple[str, str]] = [
     ("https://ipinfo.io/json", "ip"),
 ]
 
+# Status codes that count as a soft failure against the proxy's circuit
+# breaker. 429/403/5xx all indicate the proxy (or the exit IP) is having
+# trouble; if this repeats we should stop using it. 4xx client errors
+# other than 403/429 (e.g. 404) are about the resource, not the proxy.
+_PROXY_FAILURE_STATUSES = {403, 429, 500, 502, 503, 504}
+
 
 class ProxyPool:
     def __init__(
@@ -303,7 +309,10 @@ class ProxyPool:
 
             try:
                 resp = await client.get(url, headers=req_headers, **kwargs)
-                session.record_success()
+                if resp.status_code in _PROXY_FAILURE_STATUSES:
+                    session.record_failure()
+                else:
+                    session.record_success()
                 return resp
             except httpx.RequestError:
                 session.record_failure()
