@@ -1,6 +1,7 @@
 """Tests for BulkScraper — asyncio.Queue dispatch with retry logic."""
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -272,3 +273,74 @@ class TestBulkScraperDownload:
         assert isinstance(result, ScrapeResult)
         assert result.downloaded == 0
         assert result.failed == 0
+
+
+class TestBulkScraperConcurrency:
+    async def test_multiple_workers_run_concurrently(self, tmp_path):
+        in_flight = 0
+        max_in_flight = 0
+        lock = asyncio.Lock()
+
+        async def slow_get(url, **kw):
+            nonlocal in_flight, max_in_flight
+            async with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.05)
+            async with lock:
+                in_flight -= 1
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
+
+        db = _make_db()
+        _seed_db(db, count=6)
+        scraper = BulkScraper(
+            get=slow_get, checkpoint=db, output_dir=tmp_path,
+            workers=3,
+        )
+        await scraper.download_all()
+        assert max_in_flight >= 2, (
+            f"expected multiple downloads in flight with workers=3, "
+            f"saw max {max_in_flight}"
+        )
+
+    async def test_workers_share_limit_correctly(self, tmp_path):
+        async def mock_get(url, **kw):
+            await asyncio.sleep(0.01)
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
+
+        db = _make_db()
+        _seed_db(db, count=20)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            workers=4, limit=5,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 5, (
+            f"limit=5 exceeded with concurrent workers: {result.downloaded}"
+        )
+
+    async def test_single_worker_is_still_sequential(self, tmp_path):
+        in_flight = 0
+        max_in_flight = 0
+        lock = asyncio.Lock()
+
+        async def slow_get(url, **kw):
+            nonlocal in_flight, max_in_flight
+            async with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            await asyncio.sleep(0.02)
+            async with lock:
+                in_flight -= 1
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE)
+
+        db = _make_db()
+        _seed_db(db, count=4)
+        scraper = BulkScraper(
+            get=slow_get, checkpoint=db, output_dir=tmp_path,
+            workers=1,
+        )
+        await scraper.download_all()
+        assert max_in_flight == 1, (
+            f"workers=1 should be sequential, saw max {max_in_flight}"
+        )
