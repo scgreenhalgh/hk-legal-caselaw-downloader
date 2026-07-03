@@ -30,6 +30,7 @@ def make_async_client(timeout: int = 30, proxy: str | None = None) -> httpx.Asyn
         follow_redirects=True,
         headers=_BROWSER_HEADERS,
         proxy=proxy,
+        trust_env=False,
     )
 
 
@@ -52,24 +53,6 @@ class Judgment:
 
 
 def parse_judgment_response(case: HKLIICase, data: dict) -> Judgment:
-    return Judgment(
-        case=case, title="", case_number="", court_name="", date="",
-        neutral_citation="", parallel_citations=[], content_html="",
-        doc_url=None, has_translation=False,
-    )
-
-
-def save_judgment_local(
-    judgment: Judgment, output_dir: Path, formats: set[str],
-) -> list[Path]:
-    return []
-
-
-async def fetch_judgment(case: HKLIICase, client: httpx.AsyncClient) -> Judgment:
-    resp = await client.get(case.api_url)
-    resp.raise_for_status()
-    data = resp.json()
-
     cases_list = data.get("cases", [])
     first_case = cases_list[0] if cases_list else {}
 
@@ -87,11 +70,8 @@ async def fetch_judgment(case: HKLIICase, client: httpx.AsyncClient) -> Judgment
     )
 
 
-async def save_judgment(
-    judgment: Judgment,
-    output_dir: Path,
-    formats: set[str],
-    client: httpx.AsyncClient,
+def save_judgment_local(
+    judgment: Judgment, output_dir: Path, formats: set[str],
 ) -> list[Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = judgment.case.filename_stem
@@ -123,10 +103,27 @@ async def save_judgment(
         path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
         saved.append(path)
 
+    return saved
+
+
+async def fetch_judgment(case: HKLIICase, client: httpx.AsyncClient) -> Judgment:
+    resp = await client.get(case.api_url)
+    resp.raise_for_status()
+    return parse_judgment_response(case, resp.json())
+
+
+async def save_judgment(
+    judgment: Judgment,
+    output_dir: Path,
+    formats: set[str],
+    client: httpx.AsyncClient,
+) -> list[Path]:
+    saved = save_judgment_local(judgment, output_dir, formats)
+
     if "doc" in formats and judgment.doc_url:
         resp = await client.get(judgment.doc_url)
         resp.raise_for_status()
-        path = output_dir / f"{stem}.doc"
+        path = output_dir / f"{judgment.case.filename_stem}.doc"
         path.write_bytes(resp.content)
         saved.append(path)
 
