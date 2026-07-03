@@ -133,7 +133,7 @@ class TestEnumerateCourt:
             return httpx.Response(200, json=response_data)
 
         try:
-            cases = await enumerate_court("hkcfi", mock_get)
+            cases = await enumerate_court("hkcfi", mock_get, backoff_base=0.0)
         except httpx.ConnectTimeout:
             cases = None
 

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urlencode
+
+import httpx
 
 _BASE_URL = "https://www.hklii.hk"
 _PATH_RE = re.compile(r"/(?:en|tc)/cases/([a-z]+)/(\d{4})/(\d+)")
@@ -49,12 +52,29 @@ def parse_case_entry(data: dict, court: str) -> CaseEntry:
     )
 
 
+async def _get_with_retry(
+    get: Callable,
+    url: str,
+    max_retries: int,
+    backoff_base: float,
+) -> httpx.Response:
+    for attempt in range(max_retries + 1):
+        try:
+            return await get(url)
+        except (httpx.ConnectError, httpx.TimeoutException):
+            if attempt >= max_retries:
+                raise
+            await asyncio.sleep(backoff_base * (2 ** attempt))
+
+
 async def enumerate_court(
     court: str,
     get: Callable,
     lang: str = "en",
     items_per_page: int = 10_000,
     on_page: Callable | None = None,
+    max_retries: int = 3,
+    backoff_base: float = 1.0,
 ) -> list[CaseEntry]:
     params = urlencode({
         "caseDb": court,
@@ -62,7 +82,9 @@ async def enumerate_court(
         "itemsPerPage": items_per_page,
         "page": 1,
     })
-    resp = await get(f"{_BASE_URL}/api/getcasefiles?{params}")
+    resp = await _get_with_retry(
+        get, f"{_BASE_URL}/api/getcasefiles?{params}", max_retries, backoff_base,
+    )
     data = resp.json()
 
     total = data.get("totalfiles", 0)
@@ -82,7 +104,9 @@ async def enumerate_court(
             "itemsPerPage": items_per_page,
             "page": page,
         })
-        resp = await get(f"{_BASE_URL}/api/getcasefiles?{params}")
+        resp = await _get_with_retry(
+            get, f"{_BASE_URL}/api/getcasefiles?{params}", max_retries, backoff_base,
+        )
         page_data = resp.json()
         page_entries = [parse_case_entry(j, court) for j in page_data.get("judgments", [])]
         entries.extend(page_entries)
