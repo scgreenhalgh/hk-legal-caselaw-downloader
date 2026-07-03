@@ -520,9 +520,16 @@ async def _run_scrape(
             n = db.reset_failed_to_pending()
             click.echo(f"Reset {n} failed case(s) to pending for retry.")
 
-        click.echo(f"Enumerating courts: {', '.join(court_list)}  langs: {', '.join(langs)}")
-        total = await scraper.enumerate(court_list, langs=langs)
-        click.echo(f"Found {total} cases.")
+        # --resume skips the enumerate pass IF there are already pending
+        # rows to work on — the operator is restarting a partial run and
+        # doesn't want to burn API budget re-listing every court.
+        pre_stats = db.stats()
+        if resume and pre_stats["pending"] > 0:
+            click.echo(f"Resume: skipping enumeration; {pre_stats['pending']} pending cases already in DB.")
+        else:
+            click.echo(f"Enumerating courts: {', '.join(court_list)}  langs: {', '.join(langs)}")
+            total = await scraper.enumerate(court_list, langs=langs)
+            click.echo(f"Found {total} cases.")
 
         db.release_in_progress()
         stats = db.stats()
