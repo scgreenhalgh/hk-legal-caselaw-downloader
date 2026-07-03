@@ -150,6 +150,18 @@ BULK_FORMATS = {"html", "txt", "json"}
     default=False,
     help="Skip confirmation for --direct mode.",
 )
+@click.option(
+    "--with-summaries",
+    is_flag=True,
+    default=False,
+    help="Fetch Press Summary (English + Chinese) alongside each judgment.",
+)
+@click.option(
+    "--with-appeal-history",
+    is_flag=True,
+    default=False,
+    help="Fetch appeal history JSON for each judgment.",
+)
 def scrape(
     output: Path,
     formats: tuple[str, ...],
@@ -160,6 +172,8 @@ def scrape(
     allow_doc: bool,
     resume: bool,
     yes: bool,
+    with_summaries: bool,
+    with_appeal_history: bool,
 ) -> None:
     """Bulk scrape judgments from HKLII courts.
 
@@ -197,6 +211,8 @@ def scrape(
         court_list=court_list,
         limit=limit,
         resume=resume,
+        with_summaries=with_summaries,
+        with_appeal_history=with_appeal_history,
     ))
 
 
@@ -244,6 +260,8 @@ async def _run_scrape(
     court_list: list[str],
     limit: int | None,
     resume: bool,
+    with_summaries: bool = False,
+    with_appeal_history: bool = False,
 ) -> None:
     from .checkpoint import CheckpointDB
     from .proxy_pool import ProxyPool
@@ -283,6 +301,8 @@ async def _run_scrape(
             formats=fmt_set,
             limit=limit,
             workers=workers,
+            with_summaries=with_summaries,
+            with_appeal_history=with_appeal_history,
         )
 
         click.echo(f"Enumerating courts: {', '.join(court_list)}")
