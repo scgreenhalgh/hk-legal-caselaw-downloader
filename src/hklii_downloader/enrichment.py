@@ -54,3 +54,45 @@ def save_appeal_history_local(
         encoding="utf-8",
     )
     return path
+
+
+async def enrich_summaries_for_case(
+    get: Callable, checkpoint,
+    court: str, year: int, number: int,
+    stem: str, output_dir: Path, content_html: str,
+) -> None:
+    from .enumerator import extract_press_summary_urls
+    urls = extract_press_summary_urls(content_html)
+    for lang_label, lang_short in (("English", "en"), ("Chinese", "zh")):
+        kind = f"summary_{lang_short}"
+        url = urls.get(lang_label)
+        if url is None:
+            checkpoint.mark_enrichment(court, year, number, kind, "na")
+            continue
+        try:
+            html = await fetch_press_summary(url, get)
+            save_press_summary_local(html, output_dir, stem, lang_short)
+            checkpoint.mark_enrichment(court, year, number, kind, "downloaded")
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            checkpoint.mark_enrichment(
+                court, year, number, kind, "failed",
+                error=f"{type(e).__name__}: {e}",
+            )
+
+
+async def enrich_appeal_history_for_case(
+    get: Callable, checkpoint,
+    court: str, year: int, number: int,
+    stem: str, output_dir: Path, case_number: str,
+) -> None:
+    try:
+        data = await fetch_appeal_history(case_number, get)
+        save_appeal_history_local(data, output_dir, stem)
+        checkpoint.mark_enrichment(
+            court, year, number, "appeal_history", "downloaded",
+        )
+    except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError) as e:
+        checkpoint.mark_enrichment(
+            court, year, number, "appeal_history", "failed",
+            error=f"{type(e).__name__}: {e}",
+        )

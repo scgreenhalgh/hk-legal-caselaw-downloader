@@ -11,12 +11,10 @@ import httpx
 from .checkpoint import CheckpointDB, CaseRecord
 from .client import Judgment, parse_judgment_response, save_judgment_local
 from .enrichment import (
-    fetch_appeal_history,
-    fetch_press_summary,
-    save_appeal_history_local,
-    save_press_summary_local,
+    enrich_appeal_history_for_case,
+    enrich_summaries_for_case,
 )
-from .enumerator import enumerate_court, extract_press_summary_urls
+from .enumerator import enumerate_court
 from .parser import HKLIICase
 
 _PERMANENT_ERRORS = {404, 410}
@@ -166,42 +164,17 @@ class BulkScraper:
     async def _enrich_summaries(
         self, record: CaseRecord, judgment: Judgment, output_dir: Path,
     ) -> None:
-        urls = extract_press_summary_urls(judgment.content_html)
-        stem = judgment.case.filename_stem
-        for lang_label, lang_short in (("English", "en"), ("Chinese", "zh")):
-            kind = f"summary_{lang_short}"
-            url = urls.get(lang_label)
-            if url is None:
-                self._checkpoint.mark_enrichment(
-                    record.court, record.year, record.number, kind, "na",
-                )
-                continue
-            try:
-                html = await fetch_press_summary(url, self._get)
-                save_press_summary_local(html, output_dir, stem, lang_short)
-                self._checkpoint.mark_enrichment(
-                    record.court, record.year, record.number, kind, "downloaded",
-                )
-            except (httpx.RequestError, httpx.HTTPStatusError) as e:
-                self._checkpoint.mark_enrichment(
-                    record.court, record.year, record.number, kind, "failed",
-                    error=f"{type(e).__name__}: {e}",
-                )
+        await enrich_summaries_for_case(
+            self._get, self._checkpoint,
+            record.court, record.year, record.number,
+            judgment.case.filename_stem, output_dir, judgment.content_html,
+        )
 
     async def _enrich_appeal_history(
         self, record: CaseRecord, judgment: Judgment, output_dir: Path,
     ) -> None:
-        stem = judgment.case.filename_stem
-        try:
-            data = await fetch_appeal_history(judgment.case_number, self._get)
-            save_appeal_history_local(data, output_dir, stem)
-            self._checkpoint.mark_enrichment(
-                record.court, record.year, record.number,
-                "appeal_history", "downloaded",
-            )
-        except (httpx.RequestError, httpx.HTTPStatusError, json.JSONDecodeError) as e:
-            self._checkpoint.mark_enrichment(
-                record.court, record.year, record.number,
-                "appeal_history", "failed",
-                error=f"{type(e).__name__}: {e}",
-            )
+        await enrich_appeal_history_for_case(
+            self._get, self._checkpoint,
+            record.court, record.year, record.number,
+            judgment.case.filename_stem, output_dir, judgment.case_number,
+        )
