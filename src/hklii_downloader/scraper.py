@@ -203,21 +203,35 @@ class BulkScraper:
                 return False
 
             judgment = parse_judgment_response(case, data)
-            if not judgment.content_html.strip():
+            output_dir = self._output_dir / record.court / str(record.year)
+
+            content_ok = bool(judgment.content_html.strip())
+            can_try_doc = "doc" in self._formats and judgment.doc_url
+
+            if not content_ok and not can_try_doc:
                 doc_hint = f", doc_url={judgment.doc_url}" if judgment.doc_url else ""
                 self._checkpoint.mark_failed(
                     record.court, record.year, record.number,
                     f"empty-content{doc_hint}",
                 )
                 return False
-            output_dir = self._output_dir / record.court / str(record.year)
-            save_judgment_local(judgment, output_dir, self._formats)
 
-            actually_saved = set(self._formats) - {"doc"}
-            if "doc" in self._formats and judgment.doc_url:
-                saved_doc = await self._fetch_doc(judgment, output_dir)
-                if saved_doc:
+            actually_saved: set[str] = set()
+            if content_ok:
+                save_judgment_local(judgment, output_dir, self._formats)
+                actually_saved = set(self._formats) - {"doc"}
+
+            if can_try_doc:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                if await self._fetch_doc(judgment, output_dir):
                     actually_saved.add("doc")
+                elif not content_ok:
+                    # Empty content AND doc fetch failed — nothing on disk
+                    self._checkpoint.mark_failed(
+                        record.court, record.year, record.number,
+                        f"empty-content, doc-fetch-failed, doc_url={judgment.doc_url}",
+                    )
+                    return False
 
             self._checkpoint.mark_downloaded(
                 record.court, record.year, record.number,
