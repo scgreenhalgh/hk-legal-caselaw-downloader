@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import random
+import time
+
+_monotonic = time.monotonic
 
 
 class IPLeakError(Exception):
@@ -108,19 +111,52 @@ class HeaderRotator:
 
 
 class ProxySession:
-    def __init__(self, proxy_url: str = "", index: int = 0, max_failures: int = 5):
+    def __init__(
+        self,
+        proxy_url: str = "",
+        index: int = 0,
+        max_failures: int = 5,
+        cooldown_seconds: float = 300.0,
+    ):
         self.proxy_url = proxy_url
-        self.is_healthy = True
+        self.index = index
         self.request_count = 0
+        self._max_failures = max_failures
+        self._cooldown_seconds = cooldown_seconds
+        self._failure_count = 0
+        self._killed = False
+        self._killed_at: float | None = None
+
+    @property
+    def is_healthy(self) -> bool:
+        return not self._killed
 
     def record_success(self) -> None:
-        pass
+        if not self._killed:
+            self._failure_count = 0
+            self.request_count += 1
 
     def record_failure(self) -> None:
-        pass
+        if self._killed:
+            return
+        self._failure_count += 1
+        if self._failure_count >= self._max_failures:
+            self.kill()
 
     def kill(self) -> None:
-        self.is_healthy = False
+        self._killed = True
+        self._killed_at = _monotonic()
+
+    def revive(self) -> None:
+        self._killed = False
+        self._killed_at = None
+        self._failure_count = 0
+
+    @property
+    def cooldown_elapsed(self) -> bool:
+        if not self._killed or self._killed_at is None:
+            return False
+        return (_monotonic() - self._killed_at) >= self._cooldown_seconds
 
 
 class ProxyPool:
