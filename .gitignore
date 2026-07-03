@@ -12,6 +12,9 @@ wheels/
 # Downloads
 downloads/
 
+# Secrets
+.env
+
 # AI config
 .claude/
 .playwright-mcp/
