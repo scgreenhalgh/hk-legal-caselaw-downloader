@@ -343,6 +343,87 @@ class TestProxyPool:
         )
         await pool.close()
 
+    async def test_repeated_5xx_trips_circuit_breaker(self):
+        """A proxy returning 5xx on every request should be counted as a
+        failing session, not treated as healthy because HTTP completed."""
+        def make_transport(proxy_url):
+            def handler(request):
+                if "httpbin" in str(request.url) or "ipinfo" in str(request.url):
+                    ip = "10.0.0.1" if proxy_url is None else "1.1.1.1"
+                    return httpx.Response(200, json={"origin": ip})
+                return httpx.Response(503, text="")
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://a:1"],
+            max_failures=3,
+            _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        for _ in range(3):
+            try:
+                await pool.get("https://example.com/x")
+            except httpx.RequestError:
+                pass
+        assert not pool.sessions[0].is_healthy, (
+            "session that returned 503 three times should be killed by "
+            "circuit breaker, not treated as healthy"
+        )
+
+    async def test_repeated_403_trips_circuit_breaker(self):
+        """403 (Cloudflare / WAF challenge) also counts as a soft failure —
+        a poisoned proxy shouldn't stay in rotation forever."""
+        def make_transport(proxy_url):
+            def handler(request):
+                if "httpbin" in str(request.url) or "ipinfo" in str(request.url):
+                    ip = "10.0.0.1" if proxy_url is None else "1.1.1.1"
+                    return httpx.Response(200, json={"origin": ip})
+                return httpx.Response(403, text="Cloudflare")
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://a:1"],
+            max_failures=3,
+            _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        for _ in range(3):
+            await pool.get("https://example.com/x")
+        assert not pool.sessions[0].is_healthy
+
+    async def test_success_after_5xx_still_resets_counter(self):
+        """A real 200 after some 5xx must reset failure_count so a
+        transient blip doesn't leak into a later kill."""
+        state = {"stage": 0}
+
+        def make_transport(proxy_url):
+            def handler(request):
+                if "httpbin" in str(request.url) or "ipinfo" in str(request.url):
+                    ip = "10.0.0.1" if proxy_url is None else "1.1.1.1"
+                    return httpx.Response(200, json={"origin": ip})
+                if state["stage"] < 2:
+                    state["stage"] += 1
+                    return httpx.Response(503, text="")
+                return httpx.Response(200, json={"ok": True})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://a:1"],
+            max_failures=3,
+            _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        for _ in range(2):
+            await pool.get("https://example.com/x")
+        await pool.get("https://example.com/x")
+        for _ in range(2):
+            state["stage"] = 0
+            await pool.get("https://example.com/x")
+        assert pool.sessions[0].is_healthy, (
+            "success should have reset failure_count so subsequent 5xx "
+            "don't accumulate over the threshold"
+        )
+
     async def test_killed_session_revived_after_cooldown(self):
         """cooldown_elapsed + revive() are dead code today. On next
         _acquire_session poll, killed sessions whose cooldown has passed
