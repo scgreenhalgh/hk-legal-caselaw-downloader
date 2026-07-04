@@ -930,6 +930,65 @@ The following sections document things we chose **not** to do and the
 reasons behind that choice. They are recorded here so a future
 contributor does not spend cycles rediscovering the rationale.
 
+### Why we don't redact home IP from local artifacts
+
+**Context.** Three pre-flight ultracode reviews
+(`scratchpad/REVIEW_VERDICT{,_V2,_V3}.md`) flagged the operator's home
+WAN IP appearing in local scraper artifacts as a "leak" blocker. V2
+shipped B7 (drop `observed_ip` from `events.jsonl` `ip_echo` events
+when `via="direct"`) and B8 (replace `scrape.log`'s `IP echo ... via
+direct -> <ip>` with a `... -> OK` sentinel). V3 then escalated the
+same class further to B10 (redact `Home IP: <ip>` from `click.echo`
+stdout at 3 subcommand sites — `cli.py:489`, `:648`, `:897`) and B11
+(drop `{self._home_ip}` from the `IPLeakError` message that fans out
+to `.checkpoint.db`, `scrape.log`, `events.jsonl`, and
+`hklii monitor --json`).
+
+**Decision.** Local-artifact home-IP exposure is out of scope for the
+threat model. The V3-escalated B10 and B11 fixes were abandoned
+without merge (worktree branches deleted). B7 and B8 were left in
+place — retracting a shipped harmless redaction is more churn than
+accepting it — but no further redactions in this class will be
+pursued. Future reviews should not re-flag this scope.
+
+**Alternatives considered.**
+
+- **Full redaction pass** (merge B10 + B11, then audit every remaining
+  string interpolation that could carry a WAN IP). Rejected because it
+  removes operator-visible diagnostic value (`grep 'Home IP:'
+  scrape.log` legitimately confirms the direct preflight probe ran and
+  what it saw) without mitigating any threat the operator's own
+  machine actually faces.
+- **Revert B7 and B8.** Rejected as churn. Both are localised
+  code-level redactions with a clean sentinel design; reverting them
+  yields no observable operator gain (the IP is still one
+  `curl ipinfo.io/ip` shell away).
+
+**Data.** The threat model in
+[04 Anti-detection strategy](./04-anti-detection-strategy.md)
+§ "Threat scope: local artifacts vs. the wire" identifies the axis of
+concern as anything reaching the *target origin* (`www.hklii.hk`,
+`legalref.judiciary.hk`) or a third-party service the operator
+publicly shares data with. The proxy architecture
+([08 VPN pool](./08-vpn-pool.md)) ensures no packet ever leaves the
+machine with the operator's true source IP as the origin, and
+`IPLeakError` in `proxy_pool.py` is the safety net that terminates a
+session the instant runtime IP check detects the real IP is being
+echoed back. Every artifact V3 flagged (`stdout`, `scrape.log`,
+`events.jsonl`, `.checkpoint.db`, `hklii monitor --json`) is confined
+to the operator's own filesystem — the *proxy identity* cannot be
+burned by information that never leaves the box.
+
+**Date.** 2026-07-04.
+
+**Cross-ref.**
+[04 Anti-detection strategy](./04-anti-detection-strategy.md)
+§ "Threat scope: local artifacts vs. the wire" for the full
+scope articulation.
+[11 Operations runbook](./11-operations-runbook.md) for the
+third-party-share caveat operators should observe before publishing
+`scrape.log` excerpts to bug trackers or gists.
+
 ### Why we skip robots.txt / ToS review as an ongoing check
 
 **Context.** Audit `completeness.json` gap 13 flagged that HKLII's

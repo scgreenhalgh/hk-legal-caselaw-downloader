@@ -71,6 +71,55 @@ The defense is scattered across [05](./05-http-headers.md),
 This chapter's [Log-analysis one-liners we deliberately kill](#log-analysis-one-liners-we-deliberately-kill)
 section catalogues the specific queries.
 
+### Threat scope: local artifacts vs. the wire
+
+The three threats above are all "the origin (HKLII, Judiciary) or
+someone with access to its logs learns something they can act on."
+That is the axis this chapter's defenses target. The corollary matters
+as much as the axis itself: what happens *only* on the operator's own
+machine is out of scope.
+
+**In-scope (defenses required).**
+
+- Anything on the wire to `www.hklii.hk` or `legalref.judiciary.hk`.
+  If a packet leaves the machine bound for either origin and reveals
+  the operator's true source IP, the proxy identity is burned. This is
+  why the proxy architecture is load-bearing (all requests via `httpx`
+  through gluetun, DNS via Unbound over the tunnel — see
+  [08 VPN pool](./08-vpn-pool.md) and
+  [07 Cookies, sessions, warm-up](./07-cookies-sessions-warmup.md)),
+  and why `IPLeakError` in `proxy_pool.py` kills a session the moment
+  runtime IP check sees the real IP echoed back.
+- Anything in third-party services the operator hands artifacts to
+  (bug trackers, gists, screenshots posted publicly). This is
+  *behavioral* — the operator redacts before publishing — not a
+  code-side defense concern.
+
+**Out of scope (no code-side defense).**
+
+- CLI `stdout` (including the `Home IP: <ip>` preflight line).
+- `<output>/scrape.log` file contents.
+- `<output>/events.jsonl` file contents.
+- `<output>/.checkpoint.db` `cases.error` column contents.
+- `hklii monitor --json` output.
+
+Every one of those sits on the operator's filesystem and cannot burn
+the proxy identity. Redacting the scraper's own home IP from its own
+logs solves a threat that does not exist under this model, at the cost
+of removing diagnostic information the operator legitimately uses
+(`grep 'Home IP' scrape.log` confirms the direct preflight probe ran
+and what it saw).
+
+**Some redactions we shipped anyway.** Commits `b61b673` (B7 — drop
+`events.jsonl` `ip_echo.extra.observed_ip` when `via="direct"`) and
+`af9abfa` (B8 — split `scrape.log` INFO to `via direct -> OK` sentinel)
+are documented no-op hygiene, not threat mitigation. Future reviews
+should not treat local-artifact IP exposure as a blocker; see
+[12 Decisions log](./12-decisions-log.md) § "Why we don't redact home
+IP from local artifacts" for the full rationale, and for why the
+V3-flagged B10 (CLI stdout) + B11 (`IPLeakError` message) fixes were
+abandoned rather than merged.
+
 ---
 
 ## Empirical baseline

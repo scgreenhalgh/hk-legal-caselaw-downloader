@@ -12,6 +12,21 @@ Both artifacts are written by `StructuredEventLogger`
 `recheck-html` subcommands from the `-o` output directory. Pass `--no-events`
 to disable it entirely on storage-constrained runs.
 
+> **A note on IPs in these files.** `events.jsonl` and `scrape.log` both
+> contain proxy exit IPs (deliberately — see
+> [11 Operations runbook](./11-operations-runbook.md) § "Silent-misrouting
+> detection") and may contain the operator's home WAN IP in narrow paths
+> that were left un-redacted on purpose (the `Home IP: <ip>` preflight line
+> in `stdout` and the `IPLeakError` safety-net message on real leak events).
+> This is deliberate; local-artifact home-IP exposure is out of scope for
+> the threat model — see
+> [04 Anti-detection strategy](./04-anti-detection-strategy.md) § "Threat
+> scope: local artifacts vs. the wire" and
+> [12 Decisions log](./12-decisions-log.md) § "Why we don't redact home IP
+> from local artifacts". If you paste `scrape.log`, `events.jsonl`, or a
+> `hklii monitor --json` capture into a bug tracker, gist, or Slack
+> channel, redact by hand first — the file itself does not redact for you.
+
 ## Where it comes from
 
 | Artifact | Path | Written by |
