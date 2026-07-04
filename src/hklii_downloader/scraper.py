@@ -468,6 +468,7 @@ class BulkScraper:
             self._get, self._checkpoint,
             record.court, record.year, record.number,
             judgment.case.filename_stem, output_dir, judgment.content_html,
+            events=self._events,
         )
 
     async def _enrich_appeal_history(

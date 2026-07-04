@@ -67,6 +67,7 @@ async def enrich_summaries_for_case(
     get: Callable, checkpoint,
     court: str, year: int, number: int,
     stem: str, output_dir: Path, content_html: str,
+    events=None,
 ) -> None:
     from .enumerator import extract_press_summary_urls
     # Lazy import: scraper.py imports from this module, so a top-level
@@ -87,6 +88,17 @@ async def enrich_summaries_for_case(
             # "press summary" and the DB marks it downloaded — enrich would
             # never revisit it. See B5 in scratchpad/REVIEW_VERDICT.md.
             if _looks_like_challenge_page(html):
+                if events is not None:
+                    events.sample_failure(
+                        f"challenge_summary_{court}_{year}_{number}_{lang_short}",
+                        html, None, is_challenge=True,
+                    )
+                    events.emit(
+                        "enrichment_challenge", court=court, year=year,
+                        num=number, url=url, error_class="challenge-page",
+                        error_msg="challenge-page detected in press summary",
+                        extra={"enrichment_kind": kind},
+                    )
                 checkpoint.mark_enrichment(
                     court, year, number, kind, "failed",
                     error="challenge-page detected in press summary",
@@ -137,6 +149,7 @@ class EnrichmentRunner:
         do_appeal_history: bool = True,
         workers: int = 1,
         limit: int | None = None,
+        events=None,
     ):
         self._get = get
         self._checkpoint = checkpoint
@@ -145,6 +158,7 @@ class EnrichmentRunner:
         self._do_appeal_history = do_appeal_history
         self._workers = workers
         self._limit = limit
+        self._events = events
 
     async def enrich_all(
         self, on_progress: Callable[[dict], None] | None = None,
@@ -212,7 +226,7 @@ class EnrichmentRunner:
             await enrich_summaries_for_case(
                 self._get, self._checkpoint,
                 case.court, case.year, case.number,
-                stem, court_dir, content_html,
+                stem, court_dir, content_html, events=self._events,
             )
 
         if self._do_appeal_history and enrich["appeal_history"] == "pending":
