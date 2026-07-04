@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from hklii_downloader.checkpoint import CheckpointDB
 from hklii_downloader.monitor import MonitorRunner
@@ -184,3 +187,50 @@ class TestRecentChallenges:
         assert challenges[0]["url"] == "https://www.hklii.hk/api/getjudgment?n=6"
         assert challenges[0]["proxy_url"] == "http://p6:6"
         assert challenges[-1]["url"] == "https://www.hklii.hk/api/getjudgment?n=2"
+
+
+class TestRateAndEta:
+    def test_rate_and_eta_from_last_seen_at(self, tmp_path):
+        seen = 1_700_000_000
+        out = _build_checkpoint(tmp_path, last_seen_at=seen)
+        # 2h after enumeration: 4 downloaded → 2/hr; 8 remaining (6 pending +
+        # 2 in_progress) → ETA 4h.
+        now = datetime.fromtimestamp(seen, tz=timezone.utc) + timedelta(hours=2)
+        cp = MonitorRunner(out, now=now).run()["checkpoint"]
+        assert cp.get("run_start_source") == "min_last_seen_at"
+        assert cp["runtime_hours"] == pytest.approx(2.0)
+        assert cp["downloaded_per_hour"] == pytest.approx(2.0)
+        assert cp["eta_hours"] == pytest.approx(4.0)
+
+    def test_runtime_surfaced_at_top_level(self, tmp_path):
+        seen = 1_700_000_000
+        out = _build_checkpoint(tmp_path, last_seen_at=seen)
+        now = datetime.fromtimestamp(seen, tz=timezone.utc) + timedelta(hours=3)
+        summary = MonitorRunner(out, now=now).run()
+        assert summary["runtime_hours"] == pytest.approx(3.0)
+
+    def test_falls_back_to_mtime_when_no_last_seen_at(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        for i in range(1, 5):  # no last_seen_at → NULL
+            db.upsert_case("hkcfi", 2024, i, f"N{i}", f"T{i}", "2024-01-01")
+        db.mark_downloaded("hkcfi", 2024, 1, ["html"])
+        db.close()
+
+        now = datetime(2026, 7, 4, 12, 0, 0, tzinfo=timezone.utc)
+        mtime = (now - timedelta(hours=5)).timestamp()
+        os.utime(out / ".checkpoint.db", (mtime, mtime))
+
+        cp = MonitorRunner(out, now=now).run()["checkpoint"]
+        assert cp.get("run_start_source") == "checkpoint_mtime"
+        assert cp["runtime_hours"] == pytest.approx(5.0, abs=0.05)
+        assert cp.get("warning"), "mtime fallback should record a warning string"
+
+    def test_rate_none_when_no_runtime(self, tmp_path):
+        seen = 1_700_000_000
+        out = _build_checkpoint(tmp_path, last_seen_at=seen)
+        now = datetime.fromtimestamp(seen, tz=timezone.utc)  # zero elapsed
+        cp = MonitorRunner(out, now=now).run()["checkpoint"]
+        assert cp["downloaded_per_hour"] is None
+        assert cp["eta_hours"] is None
