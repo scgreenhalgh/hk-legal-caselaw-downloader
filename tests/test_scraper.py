@@ -594,6 +594,84 @@ class TestBulkScraperChallengePage:
         assert "challenge" in error, f"expected 'challenge' in error, got {row[0]!r}"
 
 
+class TestBulkScraperHtmlPendingStamp:
+    """When --allow-doc + content='' + doc URL present, scraper should
+    stamp html_pending_at_hklii so a later `hklii recheck-html` pass can
+    find these rows. When content_html IS available (normal case), the
+    column stays NULL / gets cleared."""
+
+    async def test_doc_fallback_stamps_html_pending_at_hklii(self, tmp_path):
+        # Empty content_html + doc URL → doc-fallback path.
+        response = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/word.doc",
+        }
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=response,
+                                      request=httpx.Request("GET", url))
+            # Doc fetch — anything non-empty passes.
+            return httpx.Response(200, content=b"\x00\x01docdata",
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "doc"},
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        row = db._conn.execute(
+            "SELECT html_pending_at_hklii, formats FROM cases "
+            "WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row[0] is not None, (
+            f"expected html_pending_at_hklii stamped on doc-fallback; got NULL"
+        )
+        assert row[0] > 0, f"expected unix ts, got {row[0]}"
+        formats = json.loads(row[1])
+        assert "doc" in formats
+        assert "html" not in formats
+
+    async def test_html_capture_clears_prior_pending_stamp(self, tmp_path):
+        # Seed a row already marked as doc-fallback-pending.
+        db = _make_db()
+        _seed_db(db, count=1)
+        db.mark_downloaded("hkcfi", 2023, 1, ["doc"], html_pending_ts=1751600000)
+        # Now content_html is available.
+        response = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "<html><body>Real judgment text now available.</body></html>",
+        }
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=response,
+                                  request=httpx.Request("GET", url))
+
+        # First release the in_progress lock (mark_downloaded doesn't re-open),
+        # then re-queue as pending so the scraper picks it up.
+        db._conn.execute(
+            "UPDATE cases SET status='pending' WHERE court='hkcfi' AND year=2023 AND number=1"
+        )
+        db._conn.commit()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "txt", "json"},
+        )
+        await scraper.download_all()
+        row = db._conn.execute(
+            "SELECT html_pending_at_hklii FROM cases "
+            "WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row[0] is None, (
+            f"expected html_pending_at_hklii cleared after HTML capture; "
+            f"got {row[0]}"
+        )
+
+
 class TestBulkScraperEmptyContent:
     """A 200 response whose content field is empty must NOT be saved and
     marked downloaded — that produces 0-byte HTML files that poison RAG.
