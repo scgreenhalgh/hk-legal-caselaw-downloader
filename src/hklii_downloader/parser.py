@@ -14,6 +14,12 @@ BASE_URL = "https://www.hklii.hk"
 
 _CASE_PATH_PATTERN = re.compile(r"^/(en|tc)/cases/([a-z]+)/(\d{4})(?:/\d+/?)?$")
 
+# Neutral-citation-style caseno used by the /api/getappealhistory endpoint:
+# <COURT> <NUM>/<YEAR> e.g. "HKCFA 5/2024". Only this format maps cleanly
+# back to the URL court slug (lowercased); other on-wire formats like
+# "FACC3/2025" do not reveal the slug and fall through to homepage.
+_APPEAL_CASENO_PATTERN = re.compile(r"^([A-Za-z]+)\s+\d+/(\d{4})$")
+
 
 @dataclass(frozen=True)
 class HKLIICase:
@@ -55,6 +61,18 @@ def referer_for(url: str) -> str:
         year = qs.get("year", [""])[0]
         if lang and court and year:
             return f"{BASE_URL}/{lang}/cases/{court}/{year}/"
+        return f"{BASE_URL}/"
+
+    if parsed.path == "/api/getappealhistory":
+        qs = parse_qs(parsed.query)
+        caseno = qs.get("caseno", [""])[0]
+        lang = qs.get("lang", ["en"])[0]
+        if lang not in ("en", "tc"):
+            lang = "en"
+        m = _APPEAL_CASENO_PATTERN.match(caseno)
+        if m:
+            court, year = m.groups()
+            return f"{BASE_URL}/{lang}/cases/{court.lower()}/{year}/"
         return f"{BASE_URL}/"
 
     if parsed.path == "/api/getcasefiles":
