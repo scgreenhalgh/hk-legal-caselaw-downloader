@@ -649,6 +649,10 @@ class TestProxyPool:
                         "1.1.1.1" if "fast" in proxy_url else "2.2.2.2"
                     )
                     return httpx.Response(200, json={"origin": ip})
+                # Skip preflight warm-up GETs to hklii.hk (M-4). We only
+                # want to count actual pool.get() work below.
+                if "hklii.hk" in url:
+                    return httpx.Response(200, text="<html>warmup</html>")
                 key = "fast" if "fast" in (proxy_url or "") else "slow"
                 counts[key] += 1
                 return httpx.Response(200, json={})

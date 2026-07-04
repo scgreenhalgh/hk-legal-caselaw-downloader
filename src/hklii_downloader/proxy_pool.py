@@ -190,6 +190,12 @@ _IP_ECHO_URLS: list[tuple[str, str]] = [
     ("https://ipinfo.io/json", "ip"),
 ]
 
+# Per-proxy session warm-up target (M-4). Fired after IP echo so the
+# first HKLII request from each proxy has a plausible browsing history:
+# a landing-page GET establishes a session cookie (if any) and puts
+# something in the Referer chain before /api/* calls hit the wire.
+_WARMUP_URL = "https://www.hklii.hk/"
+
 # Status codes that count as a soft failure against the proxy's circuit
 # breaker. 429/403/5xx all indicate the proxy (or the exit IP) is having
 # trouble; if this repeats we should stop using it. 4xx client errors
@@ -278,9 +284,24 @@ class ProxyPool:
                 session.kill()
             else:
                 result.healthy_proxies.append(session.proxy_url)
+                await self._warm_up_target(session, client)
 
         self._preflight_done = True
         return result
+
+    async def _warm_up_target(self, session: ProxySession, client) -> None:
+        """Fire one landing-page GET so the first API call from this proxy
+        has a plausible browsing history (session cookies, Referer chain).
+        Best-effort — failure here does not disqualify the proxy since IP
+        echo already confirmed routability."""
+        headers = self._headers[session.index]
+        req_headers = headers.generate(_WARMUP_URL)
+        req_headers["Referer"] = headers.referer_for(_WARMUP_URL)
+        try:
+            await client.get(_WARMUP_URL, headers=req_headers)
+        except (httpx.RequestError, Exception):
+            # Best-effort — do not fail preflight if the origin blips.
+            pass
 
     async def _fetch_ip(self, client: httpx.AsyncClient) -> str:
         for echo_url, json_key in _IP_ECHO_URLS:
