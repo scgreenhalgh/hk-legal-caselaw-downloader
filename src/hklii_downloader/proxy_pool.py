@@ -333,15 +333,20 @@ class ProxyPool:
                 if resp.status_code >= 400:
                     continue
                 ip = resp.json()[json_key]
-                _log.info(
-                    "IP echo %s via %s -> %s", echo_url, via or "direct", ip,
-                )
-                # B7: the direct probe captures the operator's home WAN
-                # IP for later silent-misrouting comparison; that IP
-                # must never land in events.jsonl (operators grep/jq/
-                # dashboard on it). Proxy exits keep observed_ip because
-                # the runbook silent-misrouting check reads it back.
+                # B7 + B8: the direct probe captures the operator's home
+                # WAN IP for later silent-misrouting comparison; that IP
+                # must never land in events.jsonl OR scrape.log — both
+                # are operator-facing artifacts that get grepped/shared/
+                # screenshotted. Redact for via=direct on both paths;
+                # proxy exits keep the IP because the runbook silent-
+                # misrouting canary reads it back (185.150.0.*).
                 is_direct = via == "direct" or via is None
+                if is_direct:
+                    _log.info("IP echo %s via direct -> OK", echo_url)
+                else:
+                    _log.info(
+                        "IP echo %s via %s -> %s", echo_url, via, ip,
+                    )
                 event_extra = None if is_direct else {"observed_ip": ip}
                 self._emit(
                     "ip_echo", proxy_url=via or "direct", url=echo_url,
