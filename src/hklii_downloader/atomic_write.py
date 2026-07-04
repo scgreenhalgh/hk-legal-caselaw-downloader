@@ -17,6 +17,12 @@ def _fsync_and_replace(part: Path, dest: Path) -> None:
     finally:
         os.close(fd)
     os.replace(part, dest)
+    # fsync the parent directory so the rename survives an unclean reboot.
+    dir_fd = os.open(dest.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
