@@ -853,3 +853,185 @@ class TestProxyPool:
             f"queue should reuse the fast session while the slow one is busy; "
             f"got fast={counts['fast']}, slow={counts['slow']}"
         )
+
+
+def _read_events(out_dir) -> list[dict]:
+    import json
+    from pathlib import Path
+    p = Path(out_dir) / "events.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines()]
+
+
+class TestProxyPoolEvents:
+    """The pool is the one chokepoint every HTTP request flows through, so it
+    owns the per-request / per-proxy signal: request_success, request_failed,
+    warmup, ip_echo, degraded. EventLogger is optional (None = no-op)."""
+
+    async def test_warmup_and_ip_echo_events_emitted_during_preflight(
+        self, tmp_path,
+    ):
+        from hklii_downloader.events import StructuredEventLogger
+
+        counter = [0]
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    counter[0] += 1
+                    ip = f"9.9.9.{counter[0]}"
+                    return httpx.Response(200, json={"origin": ip, "ip": ip})
+                return httpx.Response(200, text="<html>HKLII</html>")
+            return httpx.MockTransport(handler)
+
+        ev = StructuredEventLogger(tmp_path)
+        await ev.start()
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            events=ev, _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        await ev.aclose()
+
+        rows = _read_events(tmp_path)
+        warmups = [r for r in rows if r["kind"] == "warmup"]
+        assert len(warmups) == 1, f"expected 1 warmup event, got {rows}"
+        assert warmups[0]["proxy_url"] == "http://localhost:8888"
+
+        echoes = [r for r in rows if r["kind"] == "ip_echo"]
+        assert len(echoes) >= 2, f"expected home + proxy ip_echo, got {echoes}"
+        # The observed IP rides in extra so per-proxy IP drift is auditable.
+        assert any(
+            e.get("extra", {}).get("observed_ip", "").startswith("9.9.9.")
+            for e in echoes
+        ), f"an ip_echo must carry the observed IP in extra, got {echoes}"
+
+    async def test_request_success_event_carries_proxy_and_status(
+        self, tmp_path,
+    ):
+        from hklii_downloader.events import StructuredEventLogger
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    ip = "1.1.1.1" if proxy_url is None else "2.2.2.2"
+                    return httpx.Response(200, json={"origin": ip, "ip": ip})
+                return httpx.Response(200, json={"content": "ok"})
+            return httpx.MockTransport(handler)
+
+        ev = StructuredEventLogger(tmp_path)
+        await ev.start()
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            events=ev, _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        with patch("hklii_downloader.proxy_pool.asyncio.sleep",
+                   new_callable=AsyncMock):
+            await pool.get("https://www.hklii.hk/api/getjudgment?x=1")
+        await ev.aclose()
+
+        rows = _read_events(tmp_path)
+        successes = [
+            r for r in rows
+            if r["kind"] == "request_success"
+            and "getjudgment" in r.get("url", "")
+        ]
+        assert len(successes) == 1, (
+            f"expected 1 request_success for the getjudgment call, got "
+            f"{[r for r in rows if r['kind']=='request_success']}"
+        )
+        s = successes[0]
+        assert s["proxy_url"] == "http://localhost:8888"
+        assert s["http_status"] == 200
+        assert "elapsed_ms" in s, "request events must carry elapsed_ms"
+
+    async def test_request_failed_event_on_failure_status(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    ip = "1.1.1.1" if proxy_url is None else "2.2.2.2"
+                    return httpx.Response(200, json={"origin": ip, "ip": ip})
+                return httpx.Response(503, text="Service Unavailable")
+            return httpx.MockTransport(handler)
+
+        ev = StructuredEventLogger(tmp_path)
+        await ev.start()
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            events=ev, _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        with patch("hklii_downloader.proxy_pool.asyncio.sleep",
+                   new_callable=AsyncMock):
+            await pool.get("https://www.hklii.hk/api/getjudgment?x=2")
+        await ev.aclose()
+
+        rows = _read_events(tmp_path)
+        failed = [
+            r for r in rows
+            if r["kind"] == "request_failed"
+            and "getjudgment" in r.get("url", "")
+        ]
+        assert len(failed) == 1, f"expected 1 request_failed, got {rows}"
+        assert failed[0]["proxy_url"] == "http://localhost:8888"
+        assert failed[0]["http_status"] == 503
+
+    async def test_degraded_event_when_runtime_ip_echoes_fail(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        def make_transport(_proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin.org" in url or "ipinfo.io" in url:
+                    return httpx.Response(503, text="down")
+                return httpx.Response(200, json={"content": "ok"})
+            return httpx.MockTransport(handler)
+
+        ev = StructuredEventLogger(tmp_path)
+        await ev.start()
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            ip_check_interval=1, events=ev,
+            _transport_factory=make_transport,
+        )
+        pool._preflight_done = True
+        pool._home_ip = "203.0.113.1"
+        pool.sessions[0].record_success()  # count -> 1 so runtime check fires
+
+        with patch("hklii_downloader.proxy_pool.asyncio.sleep",
+                   new_callable=AsyncMock):
+            await pool.get("https://www.hklii.hk/api/test")
+        await ev.aclose()
+
+        rows = _read_events(tmp_path)
+        degraded = [r for r in rows if r["kind"] == "degraded"]
+        assert len(degraded) == 1, f"expected 1 degraded event, got {rows}"
+        assert degraded[0]["proxy_url"] == "http://localhost:8888"
+
+    async def test_events_none_is_a_valid_noop(self, tmp_path):
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    ip = "1.1.1.1" if proxy_url is None else "2.2.2.2"
+                    return httpx.Response(200, json={"origin": ip, "ip": ip})
+                return httpx.Response(200, json={"content": "ok"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            events=None, _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        with patch("hklii_downloader.proxy_pool.asyncio.sleep",
+                   new_callable=AsyncMock):
+            resp = await pool.get("https://www.hklii.hk/api/test")
+        assert resp.status_code == 200
+        assert not (tmp_path / "events.jsonl").exists()
