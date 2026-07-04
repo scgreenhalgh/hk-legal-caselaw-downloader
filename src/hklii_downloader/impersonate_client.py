@@ -5,6 +5,43 @@ client instance random-picks a profile from a diverse pool (Chrome +
 Safari + Edge) so a run spans multiple JA3/JA4 fingerprints instead of
 one homogeneous stack. Exceptions are translated to httpx's hierarchy
 so the scraper's retry logic works unchanged.
+
+Header-supply policy (Round 4 fix, W2)
+--------------------------------------
+The AsyncSession is constructed with ``default_headers=False`` so
+curl_cffi's C-level bake is suppressed. That bake is what
+``c.impersonate(profile, default_headers=True)`` in
+``curl_cffi/requests/utils.py`` does — it stamps navigation-shape
+headers (Sec-Fetch-User: ?1, Upgrade-Insecure-Requests: 1,
+sec-ch-ua*, Chrome UA, Accept, Accept-Language, Accept-Encoding) onto
+every request, regardless of whether the Python-side ``headers`` dict
+contains them. Popping them from the caller's dict does nothing at the
+wire layer — they still ship.
+
+With ``default_headers=False``:
+
+*   The TLS/HTTP/2 fingerprint (JA3/JA4, ALPN order, HTTP/2 SETTINGS,
+    frame priorities) is STILL baked at the socket layer by
+    ``c.impersonate()``. That is the fingerprint that actually
+    identifies the browser to a WAF — headers are cosmetic mimicry on
+    top of it.
+*   No headers are baked. The caller (``HeaderRotator.generate()`` in
+    proxy_pool.py) owns the full header block: UA, Accept,
+    Accept-Language, sec-ch-ua*, sec-fetch-*, Connection, etc. That
+    layer already reshapes sec-fetch-* per URL (navigate for landing,
+    cors/empty for /api/* XHR) and drops sec-fetch-user + UIR on XHR
+    — which is what real Chrome fetch()/XHR emits and what avoids
+    ModSecurity Signal 6 (research/04-anti-detection-strategy.md:511)
+    across ~228K API calls in a full corpus run.
+
+The wrapper therefore no longer strips "fingerprint conflict" headers.
+Under the old ``default_headers=True`` regime that stripping was
+harmless (curl_cffi supplied its own values anyway); under
+``default_headers=False`` it would erase the caller's UA + Accept-*
+entirely, leaving the request with no UA — a worse tell than the
+C-level bake. Consistency between the caller's UA and the impersonated
+TLS profile is the caller's responsibility; HeaderRotator only ever
+emits Chrome UAs, so no cross-vendor mismatch is possible in practice.
 """
 from __future__ import annotations
 
@@ -22,30 +59,6 @@ _IMPERSONATE_PROFILES = (
     "chrome", "chrome146", "chrome142", "chrome136", "chrome131",
 )
 
-# Headers that curl_cffi's impersonation controls end-to-end. Passing
-# alternative values via .get(headers=…) would create a UA/TLS mismatch
-# — the classic "not a real browser" tell — so we strip them.
-#
-# NOTE: sec-fetch-* and Upgrade-Insecure-Requests are BEHAVIORAL, not
-# fingerprint-baked. A real browser flips sec-fetch-mode between
-# 'navigate' (top-level nav) and 'cors' (fetch()/XHR) per request, and
-# drops UIR on XHR entirely. The M-2 fix in
-# ProxyHeadersFactory.generate() shapes these correctly for /api/*
-# XHR calls; the wrapper must pass them through so curl_cffi's baked
-# chrome navigation defaults don't ship on every JSON API request
-# (Signal 6, research/04-anti-detection-strategy.md:511). Do not
-# re-add sec-fetch-* / upgrade-insecure-requests to this frozenset.
-_FINGERPRINT_HEADERS = frozenset({
-    "user-agent",
-    "accept",
-    "accept-language",
-    "accept-encoding",
-    "sec-ch-ua",
-    "sec-ch-ua-mobile",
-    "sec-ch-ua-platform",
-    "connection",
-})
-
 
 class ImpersonateAsyncClient:
     def __init__(
@@ -57,11 +70,16 @@ class ImpersonateAsyncClient:
         rng = rng or random.Random()
         self._impersonate = rng.choice(_IMPERSONATE_PROFILES)
         from curl_cffi.requests import AsyncSession
+        # default_headers=False suppresses curl_cffi's C-level header
+        # bake — see module docstring. TLS/HTTP/2 fingerprint is still
+        # applied via impersonate; only the header block is left to the
+        # caller.
         self._session = AsyncSession(
             impersonate=self._impersonate,
             timeout=timeout,
             proxy=proxy,
             allow_redirects=True,
+            default_headers=False,
         )
 
     @property
@@ -69,11 +87,6 @@ class ImpersonateAsyncClient:
         return self._impersonate
 
     async def get(self, url: str, headers: dict | None = None, **kwargs: Any):
-        if headers:
-            headers = {
-                k: v for k, v in headers.items()
-                if k.lower() not in _FINGERPRINT_HEADERS
-            }
         try:
             return await self._session.get(url, headers=headers, **kwargs)
         except Exception as exc:

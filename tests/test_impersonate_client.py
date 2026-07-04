@@ -121,15 +121,30 @@ class TestProfileSelection:
         )
 
 
-class TestHeaderStripping:
-    async def test_fingerprint_conflict_headers_stripped(self):
-        """Passing UA / sec-ch-ua / Accept-Language headers to .get()
-        would contradict curl_cffi's baked TLS+HTTP/2 impersonation
-        fingerprint. Wrapper strips them.
+class TestHeaderPassThrough:
+    """Round 4 fix (W2): under the new default_headers=False regime the
+    wrapper no longer strips "fingerprint conflict" headers.
 
-        sec-fetch-* is intentionally NOT stripped — see
-        TestSecFetchForwarding — because it's behavioral (per-request
-        XHR vs navigation), not fingerprint-baked."""
+    Rationale — the previous ``_FINGERPRINT_HEADERS`` strip existed
+    because curl_cffi's C-level bake would supply UA/Accept/etc.
+    anyway, so any caller-supplied value was going to be overridden.
+    That is no longer true: ``AsyncSession(default_headers=False)``
+    suppresses the C-level bake, so the caller (HeaderRotator) MUST
+    supply the full header block. Stripping the caller's UA in that
+    regime would leave the request with no UA on the wire — a strictly
+    worse mimicry outcome than the pre-fix state.
+
+    The old ``TestHeaderStripping.test_fingerprint_conflict_headers_stripped``
+    asserted the reverse — that the wrapper strips those headers — and
+    was correct under the old regime. It is deleted (not modified) as
+    a spec change: the wrapper's contract has flipped, and the test
+    class name reflects the new direction."""
+
+    async def test_all_caller_headers_pass_through_untouched(self):
+        """Every header the caller passes reaches the underlying
+        AsyncSession verbatim — UA, sec-ch-ua*, Accept-Language,
+        Referer, and sec-fetch-*. The caller owns consistency; the
+        wrapper does not filter."""
         from hklii_downloader.impersonate_client import ImpersonateAsyncClient
 
         captured = {}
@@ -145,17 +160,54 @@ class TestHeaderStripping:
 
         c = ImpersonateAsyncClient(rng=random.Random(0))
         c._session = FakeSession()
-        await c.get("https://example.com", headers={
-            "User-Agent": "not-really-chrome",
-            "sec-ch-ua": "spoofed",
-            "Referer": "https://x.com/",
-            "Accept-Language": "en-US",   # also strip: curl_cffi handles it
-        })
+        caller = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/146.0.7580.89 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "sec-ch-ua": (
+                '"Chromium";v="146", "Google Chrome";v="146", '
+                '"Not/A)Brand";v="99"'
+            ),
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+            "sec-fetch-mode": "cors",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-site": "same-origin",
+            "Referer": "https://www.hklii.hk/en/cases/hkcfi/2023/1234",
+        }
+        await c.get("https://www.hklii.hk/api/getjudgment", headers=caller)
+
         sent = captured["headers"]
-        assert "User-Agent" not in sent and "user-agent" not in sent
-        assert "sec-ch-ua" not in sent
-        assert "Accept-Language" not in sent
-        assert "Referer" in sent, "non-fingerprint headers should pass through"
+        for key, expected in caller.items():
+            assert sent.get(key) == expected, (
+                f"caller header {key!r}={expected!r} was not forwarded "
+                f"to AsyncSession; got sent={sent!r}"
+            )
+
+    async def test_none_headers_forwarded_as_is(self):
+        """Passing headers=None should not crash; the wrapper simply
+        forwards None to AsyncSession without allocating a dict."""
+        from hklii_downloader.impersonate_client import ImpersonateAsyncClient
+
+        captured = {}
+
+        class FakeSession:
+            async def get(self, url, headers=None, **kw):
+                captured["headers"] = headers
+                resp = MagicMock()
+                resp.status_code = 200
+                return resp
+            async def close(self):
+                pass
+
+        c = ImpersonateAsyncClient(rng=random.Random(0))
+        c._session = FakeSession()
+        await c.get("https://www.hklii.hk/en/cases/hkcfi/2023/1234")
+        assert captured["headers"] is None
 
 
 class TestSecFetchForwarding:
@@ -267,13 +319,15 @@ class TestWireLevelBakeSuppressed:
         from hklii_downloader.impersonate_client import ImpersonateAsyncClient
 
         port, captured = echo_server
-        c = ImpersonateAsyncClient(rng=random.Random(0))
-        c._impersonate = profile
-        # Rebuild the underlying session with our chosen profile so the
-        # C-level bake happens for the profile we're asserting on.
-        from curl_cffi.requests import AsyncSession
-        await c._session.close()
-        c._session = AsyncSession(impersonate=profile, timeout=5.0)
+        # Force rng.choice to return the specific profile under test —
+        # this way ImpersonateAsyncClient's own __init__ runs (including
+        # its default_headers policy), which is what we want to
+        # exercise. Bypassing __init__ would let us miss regressions in
+        # the policy under test.
+        rng = random.Random(0)
+        rng.choice = lambda seq, _p=profile: _p  # type: ignore[assignment]
+        c = ImpersonateAsyncClient(rng=rng)
+        assert c.impersonate_profile == profile
 
         try:
             # Caller passes XHR-shape headers with Chrome-consistent
@@ -320,11 +374,10 @@ class TestWireLevelBakeSuppressed:
         from hklii_downloader.impersonate_client import ImpersonateAsyncClient
 
         port, captured = echo_server
-        c = ImpersonateAsyncClient(rng=random.Random(0))
-        c._impersonate = profile
-        from curl_cffi.requests import AsyncSession
-        await c._session.close()
-        c._session = AsyncSession(impersonate=profile, timeout=5.0)
+        rng = random.Random(0)
+        rng.choice = lambda seq, _p=profile: _p  # type: ignore[assignment]
+        c = ImpersonateAsyncClient(rng=rng)
+        assert c.impersonate_profile == profile
 
         caller_ua = (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
