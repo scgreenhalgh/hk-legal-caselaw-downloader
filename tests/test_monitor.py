@@ -234,3 +234,127 @@ class TestRateAndEta:
         cp = MonitorRunner(out, now=now).run()["checkpoint"]
         assert cp["downloaded_per_hour"] is None
         assert cp["eta_hours"] is None
+
+
+def _cp(**over):
+    base = {
+        "downloaded": 1000, "in_progress": 5, "failed": 10, "pending": 500,
+        "total": 1515, "downloaded_per_hour": 7000.0, "eta_hours": 0.07,
+        "runtime_hours": 4.0, "top_error_prefixes": [],
+    }
+    base.update(over)
+    return base
+
+
+def _ev(**over):
+    base = {"window_min": 30, "counts_by_kind": {},
+            "proxy_hotspots": [], "recent_challenges": []}
+    base.update(over)
+    return base
+
+
+def _levels(alerts):
+    return [a["level"] for a in alerts]
+
+
+class TestEvaluateAlerts:
+    def _runner(self, tmp_path, workers=20):
+        return MonitorRunner(tmp_path, workers=workers)
+
+    def test_healthy_within_tolerance(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(top_error_prefixes=[{"prefix": "http-503", "count": 3}]),
+            _ev(), 4.0,
+        )
+        assert alerts == []
+
+    def test_critical_error_prefix_over_100(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(top_error_prefixes=[
+                {"prefix": "empty-content, doc-fetch-failed", "count": 187}]),
+            _ev(), 4.0,
+        )
+        assert "CRITICAL" in _levels(alerts)
+        assert any("187" in a["reason"] for a in alerts)
+
+    def test_critical_in_progress_over_4x_workers(self, tmp_path):
+        r = self._runner(tmp_path, workers=20)
+        alerts = r.evaluate_alerts(_cp(in_progress=100), _ev(), 4.0)
+        crit = [a for a in alerts if a["level"] == "CRITICAL"]
+        assert any("in_progress" in a["reason"] for a in crit)
+
+    def test_in_progress_at_4x_not_critical(self, tmp_path):
+        r = self._runner(tmp_path, workers=20)
+        alerts = r.evaluate_alerts(_cp(in_progress=80), _ev(), 4.0)
+        assert not any("in_progress" in a["reason"] for a in alerts)
+
+    def test_critical_low_rate_after_one_hour(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(downloaded_per_hour=3000.0), _ev(), 4.0)
+        assert "CRITICAL" in _levels(alerts)
+        assert any("rate" in a["reason"] for a in alerts)
+
+    def test_low_rate_ignored_under_one_hour(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(downloaded_per_hour=100.0), _ev(), 0.5)
+        assert not any("rate" in a["reason"] for a in alerts)
+
+    def test_warn_error_prefix_between_20_and_100(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(top_error_prefixes=[{"prefix": "http-403", "count": 50}]),
+            _ev(), 4.0,
+        )
+        assert _levels(alerts) == ["WARN"]
+
+    def test_warn_degraded_event(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(), _ev(counts_by_kind={"degraded": 2}), 4.0)
+        assert any("degraded" in a["reason"] for a in alerts)
+        assert "CRITICAL" not in _levels(alerts)
+
+    def test_warn_pool_exhausted_event(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(), _ev(counts_by_kind={"pool_exhausted": 1}), 4.0)
+        assert any("pool_exhausted" in a["reason"] for a in alerts)
+
+    def test_warn_proxy_hotspot(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(),
+            _ev(proxy_hotspots=[{"proxy_url": "http://p3:3", "failed": 90}]),
+            4.0,
+        )
+        assert any("p3" in a["reason"] for a in alerts)
+
+    def test_warn_rate_between_4000_and_6000(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(downloaded_per_hour=5000.0), _ev(), 4.0)
+        assert _levels(alerts) == ["WARN"]
+
+    def test_critical_and_warn_coexist(self, tmp_path):
+        r = self._runner(tmp_path)
+        alerts = r.evaluate_alerts(
+            _cp(in_progress=100,
+                top_error_prefixes=[{"prefix": "http-403", "count": 50}]),
+            _ev(counts_by_kind={"degraded": 1}), 4.0,
+        )
+        # A critical (in_progress) and warns (error-prefix, degraded) all fire;
+        # run() collapses these to a single CRITICAL severity (pair 6).
+        assert "CRITICAL" in _levels(alerts)
+        assert "WARN" in _levels(alerts)
+
+    def test_no_events_suppresses_event_alerts(self, tmp_path):
+        r = self._runner(tmp_path)
+        # events=None (a --no-events run) → checkpoint alerts still fire,
+        # but no degraded/pool_exhausted/hotspot alerts.
+        alerts = r.evaluate_alerts(_cp(in_progress=100), None, 4.0)
+        assert "CRITICAL" in _levels(alerts)
+        assert not any("degraded" in a["reason"] for a in alerts)
