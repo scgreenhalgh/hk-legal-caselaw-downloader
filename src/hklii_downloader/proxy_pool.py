@@ -121,11 +121,9 @@ class HeaderRotator:
             "Upgrade-Insecure-Requests": "1",
         }
 
-    def generate(self) -> dict[str, str]:
+    def generate(self, url: str | None = None) -> dict[str, str]:
+        # Stub: ignores url. Real XHR/navigation split lands in next commit.
         return dict(self._headers)
-
-    def rotate(self) -> None:
-        self._headers = self._build_headers()
 
     def referer_for(self, url: str) -> str:
         return _referer_for(url)

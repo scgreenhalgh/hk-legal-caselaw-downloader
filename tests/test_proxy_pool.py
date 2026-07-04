@@ -112,12 +112,41 @@ class TestHeaderRotator:
             f"expected URL-derived referer, got {referer!r}"
         )
 
-    def test_rotate_gives_new_headers(self):
+    def test_api_url_emits_xhr_sec_fetch(self):
+        """Real Chrome XHR to /api/* sends mode:cors, dest:empty, and
+        neither sec-fetch-user nor Upgrade-Insecure-Requests. The
+        navigation quad (mode:navigate, dest:document, user:?1, UIR:1)
+        combined with /api/ is a bulletproof WAF signal."""
         rotator = HeaderRotator(rng=random.Random(42))
-        first = rotator.generate()
-        rotator.rotate()
-        second = rotator.generate()
-        assert first["User-Agent"] != second["User-Agent"]
+        headers = rotator.generate(
+            "https://www.hklii.hk/api/getcasefiles?caseDb=hkcfi&lang=en"
+        )
+        assert headers["sec-fetch-mode"] == "cors"
+        assert headers["sec-fetch-dest"] == "empty"
+        assert headers.get("sec-fetch-site") == "same-origin"
+        assert "sec-fetch-user" not in headers, (
+            f"XHR must not send sec-fetch-user; got {headers.get('sec-fetch-user')!r}"
+        )
+        assert "Upgrade-Insecure-Requests" not in headers, (
+            f"XHR must not send Upgrade-Insecure-Requests; got "
+            f"{headers.get('Upgrade-Insecure-Requests')!r}"
+        )
+
+    def test_non_api_url_keeps_navigation_sec_fetch(self):
+        """Landing-page warm-up (M-4) needs the navigation quad."""
+        rotator = HeaderRotator(rng=random.Random(42))
+        headers = rotator.generate("https://www.hklii.hk/en/cases/hkcfi/")
+        assert headers["sec-fetch-mode"] == "navigate"
+        assert headers["sec-fetch-dest"] == "document"
+        assert headers.get("sec-fetch-user") == "?1"
+        assert headers.get("Upgrade-Insecure-Requests") == "1"
+
+    def test_generate_without_url_defaults_to_navigation(self):
+        """Backward-compat: existing tests call generate() with no args."""
+        rotator = HeaderRotator(rng=random.Random(42))
+        headers = rotator.generate()
+        assert headers["sec-fetch-mode"] == "navigate"
+        assert headers["sec-fetch-dest"] == "document"
 
 
 class TestProxySession:
