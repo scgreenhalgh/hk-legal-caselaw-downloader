@@ -86,15 +86,6 @@ class TestScrapeSubcommand:
         assert result.exit_code != 0
         assert "proxy" in result.output.lower() or "direct" in result.output.lower()
 
-    def test_scrape_proxy_and_direct_mutually_exclusive(self):
-        runner = CliRunner()
-        result = runner.invoke(main, [
-            "scrape",
-            "--proxy", "http://localhost:8888",
-            "--direct",
-        ])
-        assert result.exit_code != 0
-
     def test_scrape_direct_requires_yes(self):
         runner = CliRunner()
         result = runner.invoke(main, ["scrape", "--direct"], input="n\n")
@@ -823,3 +814,91 @@ class TestEventsWiring:
             assert "--no-events" in out, (
                 f"`{cmd} --help` must document --no-events; got:\n{out}"
             )
+
+
+class TestCliProxyDirectMutex:
+    """The --proxy/--direct mutex must fire BEFORE the callback runs, for
+    every subcommand that accepts both flags.
+
+    Round 4 review found a bypass: `MutuallyExclusiveOption` at cli.py:18
+    checked `opts["proxy"]`, but scrape/enrich/recheck-html declare their
+    dest as `"proxies"` (multiple=True). Additionally, enrich and
+    recheck-html didn't apply the class at all. A live repro
+    (`hklii scrape -p http://127.0.0.1:9999 --direct -y`) hit hklii.hk
+    from the home IP and got 155555 cases back.
+
+    Tests use `-y` so the --direct confirm prompt cannot short-circuit
+    the mutex and mask a broken check. Tests mock ProxyPool.preflight so
+    a broken mutex fails fast (with a "no healthy proxies" UsageError
+    that has the *wrong* message, so the "mutually exclusive" assertion
+    catches the bypass) instead of hanging on real network I/O.
+    """
+
+    def _patch_asyncio_run_noop(self):
+        """Patch asyncio.run inside the cli module to close the coroutine
+        and return None, so a broken mutex fails fast with exit_code 0
+        (wrong signal for the 'mutually exclusive' assertion) instead of
+        hanging on real network I/O. A working mutex fires during option
+        parsing, well before asyncio.run is even reached — so the mock
+        is never called in the passing case."""
+        from unittest.mock import patch
+
+        def noop_run(coro):
+            coro.close()
+            return None
+
+        return patch("hklii_downloader.cli.asyncio.run", noop_run)
+
+    def test_scrape_proxy_and_direct_are_mutually_exclusive(self, tmp_path):
+        with self._patch_asyncio_run_noop():
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "scrape",
+                "-p", "http://127.0.0.1:9999",
+                "--direct",
+                "-y",
+                "-o", str(tmp_path / "out"),
+            ])
+        assert result.exit_code == 2, (
+            f"expected UsageError exit code 2, got {result.exit_code}. "
+            f"Output:\n{result.output}"
+        )
+        assert "mutually exclusive" in result.output.lower(), (
+            f"expected 'mutually exclusive' in output, got:\n{result.output}"
+        )
+
+    def test_enrich_proxy_and_direct_are_mutually_exclusive(self, tmp_path):
+        with self._patch_asyncio_run_noop():
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "enrich",
+                "-p", "http://127.0.0.1:9999",
+                "--direct",
+                "-y",
+                "-o", str(tmp_path / "out"),
+            ])
+        assert result.exit_code == 2, (
+            f"expected UsageError exit code 2, got {result.exit_code}. "
+            f"Output:\n{result.output}"
+        )
+        assert "mutually exclusive" in result.output.lower(), (
+            f"expected 'mutually exclusive' in output, got:\n{result.output}"
+        )
+
+    def test_recheck_html_proxy_and_direct_are_mutually_exclusive(self, tmp_path):
+        with self._patch_asyncio_run_noop():
+            runner = CliRunner()
+            result = runner.invoke(main, [
+                "recheck-html",
+                "-p", "http://127.0.0.1:9999",
+                "--direct",
+                "-y",
+                "-o", str(tmp_path / "out"),
+            ])
+        assert result.exit_code == 2, (
+            f"expected UsageError exit code 2, got {result.exit_code}. "
+            f"Output:\n{result.output}"
+        )
+        assert "mutually exclusive" in result.output.lower(), (
+            f"expected 'mutually exclusive' in output, got:\n{result.output}"
+        )
