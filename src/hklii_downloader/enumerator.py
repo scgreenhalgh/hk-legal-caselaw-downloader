@@ -11,6 +11,8 @@ from urllib.parse import urlencode
 
 import httpx
 
+from .atomic_write import atomic_write_text
+
 _BASE_URL = "https://www.hklii.hk"
 _PATH_RE = re.compile(r"/(?:en|tc)/cases/([a-z]+)/(\d{4})/(\d+)")
 _PERMANENT_STATUSES = {404, 410}

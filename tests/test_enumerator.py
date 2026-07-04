@@ -154,6 +154,31 @@ class TestEnumerateCourt:
         files = sorted((tmp_path / "hkcfi_en").glob("*.json"))
         assert len(files) == 2
 
+    async def test_save_response_uses_atomic_write_text(self, tmp_path):
+        """S-5: enum-cache writes must go through atomic_write_text so a
+        Ctrl-C or ENOSPC mid-write doesn't leave a truncated JSON at the
+        final path where downstream audit tooling would silently misread
+        it. Existing implementation uses non-atomic Path.write_text."""
+        from unittest.mock import patch
+        from hklii_downloader import enumerator as enum_mod
+
+        async def mock_get(url, **kw):
+            return httpx.Response(
+                200, json={"totalfiles": 0, "judgments": []}
+            )
+
+        with patch.object(enum_mod, "atomic_write_text") as m:
+            await enumerate_court("hkcfi", mock_get, save_response_to=tmp_path)
+
+        assert m.called, (
+            "expected enumerator to write enum-cache via atomic_write_text"
+        )
+        call = m.call_args
+        dest = call.args[0] if call.args else call.kwargs.get("path")
+        assert dest is not None and str(dest).endswith(".json"), (
+            f"expected atomic_write_text called on a .json path, got {dest!r}"
+        )
+
     async def test_no_save_when_dir_is_none(self, tmp_path):
         response_data = {"totalfiles": 0, "judgments": []}
 
