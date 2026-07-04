@@ -82,6 +82,41 @@ class TestRefererFor:
         assert referer_for("https://www.hklii.hk/api/getjudgment") == "https://www.hklii.hk/"
         assert referer_for("https://www.hklii.hk/api/getcasefiles") == "https://www.hklii.hk/"
 
+    def test_getappealhistory_url_returns_case_page_referer(self):
+        # A real SPA user viewing appeal history is on /{lang}/cases/{court}/{year}/{num}/,
+        # so the Referer for the XHR should be a case-page URL, not the homepage.
+        # Mirrors the getjudgment branch: falls back to the year-listing page.
+        url = (
+            "https://www.hklii.hk/api/getappealhistory"
+            "?caseno=HKCFA%205%2F2024"
+        )
+        assert referer_for(url) == "https://www.hklii.hk/en/cases/hkcfa/2024/"
+
+    def test_getappealhistory_url_tc_lang(self):
+        # If the URL carries an explicit lang= query param, honor it.
+        url = (
+            "https://www.hklii.hk/api/getappealhistory"
+            "?caseno=HKCA%2099%2F2022&lang=tc"
+        )
+        assert referer_for(url) == "https://www.hklii.hk/tc/cases/hkca/2022/"
+
+    def test_getappealhistory_url_missing_caseno_returns_homepage(self):
+        # No caseno at all — fall back to homepage rather than raising.
+        assert (
+            referer_for("https://www.hklii.hk/api/getappealhistory")
+            == "https://www.hklii.hk/"
+        )
+
+    def test_getappealhistory_url_unparseable_caseno_returns_homepage(self):
+        # caseno that does not match <COURT> <NUM>/<YEAR> — fall back safely.
+        # (Real production values like `FACC3/2025` have no space between court
+        # prefix and number and don't reveal the URL slug; safest is homepage.)
+        url = (
+            "https://www.hklii.hk/api/getappealhistory"
+            "?caseno=FACC3%2F2025"
+        )
+        assert referer_for(url) == "https://www.hklii.hk/"
+
 
 class TestHtmlToText:
     def test_strips_tags(self):
