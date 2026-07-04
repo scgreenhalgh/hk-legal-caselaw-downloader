@@ -1015,6 +1015,87 @@ class TestProxyPoolEvents:
         assert len(degraded) == 1, f"expected 1 degraded event, got {rows}"
         assert degraded[0]["proxy_url"] == "http://localhost:8888"
 
+    async def test_ip_echo_event_redacts_home_ip_when_via_direct(
+        self, tmp_path,
+    ):
+        """B7: preflight's direct-mode _fetch_ip captures the operator's
+        home WAN IP so later proxy exits can be compared for silent
+        misrouting. That IP must NOT land in events.jsonl — the file is
+        the artifact operators share/jq/dashboard on. Redaction rule:
+        for the direct probe (via=='direct'), the ip_echo event must
+        omit observed_ip (or set it to None); for proxy probes the IP
+        MUST still ride in extra so silent-misrouting detection works
+        (see test_warmup_and_ip_echo_events_emitted_during_preflight)."""
+        from hklii_downloader.events import StructuredEventLogger
+
+        home_ip = "203.0.113.99"
+        proxy_ip = "198.51.100.7"
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    ip = home_ip if proxy_url is None else proxy_ip
+                    return httpx.Response(
+                        200, json={"origin": ip, "ip": ip},
+                    )
+                return httpx.Response(200, text="<html>HKLII</html>")
+            return httpx.MockTransport(handler)
+
+        ev = StructuredEventLogger(tmp_path)
+        await ev.start()
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            events=ev, _transport_factory=make_transport,
+        )
+        await pool.preflight()
+        await ev.aclose()
+
+        rows = _read_events(tmp_path)
+        echoes = [r for r in rows if r["kind"] == "ip_echo"]
+        assert len(echoes) >= 2, (
+            f"expected home + proxy ip_echo events; got {echoes}"
+        )
+
+        # No emitted ip_echo may carry the home IP anywhere in extra.
+        for e in echoes:
+            extra = e.get("extra") or {}
+            assert extra.get("observed_ip") != home_ip, (
+                f"ip_echo event leaks home WAN IP {home_ip!r} to "
+                f"events.jsonl (proxy_url={e.get('proxy_url')!r}, "
+                f"extra={extra!r})"
+            )
+
+        # The direct-probe event must EITHER omit observed_ip OR
+        # explicitly null it — never expose the home IP octets.
+        direct_echoes = [e for e in echoes if e["proxy_url"] == "direct"]
+        assert direct_echoes, (
+            f"expected at least one direct-probe ip_echo (from the "
+            f"home-IP capture); got {echoes}"
+        )
+        for e in direct_echoes:
+            observed = (e.get("extra") or {}).get("observed_ip")
+            assert observed is None, (
+                f"direct-probe ip_echo must not disclose the observed "
+                f"IP; got observed_ip={observed!r} in {e!r}"
+            )
+
+        # Canary preservation: the proxy exit IP MUST still ride in
+        # extra so silent-misrouting detection downstream still works.
+        proxy_echoes = [
+            e for e in echoes if e["proxy_url"] == "http://localhost:8888"
+        ]
+        assert proxy_echoes, (
+            f"expected a proxy ip_echo event; got {echoes}"
+        )
+        assert any(
+            (e.get("extra") or {}).get("observed_ip") == proxy_ip
+            for e in proxy_echoes
+        ), (
+            f"proxy ip_echo must still carry observed_ip={proxy_ip!r} "
+            f"so silent-misrouting detection works; got {proxy_echoes}"
+        )
+
     async def test_events_none_is_a_valid_noop(self, tmp_path):
         def make_transport(proxy_url):
             def handler(request):
