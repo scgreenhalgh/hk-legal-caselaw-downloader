@@ -6,7 +6,7 @@ For the internal design of the pieces this chapter drives — the `BulkScraper` 
 
 ## CLI subcommand overview
 
-`hklii` is a Click group with four subcommands. Three of the four (`download`, `scrape`, `enrich`) talk to HKLII or Judiciary over the network and therefore require an explicit choice of `--proxy` or `--direct` — leaving both off raises `click.UsageError` (`src/hklii_downloader/cli.py:84-85`, `:218-219`, `:348-349`). The fourth (`verify`) is offline and only touches the checkpoint DB and the local filesystem.
+`hklii` is a Click group with five subcommands. Four of the five (`download`, `scrape`, `enrich`, `recheck-html`) talk to HKLII or Judiciary over the network and therefore require an explicit choice of `--proxy` or `--direct` — leaving both off raises `click.UsageError`. The fifth (`verify`) is offline and only touches the checkpoint DB and the local filesystem.
 
 | Subcommand | Purpose | Network? | Proxy required? |
 |---|---|---|---|
@@ -14,6 +14,7 @@ For the internal design of the pieces this chapter drives — the `BulkScraper` 
 | `hklii scrape` | Enumerate courts, then bulk-download every pending case | Yes | Yes (proxy XOR direct) |
 | `hklii verify` | Reconcile `status='downloaded'` checkpoint rows against on-disk files | No | No — offline |
 | `hklii enrich` | Backfill press summaries + appeal history for already-downloaded cases | Yes | Yes (proxy XOR direct) |
+| `hklii recheck-html` | Re-check rows previously captured via doc-fallback for newly-available HTML | Yes | Yes (proxy XOR direct) |
 
 `--proxy` and `--direct` are mutually exclusive: the shared `MutuallyExclusiveOption` at `cli.py:16-20` raises `UsageError("--proxy and --direct are mutually exclusive.")` if both are set. For `scrape` and `enrich`, `--direct` also prints a confirmation prompt unless `-y`/`--yes` is passed (`cli.py:221-225`, `:351-355`) — a deliberate speed bump because a direct run exposes the operator's home IP.
 
@@ -305,6 +306,39 @@ jq '[.judgments[].parallel | length] | max' \
 ```
 
 The envelope schema is fixed at exactly two top-level keys (`totalfiles`, `judgments`) and each judgment record has five keys (`neutral`, `path`, `date`, `parallel`, `cases`) — see [03 Endpoint reference](./03-endpoint-reference.md) for the authoritative schema. Any `jq` recipe that assumes those keys will keep working as long as HKLII's API shape is stable.
+
+## `hklii recheck-html` — re-fetch doc-fallback rows for newly-available HTML
+
+Complement to `hklii scrape --allow-doc`. Every row captured via the empty-content-with-doc-fallback path is stamped `html_pending_at_hklii` (see [10 Content safeguards](./10-content-safeguards.md) § "Follow-up: html_pending_at_hklii tracker"). This subcommand walks those rows, re-fetches `getjudgment`, and either captures the HTML (clearing the flag and adding `html`/`txt`/`json` to `formats`) or bumps the timestamp so the row appears at the back of the FIFO queue for the next pass.
+
+**Flags:**
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-o`, `--output` | `./downloads` | Directory containing the existing checkpoint + downloads |
+| `-p`, `--proxy` (repeatable) | — | Proxy pool |
+| `--direct` | off | Direct mode (prompts unless `-y`) |
+| `--limit N` | unlimited | Cap the number of rows rechecked in this pass |
+| `-y`, `--yes` | off | Skip the `--direct` confirmation prompt |
+
+**Recommended cadence:** run monthly against the production download directory. HKLII's HTML extraction backlog on very recent judgments typically resolves within 4-8 weeks, so a monthly pass converts most of the doc-only rows back to full HTML+doc rows over 2-3 iterations. Use `--limit` on the first run to sanity-check throughput.
+
+**Example commands:**
+
+```bash
+# Monthly maintenance pass against the production output dir.
+uv run hklii recheck-html \
+  $(for p in $(seq 8888 8907); do printf ' -p http://localhost:%d' $p; done) \
+  -o ./output
+
+# Small canary against the current pool.
+uv run hklii recheck-html --proxy http://localhost:8888 --limit 50
+
+# Direct-mode smoke test (exposes home IP; use only for debugging).
+uv run hklii recheck-html --direct --yes --limit 5
+```
+
+**Reporting:** the subcommand prints `Newly captured: X, still pending: Y, failed: Z.` at the end. `newly_captured` are rows that now have HTML on disk; `still_pending` are rows where HKLII still returns `content:""` (their timestamp was bumped); `failed` covers challenge-page responses, non-200s, and JSON parse errors (the row is left unchanged for a future retry).
 
 ## Logging locations
 

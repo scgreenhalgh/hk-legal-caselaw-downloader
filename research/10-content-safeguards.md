@@ -215,6 +215,17 @@ Empty `content` fields are not an error mode. They are a shipping pattern: recen
 
 Operationally this means: **to capture the full recent corpus, the operator must run with `--allow-doc -f doc` in addition to `-f html`.** Without it, every empty-content case will be marked failed as `empty-content, doc_url=…`. See [Operations Runbook](./11-operations-runbook.md) for the exact production command and [Judiciary Platform](./02-judiciary-platform.md) for why HKLII does this (they receive .docx from the Judiciary and don't consistently transcribe it to HTML for recent files).
 
+### Follow-up: `html_pending_at_hklii` tracker + `hklii recheck-html`
+
+Rows captured on the empty-content-with-doc path are not *actually* done — HKLII typically extracts the HTML weeks or months later, and re-fetching those cases at that point produces a legitimate HTML render. The scraper records this state so a follow-up pass can find them:
+
+- **Schema:** `checkpoint.py` adds a nullable `html_pending_at_hklii INTEGER` column (unix ts) via the existing idempotent migration path.
+- **Set-point:** in `_download_one_impl` (`scraper.py:321-333`), right before `mark_downloaded`, the scraper stamps `html_pending_ts = int(time.time())` iff `content_ok is False AND "doc" in actually_saved` — i.e. exactly the doc-fallback path. Otherwise `html_pending_ts=None` clears any prior stamp.
+- **Consumer:** `hklii recheck-html` (`cli.py`, `html_recheck.HtmlRecheckRunner`) walks `checkpoint.pending_html_recheck()` rows in FIFO ts order, re-fetches `getjudgment` for each, and either (a) saves the HTML + clears the flag if content is now non-empty and passes the `_looks_like_challenge_page` check, or (b) bumps `html_pending_at_hklii` to now so the row moves to the back of the queue for the next pass. Uses the standard proxy pool + preflight so wire behavior is identical to the main `scrape` command.
+- **Format union:** on successful re-capture, `mark_downloaded` is called with `set(existing_formats) | {"html", "txt", "json"}` — the original `.doc` or `.docx` stays on disk, the new HTML/txt/json are added.
+
+Reporting: the CLI prints `Newly captured: X, still pending: Y, failed: Z.` at the end. See [Operations Runbook](./11-operations-runbook.md) for cadence recommendations (weekly or monthly re-checks against the pending pool).
+
 ## Failure error string format
 
 Every `mark_failed` call in the scraper writes a compact, greppable error string to the `cases.error` column. When the failure includes body content (retryable-status exhaustion or JSONDecodeError), the body is truncated to `_BODY_PREVIEW_LEN = 200` characters and newlines are replaced with spaces (`scraper.py:27, 262, 275`):

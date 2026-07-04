@@ -906,6 +906,24 @@ covers the `--courts` flag.
 
 ---
 
+## Why `html_pending_at_hklii` + a separate `recheck-html` subcommand
+
+**Context.** HKLII shows "Only the Word format is available at the moment" for recent-2026 judgments — `getjudgment` returns `content:""` plus a `doc` URL pointing at `legalref.judiciary.hk`. `--allow-doc` already captures the `.doc`/`.docx`, but there was no way to distinguish "captured via HTML" from "captured via doc-fallback" in the checkpoint, so no way to know which rows deserve a follow-up pass once HKLII processes the HTML weeks later.
+
+**Decision (2026-07-04).** Add a nullable `html_pending_at_hklii INTEGER` (unix ts) column to `cases`. The scraper stamps it on the doc-fallback branch (`scraper.py:321-333`) and clears it whenever HTML is successfully captured. A new `hklii recheck-html` subcommand plus `html_recheck.HtmlRecheckRunner` walks `checkpoint.pending_html_recheck()` rows in FIFO order, re-fetches `getjudgment`, and either captures HTML (clears the flag, adds `html`/`txt`/`json` to `formats` via set-union with the prior doc) or bumps the timestamp.
+
+**Alternatives considered:**
+- **Infer from `formats`.** A row where `formats=['doc']` and `doc_url` was present *might* be a fallback capture. But we'd lose the ordering (no timestamp) and the state is fragile — someone can `-f doc` a case with actual HTML too and get `formats=['doc']` legitimately.
+- **Reuse the `error` column with a magic string.** Would double up two orthogonal concepts (failure reason vs work-still-pending) on one column. Rejected as brittle.
+- **A `--recheck-pending-html` flag on `scrape`.** Fewer commands to remember but muddies the mental model of `scrape` (which is enumerate-then-download from `status='pending'` rows). Kept the separation.
+- **Set-then-forget.** Just mark the row and never revisit. Rejected because it defeats the point — a `--rag-ready` corpus needs HTML/txt, not `.docx`.
+
+**Data.** The 20-pool canary (`--courts hkfc --limit 100`) produced 45 `.docx`-only cases + 55 `.doc`-only cases + 99 HTML cases. Extrapolating to the full 4-court x 2-lang production run: an expected ~15-25% of the corpus lands via doc-fallback initially, drops to well under 5% after 2-3 monthly recheck passes. FIFO ordering by `html_pending_at_hklii` ensures the oldest pending rows get first crack each pass.
+
+**Date.** 2026-07-04.
+
+**Cross-ref.** [10 Content safeguards](./10-content-safeguards.md) § "Follow-up: html_pending_at_hklii tracker" for the schema/set-point/consumer flow; [11 Operations runbook](./11-operations-runbook.md) § "hklii recheck-html" for the operator-side usage and recommended cadence.
+
 ## Deliberate non-decisions
 
 The following sections document things we chose **not** to do and the
