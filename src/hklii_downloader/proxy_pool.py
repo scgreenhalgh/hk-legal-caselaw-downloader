@@ -122,8 +122,15 @@ class HeaderRotator:
         }
 
     def generate(self, url: str | None = None) -> dict[str, str]:
-        # Stub: ignores url. Real XHR/navigation split lands in next commit.
-        return dict(self._headers)
+        headers = dict(self._headers)
+        if url is not None and "/api/" in url:
+            # XHR: Chrome sends mode:cors, dest:empty on fetch()/XHR to
+            # same-origin JSON APIs, and never sec-fetch-user or UIR.
+            headers["sec-fetch-mode"] = "cors"
+            headers["sec-fetch-dest"] = "empty"
+            headers.pop("sec-fetch-user", None)
+            headers.pop("Upgrade-Insecure-Requests", None)
+        return headers
 
     def referer_for(self, url: str) -> str:
         return _referer_for(url)
@@ -313,7 +320,7 @@ class ProxyPool:
                     and session.request_count % self._ip_check_interval == 0):
                 await self._runtime_ip_check(session, client)
 
-            req_headers = headers.generate()
+            req_headers = headers.generate(url)
             req_headers["Referer"] = headers.referer_for(url)
 
             try:
