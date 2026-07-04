@@ -95,3 +95,53 @@ class TestRecipe5aServerHeader:
             f"{result.stdout!r}. Production headers are lowercase per httpx / "
             f"curl_cffi .items() normalisation."
         )
+
+
+_TITLECASE_HEADER_PATH = re.compile(r"\.headers\.[A-Z]")
+
+
+class TestNoTitlecaseJqHeaderPaths:
+    """Regression guard for the B9 class of bug — a title-case jq header
+    identifier (`.headers.Server`, `.headers.Set-Cookie`, ...) that silently
+    misses the lowercase keys production actually ships.
+
+    Quoted-key syntax `.headers["Foo"]` is explicitly allowed: jq treats
+    bracketed strings as exact-string lookups, so an operator who genuinely
+    needs a case-preserving key (or a non-identifier one) can use quotes. The
+    identifier form is the one that silently degrades.
+    """
+
+    def test_regex_catches_titlecase_positive_fixture(self) -> None:
+        """Prove the regex fires on the exact shape B9 fixed.
+
+        Without this, an empty / broken regex would let the file-scan test
+        pass vacuously and the guard would rot.
+        """
+        assert _TITLECASE_HEADER_PATH.search(
+            "jq -r '.headers.Server // .headers.CF_Ray'"
+        )
+        assert _TITLECASE_HEADER_PATH.search("jq '.headers.Set'")
+        # Bracketed-key syntax is unambiguous and allowed.
+        assert not _TITLECASE_HEADER_PATH.search(
+            'jq -r \'.headers["Content-Type"]\''
+        )
+        # Lowercase identifiers are the target shape.
+        assert not _TITLECASE_HEADER_PATH.search("jq -r '.headers.server'")
+
+    def test_no_titlecase_jq_header_paths(self) -> None:
+        """No research/*.md file contains `.headers.<Upper>` — this is the
+        regression guard for Recipe 5a's class of bug.
+        """
+        offenders: list[str] = []
+        for md in sorted(_RESEARCH.glob("*.md")):
+            for lineno, line in enumerate(
+                md.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if _TITLECASE_HEADER_PATH.search(line):
+                    offenders.append(f"{md.name}:{lineno}: {line.strip()}")
+        assert not offenders, (
+            "Title-case jq `.headers.<Upper>` paths silently return null on "
+            "the lowercase headers httpx / curl_cffi actually ship. Rewrite "
+            "as `.headers.<lower>` or `.headers[\"<Exact-Case>\"]`. Offenders:\n"
+            + "\n".join(offenders)
+        )
