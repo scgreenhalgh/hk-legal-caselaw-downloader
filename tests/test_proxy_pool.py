@@ -369,6 +369,75 @@ class TestProxyPool:
             f"non-API HKLII page) after IP echo; saw only {urls_seen}"
         )
 
+    async def test_preflight_logs_warmup_and_ip_echo_per_proxy(self, caplog):
+        """B4: the runbook's mandatory pre-production canary greps
+        scrape.log for the warm-up landing-page fetch and IP echoes.
+        Without INFO records from _warm_up_target and _fetch_ip, the
+        canary check returns exit 1 even against a healthy run. This
+        extends the M-4 warm-up test (see
+        test_preflight_warms_up_hklii_origin_after_ip_check) by asserting
+        the logger emits observable evidence."""
+        urls_seen: list[str] = []
+        counter = [0]
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                urls_seen.append(url)
+                if "httpbin" in url or "ipinfo" in url:
+                    counter[0] += 1
+                    ip = f"1.2.3.{counter[0]}"
+                    return httpx.Response(
+                        200, json={"origin": ip, "ip": ip},
+                    )
+                return httpx.Response(200, text="<html>HKLII homepage</html>")
+            return httpx.MockTransport(handler)
+
+        proxy_url = "http://localhost:8888"
+        pool = ProxyPool(
+            proxy_urls=[proxy_url],
+            _transport_factory=make_transport,
+        )
+        with caplog.at_level(
+            logging.INFO, logger="hklii_downloader.proxy_pool"
+        ):
+            await pool.preflight()
+
+        infos = [
+            r for r in caplog.records
+            if r.name == "hklii_downloader.proxy_pool"
+            and r.levelno == logging.INFO
+        ]
+        messages = [r.getMessage() for r in infos]
+
+        warmups = [
+            m for m in messages
+            if "warmup GET https://www.hklii.hk/" in m
+        ]
+        assert len(warmups) == 1, (
+            f"expected exactly one INFO 'warmup GET https://www.hklii.hk/' "
+            f"for the sole proxy so the runbook canary grep can find it; "
+            f"got {len(warmups)} in {messages}"
+        )
+        assert proxy_url in warmups[0], (
+            f"warmup INFO must include proxy_url {proxy_url!r} so per-proxy "
+            f"warmup can be distinguished; got: {warmups[0]!r}"
+        )
+
+        # Two IP echoes fire during preflight: one for home_ip via the
+        # direct client, one for the proxy. Both must log.
+        ip_echoes = [m for m in messages if "IP echo" in m]
+        assert len(ip_echoes) >= 2, (
+            f"expected at least two INFO 'IP echo' records (home + proxy); "
+            f"got {len(ip_echoes)} in {messages}"
+        )
+        # At least one IP echo INFO must reference an observed IP so
+        # scrape.log grep can confirm the proxy actually reported an IP.
+        assert any("1.2.3." in m for m in ip_echoes), (
+            f"at least one IP echo INFO must include the observed IP "
+            f"(mock returns 1.2.3.*); got: {ip_echoes}"
+        )
+
     async def test_runtime_ip_check_detects_leak(self):
         home_ip = "203.0.113.1"
 
