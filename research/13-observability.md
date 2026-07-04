@@ -224,6 +224,113 @@ jq -r 'select(.kind=="request_failed" and (.http_status|IN(429,503)))
 
 ---
 
+## Periodic monitoring via `hklii monitor` + `/loop`
+
+The `jq` recipes above are for *ad-hoc* triage — you run them when something
+already feels wrong. For an unattended 15-20h production run you want the
+inverse: a single command a cron job or `/loop` wrapper fires every few
+minutes that reads all three artifacts, decides whether anything is drifting,
+and escalates by **exit code** so the outer loop can page a human. That command
+is `hklii monitor`.
+
+```
+hklii monitor -o ./downloads/prod            # table, exit 0/1/2
+hklii monitor -o ./downloads/prod --json     # machine-readable summary
+hklii monitor -o ./downloads/prod --quiet    # silent; just the exit code
+```
+
+It is a **pure reader**: it opens `.checkpoint.db` read-only
+(`file:…?mode=ro`), tails `events.jsonl` backward from EOF, and tails the last
+200 lines of `scrape.log` — it never writes to any of them, so it is safe to
+run against a live scrape (WAL gives concurrent readers; `events.jsonl` is
+append-only). It returns in well under a second even against a 100MB event log
+because the backward tail stops at the first row older than `--window-min`.
+
+### What it reads
+
+| Source | Signal |
+|---|---|
+| `.checkpoint.db` | status counts, top-5 failed-error prefixes (`SUBSTR(error,1,40)`), and `downloaded/hour` + ETA (run-start = earliest `last_seen_at`, falling back to the DB mtime with a warning) |
+| `events.jsonl` | per-kind counts in the window, per-proxy failure hotspots (>3σ above the pool mean), and the last 5 `challenge_detected` URLs+proxies |
+| `scrape.log` | the last 5 `WARNING`/`ERROR`/`CRITICAL` records, reformatted `[HH:MM:SS] message` |
+
+### Severity → exit code
+
+The thresholds are the Chapter 11 Hour-4 monitor, mechanised. The failed-status
+error-prefix breakdown is the widest-drift-catching signal (WAF shows as
+`challenge-page detected`, doc-fallback as `empty-content, doc-fetch-failed`,
+mid-run pool death as `pool-exhausted`).
+
+| Exit | Severity | Fires when |
+|---|---|---|
+| `2` | CRITICAL | any error-prefix > 100 · `in_progress` > 4× `--workers` (B6 rip) · sustained rate < 4000/hr (once >1h of data) · `.checkpoint.db` missing |
+| `1` | WARN | any `degraded` (B3) or `pool_exhausted` (B6) event in-window · error-prefix 20-100 · a proxy > 3σ over the pool-mean failure count · rate 4000-6000/hr |
+| `0` | HEALTHY | everything within tolerance |
+
+Degradations are handled: on a `--no-events` run the events section shows `N/A`
+and no event-based alerts fire; a missing `scrape.log` shows `(no log file)`.
+
+### Text output
+
+```
+[HEALTHY] hklii scrape @ ./downloads/prod — hour 4.2, 47320/114398 (41.4%), ~7100/hr, ETA ~9.4h
+──────────────────────────────────────────────────────────────
+status           count
+────────────── ───────
+downloaded       47320
+in_progress         19
+failed             142
+pending          66917
+──────────────────────────────────────────────────────────────
+top error prefixes
+  empty-content, doc-fetch-failed             87
+  http-503                                    33
+──────────────────────────────────────────────────────────────
+recent events (last 30 min)
+  request_success          4102
+  request_failed             88
+  warmup                      0
+  challenge_detected          0
+  pool_exhausted              0
+  degraded                    0
+──────────────────────────────────────────────────────────────
+per-proxy failure hotspots (>3σ above mean)
+  (none)
+──────────────────────────────────────────────────────────────
+last 5 log warnings
+  [16:47:12] FAILED hkcfi/2024/1023: empty-content, doc-fetch-failed
+```
+
+When anything fires, the headline leads with the most-severe alert instead —
+e.g. `[CRITICAL] error-prefix 'empty-content, doc-fetch-failed' has 187 hits`.
+
+### Driving it with `/loop`
+
+`/loop` re-invokes a prompt or slash command on an interval. Point it at
+`hklii monitor` and have it act on the exit code — keep watching on 0, watch
+more closely on 1, and stop to alert on 2:
+
+```
+/loop 5m Run `uv run hklii monitor -o ./downloads/prod --json`. If the exit
+code is 2, STOP and summarise the alerts for me — the run likely needs killing
+(quarantine the flagged exit IPs for 24h before restarting). If it is 1, note
+the warning and keep watching. If it is 0, reply "healthy" and continue.
+```
+
+The equivalent bare cron entry, escalating only on critical:
+
+```bash
+*/5 * * * * cd /path/to/hklii_downloader && \
+  uv run hklii monitor -o ./downloads/prod --quiet || \
+  [ $? -eq 2 ] && notify-send "hklii scrape CRITICAL — check monitor"
+```
+
+Pair this with the raw `jq` recipes above: `monitor` tells you *that* something
+drifted and roughly what; the recipes tell you the full per-proxy / per-hour /
+per-fingerprint story behind it.
+
+---
+
 ## Cross-references
 
 - **Human log + checkpoint SQL** — [Chapter 11 → Logging locations](./11-operations-runbook.md#logging-locations). Use the checkpoint DB for exact status counts; use `events.jsonl` for per-proxy / per-hour / per-fingerprint slices the DB cannot express.
