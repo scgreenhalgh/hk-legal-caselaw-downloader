@@ -88,6 +88,20 @@ class TestMakeAsyncClient:
         source = inspect.getsource(make_async_client)
         assert "trust_env=False" in source
 
+    def test_http2_enabled(self):
+        """M-6: httpx defaults to HTTP/1.1. But _BROWSER_HEADERS advertises
+        Chrome 148 — a browser that speaks HTTP/2 on ALPN by default and
+        opportunistically HTTP/3. Chrome/148 UA + HTTP/1.1 request line
+        is a Tier-1 access-log signal (suspicionCritique rule 7).
+        """
+        import inspect
+
+        source = inspect.getsource(make_async_client)
+        assert "http2=True" in source, (
+            "expected http2=True passed to httpx.AsyncClient in "
+            "make_async_client; not found in source"
+        )
+
 
 class TestFetchJudgment:
     async def test_parses_full_response(self):
