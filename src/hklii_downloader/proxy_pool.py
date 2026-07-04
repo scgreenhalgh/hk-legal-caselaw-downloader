@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .events import StructuredEventLogger
 from .parser import referer_for as _referer_for
 
 _monotonic = time.monotonic
@@ -214,6 +215,7 @@ class ProxyPool:
         ip_check_interval: int = 50,
         max_failures: int = 5,
         cooldown_seconds: float = 300.0,
+        events: StructuredEventLogger | None = None,
         _transport_factory=None,
     ):
         proxy_urls = proxy_urls or []
@@ -225,6 +227,7 @@ class ProxyPool:
         self._transport_factory = _transport_factory
         self._preflight_done = direct
         self._home_ip: str | None = None
+        self._events = events
 
         self.sessions: list[ProxySession] = []
         self._clients: dict[int, httpx.AsyncClient] = {}
@@ -246,6 +249,10 @@ class ProxyPool:
 
         if direct:
             self._direct_client = self._make_client(None)
+
+    def _emit(self, kind: str, **fields) -> None:
+        if self._events is not None:
+            self._events.emit(kind, **fields)
 
     def _make_client(self, proxy_url: str | None):
         # Tests inject an httpx.MockTransport via _transport_factory; keep
@@ -300,6 +307,7 @@ class ProxyPool:
         headers = self._headers[session.index]
         req_headers = headers.generate(_WARMUP_URL)
         req_headers["Referer"] = headers.referer_for(_WARMUP_URL)
+        t0 = _monotonic()
         try:
             await client.get(_WARMUP_URL, headers=req_headers)
         except (httpx.RequestError, Exception):
@@ -308,9 +316,14 @@ class ProxyPool:
         _log.info(
             "warmup GET %s via %s", _WARMUP_URL, session.proxy_url,
         )
+        self._emit(
+            "warmup", proxy_url=session.proxy_url, url=_WARMUP_URL,
+            elapsed_ms=int((_monotonic() - t0) * 1000),
+        )
 
     async def _fetch_ip(self, client, via: str = "direct") -> str:
         for echo_url, json_key in _IP_ECHO_URLS:
+            t0 = _monotonic()
             try:
                 resp = await client.get(echo_url)
                 # Check status_code directly instead of raise_for_status —
@@ -322,6 +335,11 @@ class ProxyPool:
                 ip = resp.json()[json_key]
                 _log.info(
                     "IP echo %s via %s -> %s", echo_url, via or "direct", ip,
+                )
+                self._emit(
+                    "ip_echo", proxy_url=via or "direct", url=echo_url,
+                    elapsed_ms=int((_monotonic() - t0) * 1000),
+                    extra={"observed_ip": ip},
                 )
                 return ip
             except (httpx.RequestError, KeyError, json.JSONDecodeError):
@@ -335,7 +353,10 @@ class ProxyPool:
         if self.direct:
             direct_headers = dict(kwargs.pop("headers", None) or {})
             direct_headers.setdefault("Referer", _referer_for(url))
-            return await self._direct_client.get(url, headers=direct_headers, **kwargs)
+            t0 = _monotonic()
+            resp = await self._direct_client.get(url, headers=direct_headers, **kwargs)
+            self._emit_request_event(resp, "direct", url, t0)
+            return resp
 
         idx = await self._acquire_session()
         session = self.sessions[idx]
@@ -354,19 +375,46 @@ class ProxyPool:
             req_headers = headers.generate(url)
             req_headers["Referer"] = headers.referer_for(url)
 
+            t0 = _monotonic()
             try:
                 resp = await client.get(url, headers=req_headers, **kwargs)
                 if resp.status_code in _PROXY_FAILURE_STATUSES:
                     session.record_failure()
                 else:
                     session.record_success()
+                self._emit_request_event(resp, session.proxy_url, url, t0)
                 return resp
-            except httpx.RequestError:
+            except httpx.RequestError as exc:
                 session.record_failure()
+                self._emit(
+                    "request_failed", proxy_url=session.proxy_url, url=url,
+                    elapsed_ms=int((_monotonic() - t0) * 1000),
+                    error_class=type(exc).__name__, error_msg=str(exc),
+                )
                 raise
         finally:
             if session.is_healthy:
                 self._available.put_nowait(idx)
+
+    def _emit_request_event(self, resp, proxy_url: str, url: str, t0: float) -> None:
+        """Stamp the serving proxy onto the response (so the scraper can
+        attribute a later challenge/failure to a proxy) and emit one
+        per-request event — the raw signal behind per-proxy success-rate and
+        hourly-trajectory analytics."""
+        try:
+            resp.hklii_proxy_url = proxy_url
+        except Exception:
+            # curl_cffi's Response may not accept arbitrary attributes; the
+            # per-request event below still carries proxy_url regardless.
+            pass
+        elapsed_ms = int((_monotonic() - t0) * 1000)
+        status = resp.status_code
+        kind = (
+            "request_failed" if status in _PROXY_FAILURE_STATUSES
+            else "request_success"
+        )
+        self._emit(kind, proxy_url=proxy_url, url=url, http_status=status,
+                   elapsed_ms=elapsed_ms)
 
     async def _acquire_session(self) -> int:
         while True:
@@ -398,6 +446,11 @@ class ProxyPool:
                 "runtime IP check for %s degraded: %s",
                 session.proxy_url, exc,
             )
+            self._emit(
+                "degraded", proxy_url=session.proxy_url,
+                error_class="runtime-ip-check",
+                error_msg=f"runtime IP check degraded: {exc}",
+            )
             return
 
         if current_ip != self._home_ip:
@@ -409,6 +462,11 @@ class ProxyPool:
             _log.warning(
                 "runtime IP check verify for %s degraded: %s",
                 session.proxy_url, exc,
+            )
+            self._emit(
+                "degraded", proxy_url=session.proxy_url,
+                error_class="runtime-ip-check-verify",
+                error_msg=f"runtime IP check verify degraded: {exc}",
             )
             return
 
