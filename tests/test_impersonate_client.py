@@ -74,8 +74,13 @@ class TestProfileSelection:
 
 class TestHeaderStripping:
     async def test_fingerprint_conflict_headers_stripped(self):
-        """Passing UA / sec-ch-ua / sec-fetch-* headers to .get() would
-        contradict curl_cffi's impersonation. Wrapper strips them."""
+        """Passing UA / sec-ch-ua / Accept-Language headers to .get()
+        would contradict curl_cffi's baked TLS+HTTP/2 impersonation
+        fingerprint. Wrapper strips them.
+
+        sec-fetch-* is intentionally NOT stripped — see
+        TestSecFetchForwarding — because it's behavioral (per-request
+        XHR vs navigation), not fingerprint-baked."""
         from hklii_downloader.impersonate_client import ImpersonateAsyncClient
 
         captured = {}
@@ -94,14 +99,12 @@ class TestHeaderStripping:
         await c.get("https://example.com", headers={
             "User-Agent": "not-really-chrome",
             "sec-ch-ua": "spoofed",
-            "sec-fetch-mode": "cors",
             "Referer": "https://x.com/",
             "Accept-Language": "en-US",   # also strip: curl_cffi handles it
         })
         sent = captured["headers"]
         assert "User-Agent" not in sent and "user-agent" not in sent
         assert "sec-ch-ua" not in sent
-        assert "sec-fetch-mode" not in sent
         assert "Accept-Language" not in sent
         assert "Referer" in sent, "non-fingerprint headers should pass through"
 

@@ -25,6 +25,16 @@ _IMPERSONATE_PROFILES = (
 # Headers that curl_cffi's impersonation controls end-to-end. Passing
 # alternative values via .get(headers=…) would create a UA/TLS mismatch
 # — the classic "not a real browser" tell — so we strip them.
+#
+# NOTE: sec-fetch-* and Upgrade-Insecure-Requests are BEHAVIORAL, not
+# fingerprint-baked. A real browser flips sec-fetch-mode between
+# 'navigate' (top-level nav) and 'cors' (fetch()/XHR) per request, and
+# drops UIR on XHR entirely. The M-2 fix in
+# ProxyHeadersFactory.generate() shapes these correctly for /api/*
+# XHR calls; the wrapper must pass them through so curl_cffi's baked
+# chrome navigation defaults don't ship on every JSON API request
+# (Signal 6, research/04-anti-detection-strategy.md:511). Do not
+# re-add sec-fetch-* / upgrade-insecure-requests to this frozenset.
 _FINGERPRINT_HEADERS = frozenset({
     "user-agent",
     "accept",
@@ -33,11 +43,6 @@ _FINGERPRINT_HEADERS = frozenset({
     "sec-ch-ua",
     "sec-ch-ua-mobile",
     "sec-ch-ua-platform",
-    "sec-fetch-site",
-    "sec-fetch-mode",
-    "sec-fetch-dest",
-    "sec-fetch-user",
-    "upgrade-insecure-requests",
     "connection",
 })
 
