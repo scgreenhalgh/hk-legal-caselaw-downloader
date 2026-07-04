@@ -121,3 +121,66 @@ class TestEventsReader:
         assert counts.get("request_failed") == 3
         assert counts.get("request_success") == 0
         assert elapsed < 2.0, f"events read took {elapsed:.2f}s (>2s budget)"
+
+
+class TestProxyHotspots:
+    def test_flags_single_outlier_proxy(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        rows = []
+        # Production topology: 19 proxies with 1 failure each, one proxy with
+        # 100 — a clear >3σ outlier (mean ~5.95, pstdev ~21.6, thr ~70.5).
+        for i in range(19):
+            rows.append({"ts": _iso(15), "kind": "request_failed",
+                         "proxy_url": f"http://p{i}:{i}"})
+        for _ in range(100):
+            rows.append({"ts": _iso(10), "kind": "request_failed",
+                         "proxy_url": "http://p19:19"})
+        _write_events(out, rows)
+        hotspots = MonitorRunner(out, window_min=30, now=NOW).run()["events"]["proxy_hotspots"]
+        assert len(hotspots) == 1
+        assert hotspots[0]["proxy_url"] == "http://p19:19"
+        assert hotspots[0]["failed"] == 100
+
+    def test_no_hotspot_when_evenly_distributed(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        rows = []
+        for i in range(20):
+            for _ in range(5):  # identical failure counts → zero variance
+                rows.append({"ts": _iso(12), "kind": "request_failed",
+                             "proxy_url": f"http://p{i}:{i}"})
+        _write_events(out, rows)
+        hotspots = MonitorRunner(out, window_min=30, now=NOW).run()["events"]["proxy_hotspots"]
+        assert hotspots == []
+
+    def test_out_of_window_failures_excluded_from_hotspots(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        rows = [{"ts": _iso(120), "kind": "request_failed",
+                 "proxy_url": "http://p0:0"} for _ in range(500)]
+        # 500 old failures on p0, but all outside the window → not a hotspot.
+        rows += [{"ts": _iso(5), "kind": "request_failed",
+                  "proxy_url": f"http://p{i}:{i}"} for i in range(1, 4)]
+        _write_events(out, rows)
+        hotspots = MonitorRunner(out, window_min=30, now=NOW).run()["events"]["proxy_hotspots"]
+        assert all(h["proxy_url"] != "http://p0:0" for h in hotspots)
+
+
+class TestRecentChallenges:
+    def test_returns_last_five_newest_first(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        rows = [
+            {"ts": _iso(30 - i), "kind": "challenge_detected",
+             "url": f"https://www.hklii.hk/api/getjudgment?n={i}",
+             "proxy_url": f"http://p{i}:{i}"}
+            for i in range(7)  # i=0 oldest (_iso(30)) .. i=6 newest (_iso(24))
+        ]
+        _write_events(out, rows)
+        challenges = MonitorRunner(out, window_min=40, now=NOW).run()["events"]["recent_challenges"]
+        assert len(challenges) == 5
+        # newest first: i=6 then 5,4,3,2
+        assert challenges[0]["url"] == "https://www.hklii.hk/api/getjudgment?n=6"
+        assert challenges[0]["proxy_url"] == "http://p6:6"
+        assert challenges[-1]["url"] == "https://www.hklii.hk/api/getjudgment?n=2"
