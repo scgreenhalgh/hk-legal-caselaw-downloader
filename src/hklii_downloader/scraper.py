@@ -16,6 +16,7 @@ _log = logging.getLogger("hklii_downloader.scraper")
 
 from .checkpoint import CheckpointDB, CaseRecord
 from .client import Judgment, parse_judgment_response, save_judgment_local
+from .content_shape import _looks_like_challenge_page
 from .enrichment import (
     enrich_appeal_history_for_case,
     enrich_summaries_for_case,
@@ -46,26 +47,6 @@ def _response_headers(resp) -> dict:
         return {}
 
 
-_CHALLENGE_MARKERS = (
-    # English — Cloudflare / generic WAF / rate-limit interstitials.
-    "just a moment",
-    "cf-challenge",
-    "cloudflare",
-    "please enable javascript",
-    "verify you are human",
-    "access denied",
-    "too many requests",
-    # Traditional Chinese — HKLII serves bilingual content, any localized
-    # challenge would slip past an English-only denylist.
-    "請稍候",
-    "驗證您是人類",
-    "請啟用 JavaScript",
-    "訪問受限",
-    "系統維護",
-    "拒絕存取",
-)
-
-
 def _jittered_backoff(base: float, attempt: int) -> float:
     """Exponential backoff with multiplicative uniform jitter in [0.5, 1.5].
 
@@ -75,18 +56,6 @@ def _jittered_backoff(base: float, attempt: int) -> float:
     decorrelates them.
     """
     return base * (2 ** attempt) * random.uniform(0.5, 1.5)
-
-
-def _looks_like_challenge_page(content_html: str) -> bool:
-    """True if the HTML looks like a WAF/challenge/error interstitial.
-
-    ASCII markers matched case-insensitively; CJK markers matched exactly
-    (Python str.lower() is a no-op on CJK characters).
-    """
-    if not content_html:
-        return False
-    haystack = content_html.lower()
-    return any(marker.lower() in haystack for marker in _CHALLENGE_MARKERS)
 
 
 @dataclass

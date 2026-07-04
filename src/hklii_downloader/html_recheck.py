@@ -29,8 +29,8 @@ import httpx
 
 from .checkpoint import CaseRecord, CheckpointDB
 from .client import parse_judgment_response, save_judgment_local
+from .content_shape import _looks_like_challenge_page
 from .parser import HKLIICase
-from .scraper import _looks_like_challenge_page
 
 
 @dataclass

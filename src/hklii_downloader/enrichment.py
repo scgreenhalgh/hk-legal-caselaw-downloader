@@ -17,6 +17,7 @@ from urllib.parse import quote
 import httpx
 
 from .atomic_write import atomic_write_text
+from .content_shape import _looks_like_challenge_page
 
 _BASE_URL = "https://www.hklii.hk"
 _VALID_LANGS = ("en", "zh")
@@ -70,9 +71,6 @@ async def enrich_summaries_for_case(
     events=None,
 ) -> None:
     from .enumerator import extract_press_summary_urls
-    # Lazy import: scraper.py imports from this module, so a top-level
-    # import here would form a cycle. See B5.
-    from .scraper import _looks_like_challenge_page
     urls = extract_press_summary_urls(content_html)
     for lang_label, lang_short in (("English", "en"), ("Chinese", "zh")):
         kind = f"summary_{lang_short}"
