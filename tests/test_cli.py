@@ -661,6 +661,80 @@ class TestEnrichSubcommand:
         )
 
 
+class TestMonitorSubcommand:
+    def _healthy_db(self, tmp_path):
+        import time
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        seen = int(time.time()) - 60  # 1 min ago → runtime <1h, no rate alert
+        for i in range(1, 6):
+            db.upsert_case("hkcfi", 2024, i, f"N{i}", f"T{i}",
+                           "2024-01-01", last_seen_at=seen)
+        for i in range(1, 4):
+            db.mark_downloaded("hkcfi", 2024, i, ["html"])
+        db.close()
+        return out
+
+    def test_monitor_in_group_help(self):
+        result = CliRunner().invoke(main, ["--help"])
+        assert "monitor" in result.output
+
+    def test_monitor_help_lists_flags(self):
+        result = CliRunner().invoke(main, ["monitor", "--help"])
+        assert result.exit_code == 0
+        for flag in ("--output", "--window-min", "--workers", "--json", "--quiet"):
+            assert flag in result.output, f"{flag} missing from monitor --help"
+
+    def test_healthy_exits_0(self, tmp_path):
+        out = self._healthy_db(tmp_path)
+        result = CliRunner().invoke(main, ["monitor", "-o", str(out)])
+        assert result.exit_code == 0, result.output
+        assert "HEALTHY" in result.output
+
+    def test_missing_db_exits_2(self, tmp_path):
+        out = tmp_path / "empty"
+        out.mkdir()
+        result = CliRunner().invoke(main, ["monitor", "-o", str(out)])
+        assert result.exit_code == 2
+        assert "checkpoint DB not found" in result.output
+
+    def test_workers_flag_changes_severity(self, tmp_path):
+        import time
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        seen = int(time.time()) - 60
+        for i in range(1, 13):
+            db.upsert_case("hkcfi", 2024, i, f"N{i}", f"T{i}",
+                           "2024-01-01", last_seen_at=seen)
+        for _ in range(10):  # 10 in_progress
+            db.claim_pending()
+        db.close()
+        # workers=2 → in_progress alert threshold 8 → 10 > 8 → critical
+        crit = CliRunner().invoke(main, ["monitor", "-o", str(out), "--workers", "2"])
+        assert crit.exit_code == 2, crit.output
+        # workers=20 → threshold 80 → not critical
+        ok = CliRunner().invoke(main, ["monitor", "-o", str(out), "--workers", "20"])
+        assert ok.exit_code == 0, ok.output
+
+    def test_json_flag_emits_json(self, tmp_path):
+        import json as _json
+        out = self._healthy_db(tmp_path)
+        result = CliRunner().invoke(main, ["monitor", "-o", str(out), "--json"])
+        assert result.exit_code == 0
+        obj = _json.loads(result.output)
+        assert obj["severity"] == "HEALTHY"
+
+    def test_quiet_suppresses_output(self, tmp_path):
+        out = self._healthy_db(tmp_path)
+        result = CliRunner().invoke(main, ["monitor", "-o", str(out), "--quiet"])
+        assert result.exit_code == 0
+        assert result.output.strip() == ""
+
+
 class TestEventsWiring:
     """The observability layer is opt-out: `scrape` / `enrich` / `recheck-html`
     construct a StructuredEventLogger from -o by default (creating
