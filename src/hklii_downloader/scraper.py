@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -44,6 +45,11 @@ _CHALLENGE_MARKERS = (
     "系統維護",
     "拒絕存取",
 )
+
+
+def _jittered_backoff(base: float, attempt: int) -> float:
+    # Stub — real jitter lands in the next commit.
+    return base * (2 ** attempt)
 
 
 def _looks_like_challenge_page(content_html: str) -> bool:

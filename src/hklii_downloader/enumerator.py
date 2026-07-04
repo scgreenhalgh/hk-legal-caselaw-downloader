@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import random
 import re
 from dataclasses import dataclass
 from typing import Callable
@@ -53,6 +54,11 @@ def parse_case_entry(data: dict, court: str) -> CaseEntry:
         title=title,
         date=data.get("date", ""),
     )
+
+
+def _jittered_backoff(base: float, attempt: int) -> float:
+    # Stub — real jitter lands in the next commit.
+    return base * (2 ** attempt)
 
 
 async def _get_json_with_retry(

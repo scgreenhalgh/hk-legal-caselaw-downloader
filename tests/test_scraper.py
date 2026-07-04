@@ -442,6 +442,44 @@ class TestBulkScraperEmptyContentWithDoc:
         assert result.downloaded == 0
 
 
+class TestRetryBackoffJitter:
+    """Deterministic `base * 2**attempt` makes 6 concurrent proxies retry in
+    lockstep — itself a bot pattern in access logs (6 identical retry
+    intervals from 6 subnets after a 5xx burst). Multiplicative uniform
+    jitter in [0.5, 1.5] decorrelates."""
+
+    def test_scraper_jittered_backoff_multiplies_by_random_uniform(self):
+        from unittest.mock import patch
+        from hklii_downloader.scraper import _jittered_backoff
+        with patch(
+            "hklii_downloader.scraper.random.uniform", return_value=0.75
+        ) as m:
+            assert _jittered_backoff(1.0, 3) == 6.0  # 1.0 * 8 * 0.75
+            m.assert_called_once_with(0.5, 1.5)
+
+    def test_scraper_jittered_backoff_range(self):
+        """Over many draws, delays stay within [0.5*base*2**n, 1.5*base*2**n]
+        and DO vary (not always at the max/min)."""
+        from hklii_downloader.scraper import _jittered_backoff
+        delays = [_jittered_backoff(1.0, 2) for _ in range(50)]
+        for d in delays:
+            assert 2.0 <= d <= 6.0, f"delay {d} outside [2.0, 6.0]"
+        # If jitter is applied, we should see variance across 50 draws.
+        assert len(set(delays)) > 5, (
+            f"expected varying jittered delays, got {len(set(delays))} unique "
+            f"in 50 draws — jitter probably not applied"
+        )
+
+    def test_enumerator_jittered_backoff_multiplies_by_random_uniform(self):
+        from unittest.mock import patch
+        from hklii_downloader.enumerator import _jittered_backoff
+        with patch(
+            "hklii_downloader.enumerator.random.uniform", return_value=1.25
+        ) as m:
+            assert _jittered_backoff(2.0, 1) == 5.0  # 2.0 * 2 * 1.25
+            m.assert_called_once_with(0.5, 1.5)
+
+
 class TestChallengePageDetection:
     """Unit tests for _looks_like_challenge_page.
 
