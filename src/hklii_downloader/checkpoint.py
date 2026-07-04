@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
+
+_log = logging.getLogger("hklii_downloader.checkpoint")
 
 
 class CheckpointLockError(RuntimeError):
@@ -79,8 +82,15 @@ class CheckpointDB:
         lock_path = str(path) + ".lock"
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-        except OSError:
-            return  # Can't create lock file — skip locking silently
+        except OSError as e:
+            _log.warning(
+                "Could not create checkpoint lock file at %s (%s: %s); "
+                "running without cross-process protection. Concurrent "
+                "scrape runs against this DB WILL race and can corrupt "
+                "state.",
+                lock_path, type(e).__name__, e,
+            )
+            return
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
