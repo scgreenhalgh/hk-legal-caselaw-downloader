@@ -21,7 +21,7 @@ from .enrichment import (
 )
 from .enumerator import enumerate_court
 from .parser import HKLIICase
-from .proxy_pool import IPLeakError
+from .proxy_pool import AllProxiesDeadError, IPLeakError
 
 _PERMANENT_ERRORS = {404, 410}
 _RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
@@ -185,6 +185,24 @@ class BulkScraper:
 
                 try:
                     success = await self._download_one(record)
+                except AllProxiesDeadError as exc:
+                    # B6 — pool went dead mid-run (e.g. HKLII 502 burst
+                    # rippled through all 20 sessions in seconds). Without
+                    # this branch the generic Exception guard below would
+                    # swallow it silently, leaving this row in in_progress
+                    # with no DB error stamp — and the worker would immediately
+                    # loop back to claim_pending() at SQLite speed, ripping
+                    # thousands of pending rows into in_progress before the
+                    # pool has a chance to revive. Stamp the row failed with
+                    # a distinctive prefix, then throttle so
+                    # _revive_cooled_down_sessions has time to bring at least
+                    # one session back.
+                    self._fail(
+                        record.court, record.year, record.number,
+                        f"pool-exhausted: {exc}",
+                    )
+                    success = False
+                    await asyncio.sleep(0.5)
                 except Exception:
                     # Belt-and-braces: _download_one catches known errors
                     # already; this guard prevents an unforeseen bug from
