@@ -307,14 +307,14 @@ class ProxyPool:
         for echo_url, json_key in _IP_ECHO_URLS:
             try:
                 resp = await client.get(echo_url)
-                resp.raise_for_status()
+                # Check status_code directly instead of raise_for_status —
+                # curl_cffi raises its own HTTPError class, not
+                # httpx.HTTPStatusError, so relying on raise_for_status would
+                # let a curl_cffi exception escape the except block.
+                if resp.status_code >= 400:
+                    continue
                 return resp.json()[json_key]
-            except (
-                httpx.RequestError,
-                httpx.HTTPStatusError,
-                KeyError,
-                json.JSONDecodeError,
-            ):
+            except (httpx.RequestError, KeyError, json.JSONDecodeError):
                 continue
         raise httpx.ConnectError("All IP echo services unreachable")
 
