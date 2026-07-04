@@ -22,6 +22,7 @@ Read in order for the intended narrative arc.
 | 10 | [Content-Shape Safeguards](./10-content-safeguards.md) | S-1 challenge-page detection (13 bilingual markers), empty-content vs `.docx` fallback branching, the `hklii verify` reconciliation, and the residual validation gaps. |
 | 11 | [Operations Runbook](./11-operations-runbook.md) | How to actually run the scraper — `hklii download/scrape/verify/enrich` flag inventories, canary patterns, resume workflows, wall-clock estimates, and the pre-flight checklist. |
 | 12 | [Architectural Decisions Log](./12-decisions-log.md) | Every non-trivial architectural choice as a `context / decision / alternatives / data / date / cross-ref` entry — the meta-narrative behind the earlier chapters. |
+| 13 | [Observability](./13-observability.md) | The `events.jsonl` structured event stream + `failure_samples/` WAF dumps — row schema, event-kind catalogue, durability/backpressure contract, and six validated `jq` recipes for post-run triage. |
 
 ## Start here (new contributors)
 

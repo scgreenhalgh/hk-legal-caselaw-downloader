@@ -385,6 +385,8 @@ sqlite3 downloads/.checkpoint.db \
 
 Running SQLite reads on a WAL-mode database while the scraper is actively writing is safe — SQLite's WAL model gives readers a consistent snapshot without blocking writers.
 
+Alongside `scrape.log`, the run also writes a machine-readable event stream to `<output>/events.jsonl` plus raw WAF/error bodies to `<output>/failure_samples/` (disable with `--no-events`). Use the checkpoint DB for exact status counts, `scrape.log` for a live tail, and `events.jsonl` for the per-proxy success-rate / hourly-trajectory / challenge-by-proxy / WAF-fingerprint slices that grep and SQL cannot express. The `jq` recipe catalogue lives in [Chapter 13 (Observability)](./13-observability.md).
+
 ## Wall-clock estimate
 
 Baseline canary (2026-07-04, 6-proxy pool, HKFC, 100 files, `--lang en`): ~3,000 files/hour throughput. Extrapolated to the ~114,398 case default-court corpus at 20 proxies:
