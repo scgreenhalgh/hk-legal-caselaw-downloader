@@ -659,3 +659,93 @@ class TestEnrichSubcommand:
         assert "no healthy proxies" in msg or "no healthy proxy" in msg, (
             f"expected message about no healthy proxies, got:\n{result.output}"
         )
+
+
+class TestEventsWiring:
+    """The observability layer is opt-out: `scrape` / `enrich` / `recheck-html`
+    construct a StructuredEventLogger from -o by default (creating
+    <output>/events.jsonl), and `--no-events` skips it for storage-constrained
+    runs."""
+
+    def _patches(self):
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.scraper import ScrapeResult
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        async def noop_enumerate(self, courts, langs=("en", "tc")):
+            return 0
+
+        async def noop_download(self, on_progress=None):
+            return ScrapeResult(downloaded=0, failed=0)
+
+        return (
+            patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight),
+            patch("hklii_downloader.scraper.BulkScraper.enumerate", noop_enumerate),
+            patch("hklii_downloader.scraper.BulkScraper.download_all", noop_download),
+        )
+
+    def test_scrape_creates_events_jsonl_by_default(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            result = CliRunner().invoke(main, [
+                "scrape", "-p", "http://localhost:8888", "-o", str(out),
+            ])
+        assert result.exit_code == 0, result.output
+        assert (out / "events.jsonl").exists(), (
+            "scrape should construct an EventLogger from -o and create events.jsonl"
+        )
+
+    def test_scrape_no_events_flag_skips_events_jsonl(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        p1, p2, p3 = self._patches()
+        with p1, p2, p3:
+            result = CliRunner().invoke(main, [
+                "scrape", "-p", "http://localhost:8888", "-o", str(out),
+                "--no-events",
+            ])
+        assert result.exit_code == 0, result.output
+        assert not (out / "events.jsonl").exists(), (
+            "--no-events must skip events.jsonl creation"
+        )
+
+    def test_enrich_creates_events_jsonl_by_default(self, tmp_path):
+        from unittest.mock import patch
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        out = tmp_path / "out"
+        out.mkdir()
+        # enrich requires an existing checkpoint DB.
+        CheckpointDB(str(out / ".checkpoint.db")).close()
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight):
+            result = CliRunner().invoke(main, [
+                "enrich", "-p", "http://localhost:8888", "-o", str(out),
+            ])
+        assert result.exit_code == 0, result.output
+        assert (out / "events.jsonl").exists(), (
+            "enrich should construct an EventLogger from -o and create events.jsonl"
+        )
+
+    def test_all_three_commands_expose_no_events_flag(self):
+        runner = CliRunner()
+        for cmd in ("scrape", "enrich", "recheck-html"):
+            out = runner.invoke(main, [cmd, "--help"]).output
+            assert "--no-events" in out, (
+                f"`{cmd} --help` must document --no-events; got:\n{out}"
+            )
