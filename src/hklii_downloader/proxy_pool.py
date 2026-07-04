@@ -336,10 +336,17 @@ class ProxyPool:
                 _log.info(
                     "IP echo %s via %s -> %s", echo_url, via or "direct", ip,
                 )
+                # B7: the direct probe captures the operator's home WAN
+                # IP for later silent-misrouting comparison; that IP
+                # must never land in events.jsonl (operators grep/jq/
+                # dashboard on it). Proxy exits keep observed_ip because
+                # the runbook silent-misrouting check reads it back.
+                is_direct = via == "direct" or via is None
+                event_extra = None if is_direct else {"observed_ip": ip}
                 self._emit(
                     "ip_echo", proxy_url=via or "direct", url=echo_url,
                     elapsed_ms=int((_monotonic() - t0) * 1000),
-                    extra={"observed_ip": ip},
+                    extra=event_extra,
                 )
                 return ip
             except (httpx.RequestError, KeyError, json.JSONDecodeError):
