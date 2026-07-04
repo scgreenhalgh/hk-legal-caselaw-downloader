@@ -26,6 +26,11 @@ _RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
 _BODY_PREVIEW_LEN = 200
 
 
+def _looks_like_challenge_page(content_html: str) -> bool:
+    # Stub — real detection lands in the next commit.
+    return False
+
+
 @dataclass
 class ScrapeResult:
     downloaded: int

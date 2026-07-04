@@ -442,6 +442,120 @@ class TestBulkScraperEmptyContentWithDoc:
         assert result.downloaded == 0
 
 
+class TestChallengePageDetection:
+    """Unit tests for _looks_like_challenge_page.
+
+    A WAF or origin-side error can return HTTP 200 + a valid JSON envelope
+    whose `content` field is an HTML challenge/interstitial page. The existing
+    empty-check does not catch this — content_html is non-empty, just wrong.
+    S-1 rejects it before the row is marked downloaded.
+    """
+
+    def test_english_cloudflare_challenge_detected(self):
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        html = "<html><body><h1>Just a moment...</h1><p>cloudflare</p></body></html>"
+        assert _looks_like_challenge_page(html)
+
+    def test_english_verify_human_detected(self):
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        html = "<html><body><p>Please verify you are human</p></body></html>"
+        assert _looks_like_challenge_page(html)
+
+    def test_english_access_denied_detected(self):
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        html = "<html><body><h1>Access Denied</h1></body></html>"
+        assert _looks_like_challenge_page(html)
+
+    def test_traditional_chinese_wait_challenge_detected(self):
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        # HKLII is bilingual EN + TC. A Chinese-language challenge page would
+        # slip past an English-only denylist (completeness gap #9).
+        html = "<html><body><p>請稍候，正在驗證您的請求</p></body></html>"
+        assert _looks_like_challenge_page(html)
+
+    def test_traditional_chinese_verify_human_detected(self):
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        html = "<html><body>驗證您是人類</body></html>"
+        assert _looks_like_challenge_page(html)
+
+    def test_traditional_chinese_access_restricted_detected(self):
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        html = "<html><body>訪問受限</body></html>"
+        assert _looks_like_challenge_page(html)
+
+    def test_real_judgment_html_not_flagged(self):
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        html = ("<html><body><h1>[2024] HKCFI 1234</h1>"
+                "<p>Between Plaintiff and Defendant</p>"
+                "<p>Judgment date: 2024-01-15</p>"
+                "<p>The court finds in favour of the plaintiff.</p></body></html>")
+        assert not _looks_like_challenge_page(html)
+
+    def test_empty_content_not_flagged_as_challenge(self):
+        # Empty content is handled by the existing empty-content branch,
+        # not by challenge detection — otherwise recent 2026 judgments
+        # (which HKLII serves as content:"" with a doc URL) would be
+        # misclassified.
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page("")
+
+
+class TestBulkScraperChallengePage:
+    """A challenge page returned as content_html must mark the row failed with
+    a distinctive reason so it can be identified in the checkpoint DB and
+    retried, not silently persisted as `downloaded`."""
+
+    async def test_english_challenge_page_content_marks_failed(self, tmp_path):
+        challenge_response = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "<html><body>Just a moment... cloudflare</body></html>",
+        }
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=challenge_response,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        result = await scraper.download_all()
+
+        assert result.downloaded == 0
+        assert result.failed == 1
+        html_files = list(tmp_path.rglob("*.html"))
+        assert html_files == [], f"expected no HTML written, got {html_files}"
+
+        row = db._conn.execute(
+            "SELECT error FROM cases WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row is not None
+        error = (row[0] or "").lower()
+        assert "challenge" in error, f"expected 'challenge' in error, got {row[0]!r}"
+
+    async def test_chinese_challenge_page_content_marks_failed(self, tmp_path):
+        challenge_response = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "<html><body>請稍候</body></html>",
+        }
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=challenge_response,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+        result = await scraper.download_all()
+
+        assert result.failed == 1
+        row = db._conn.execute(
+            "SELECT error FROM cases WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row is not None
+        error = (row[0] or "").lower()
+        assert "challenge" in error, f"expected 'challenge' in error, got {row[0]!r}"
+
+
 class TestBulkScraperEmptyContent:
     """A 200 response whose content field is empty must NOT be saved and
     marked downloaded — that produces 0-byte HTML files that poison RAG.
