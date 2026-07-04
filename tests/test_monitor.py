@@ -1,6 +1,7 @@
 """Tests for `hklii monitor` — read-only health snapshot of a scrape."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import hklii_downloader.monitor as monitor_mod
 from hklii_downloader.checkpoint import CheckpointDB
 from hklii_downloader.monitor import MonitorRunner
 
@@ -474,3 +476,29 @@ class TestLogReader:
         banner = MonitorRunner(out, now=now).run()["banner"]
         assert "hour 2.0" in banner
         assert "4/15 (26.7%)" in banner
+
+
+class TestReadOnlyGuarantee:
+    def test_opens_checkpoint_with_mode_ro_uri(self, tmp_path, monkeypatch):
+        out = _build_checkpoint(tmp_path)
+        seen = []
+        real = monitor_mod.sqlite3.connect
+
+        def spy(database, *a, **k):
+            seen.append(database)
+            return real(database, *a, **k)
+
+        monkeypatch.setattr(monitor_mod.sqlite3, "connect", spy)
+        MonitorRunner(out).run()
+        assert seen and all("mode=ro" in u for u in seen)
+
+    def test_does_not_mutate_checkpoint_db(self, tmp_path):
+        out = _build_checkpoint(tmp_path)
+        db = out / ".checkpoint.db"
+        before = (db.stat().st_mtime_ns,
+                  hashlib.sha256(db.read_bytes()).hexdigest())
+        MonitorRunner(out).run()
+        MonitorRunner(out).run()
+        after = (db.stat().st_mtime_ns,
+                 hashlib.sha256(db.read_bytes()).hexdigest())
+        assert after == before
