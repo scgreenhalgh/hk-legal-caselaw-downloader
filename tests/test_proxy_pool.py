@@ -333,6 +333,41 @@ class TestProxyPool:
             f"expected URL-derived Referer, got headers={captured[0]}"
         )
 
+    async def test_preflight_warms_up_hklii_origin_after_ip_check(self):
+        """M-4: after each proxy's IP echo confirms it's routable + non-
+        leaking, fire a warm-up GET to hklii.hk homepage. This breaks the
+        'first request from this IP is /api/*' cold-XHR signature (rule 4)
+        and lets curl_cffi's session pick up any cookies HKLII sets."""
+        urls_seen: list[str] = []
+        counter = [0]
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                urls_seen.append(url)
+                if "httpbin" in url or "ipinfo" in url:
+                    counter[0] += 1
+                    return httpx.Response(200, json={"origin": f"1.2.3.{counter[0]}", "ip": f"1.2.3.{counter[0]}"})
+                return httpx.Response(200, text="<html>HKLII homepage</html>")
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=make_transport,
+        )
+        result = await pool.preflight()
+        assert result.leaked_proxies == []
+        assert result.failed_proxies == []
+
+        hklii_warmups = [
+            u for u in urls_seen
+            if "www.hklii.hk" in u and "/api/" not in u
+        ]
+        assert hklii_warmups, (
+            f"expected a warm-up GET to https://www.hklii.hk/ (or a "
+            f"non-API HKLII page) after IP echo; saw only {urls_seen}"
+        )
+
     async def test_runtime_ip_check_detects_leak(self):
         home_ip = "203.0.113.1"
 
