@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import time
 from dataclasses import dataclass, field
@@ -11,6 +12,8 @@ import httpx
 from .parser import referer_for as _referer_for
 
 _monotonic = time.monotonic
+
+_log = logging.getLogger("hklii_downloader.proxy_pool")
 
 
 class IPLeakError(Exception):
@@ -383,7 +386,11 @@ class ProxyPool:
     ) -> None:
         try:
             current_ip = await self._fetch_ip(client)
-        except httpx.RequestError:
+        except httpx.RequestError as exc:
+            _log.warning(
+                "runtime IP check for %s degraded: %s",
+                session.proxy_url, exc,
+            )
             return
 
         if current_ip != self._home_ip:
@@ -391,7 +398,11 @@ class ProxyPool:
 
         try:
             verify_ip = await self._fetch_ip(client)
-        except httpx.RequestError:
+        except httpx.RequestError as exc:
+            _log.warning(
+                "runtime IP check verify for %s degraded: %s",
+                session.proxy_url, exc,
+            )
             return
 
         if verify_ip == self._home_ip:
