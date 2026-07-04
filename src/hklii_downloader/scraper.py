@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -318,9 +319,19 @@ class BulkScraper:
                     )
                     return False
 
+            # If content_html was empty and we saved via doc-fallback, stamp
+            # html_pending_at_hklii so a later `hklii recheck-html` pass
+            # can find these rows. When content_html was present, the
+            # kwarg stays None which clears any prior stamp.
+            html_pending_ts = (
+                int(time.time())
+                if not content_ok and "doc" in actually_saved
+                else None
+            )
             self._checkpoint.mark_downloaded(
                 record.court, record.year, record.number,
                 sorted(actually_saved),
+                html_pending_ts=html_pending_ts,
             )
 
             if self._with_summaries:
