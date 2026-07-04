@@ -186,6 +186,12 @@ BULK_FORMATS = {"html", "txt", "json"}
     default=False,
     help="Save raw getcasefiles JSON responses to <output>/.enum_cache/ for provenance / audit.",
 )
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging to <output>/events.jsonl (storage-constrained runs).",
+)
 def scrape(
     output: Path,
     formats: tuple[str, ...],
@@ -202,6 +208,7 @@ def scrape(
     retry_failed: bool,
     enum_max_age: int,
     save_enum_responses: bool,
+    no_events: bool,
 ) -> None:
     """Bulk scrape judgments from HKLII courts.
 
@@ -246,6 +253,7 @@ def scrape(
         retry_failed=retry_failed,
         enum_max_age=enum_max_age,
         save_enum_responses=save_enum_responses,
+        no_events=no_events,
     ))
 
 
@@ -323,6 +331,12 @@ def verify(output: Path) -> None:
     default=False,
     help="Skip confirmation for --direct mode.",
 )
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging to <output>/events.jsonl (storage-constrained runs).",
+)
 def enrich(
     output: Path,
     proxies: tuple[str, ...],
@@ -331,6 +345,7 @@ def enrich(
     appeal_history: bool,
     limit: int | None,
     yes: bool,
+    no_events: bool,
 ) -> None:
     """Backfill press summaries + appeal history for already-downloaded cases.
 
@@ -366,6 +381,7 @@ def enrich(
         do_summaries=summaries,
         do_appeal_history=appeal_history,
         limit=limit,
+        no_events=no_events,
     ))
 
 
@@ -376,9 +392,11 @@ async def _run_enrich(
     do_summaries: bool,
     do_appeal_history: bool,
     limit: int | None,
+    no_events: bool = False,
 ) -> None:
     from .checkpoint import CheckpointDB
     from .enrichment import EnrichmentRunner
+    from .events import StructuredEventLogger
     from .proxy_pool import ProxyPool
 
     db_path = output / ".checkpoint.db"
@@ -388,11 +406,15 @@ async def _run_enrich(
         )
     db = CheckpointDB(str(db_path))
 
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+
     if direct:
-        pool = ProxyPool(proxy_urls=[], direct=True)
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
         workers = 1
     else:
-        pool = ProxyPool(proxy_urls=proxies)
+        pool = ProxyPool(proxy_urls=proxies, events=events)
 
     try:
         if not direct:
@@ -415,6 +437,7 @@ async def _run_enrich(
             do_appeal_history=do_appeal_history,
             workers=workers,
             limit=limit,
+            events=events,
         )
 
         pending_kinds = []
@@ -435,6 +458,8 @@ async def _run_enrich(
                 f"Failed: {result.failed}"
             )
     finally:
+        if events is not None:
+            await events.aclose()
         await pool.close()
         db.close()
 
@@ -525,11 +550,13 @@ async def _run_scrape(
     retry_failed: bool = False,
     enum_max_age: int = 0,
     save_enum_responses: bool = False,
+    no_events: bool = False,
 ) -> None:
     from .logging_setup import setup_logging
     log_path = setup_logging(output, "scrape")
     click.echo(f"Logging to {log_path}")
     from .checkpoint import CheckpointDB
+    from .events import StructuredEventLogger
     from .proxy_pool import ProxyPool
     from .scraper import BulkScraper
 
@@ -537,11 +564,16 @@ async def _run_scrape(
     output.mkdir(parents=True, exist_ok=True)
     db = CheckpointDB(str(db_path))
 
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+        click.echo(f"Structured events -> {output / 'events.jsonl'}")
+
     if direct:
-        pool = ProxyPool(proxy_urls=[], direct=True)
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
         workers = 1
     else:
-        pool = ProxyPool(proxy_urls=proxies)
+        pool = ProxyPool(proxy_urls=proxies, events=events)
 
     try:
         if not direct:
@@ -571,6 +603,7 @@ async def _run_scrape(
             with_appeal_history=with_appeal_history,
             enum_max_age_hours=enum_max_age,
             save_enum_responses=save_enum_responses,
+            events=events,
         )
 
         if retry_failed:
@@ -602,6 +635,8 @@ async def _run_scrape(
             result = await _download_with_progress(scraper, target)
             click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
     finally:
+        if events is not None:
+            await events.aclose()
         await pool.close()
         db.close()
 
@@ -707,12 +742,19 @@ async def _run(
     default=False,
     help="Skip confirmation for --direct mode.",
 )
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging to <output>/events.jsonl (storage-constrained runs).",
+)
 def recheck_html(
     output: Path,
     proxies: tuple[str, ...],
     direct: bool,
     limit: int | None,
     yes: bool,
+    no_events: bool,
 ) -> None:
     """Re-check rows captured via doc-fallback for newly-available HTML.
 
@@ -743,6 +785,7 @@ def recheck_html(
         proxies=list(proxies),
         direct=direct,
         limit=limit,
+        no_events=no_events,
     ))
 
 
@@ -751,8 +794,10 @@ async def _run_recheck_html(
     proxies: list[str],
     direct: bool,
     limit: int | None,
+    no_events: bool = False,
 ) -> None:
     from .checkpoint import CheckpointDB
+    from .events import StructuredEventLogger
     from .html_recheck import HtmlRecheckRunner
     from .proxy_pool import ProxyPool
 
@@ -769,11 +814,15 @@ async def _run_recheck_html(
         db.close()
         return
 
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+
     if direct:
-        pool = ProxyPool(proxy_urls=[], direct=True)
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
         workers = 1
     else:
-        pool = ProxyPool(proxy_urls=proxies)
+        pool = ProxyPool(proxy_urls=proxies, events=events)
 
     try:
         if not direct:
@@ -808,6 +857,8 @@ async def _run_recheck_html(
             f"failed: {counts['failed']}."
         )
     finally:
+        if events is not None:
+            await events.aclose()
         await pool.close()
         db.close()
 
