@@ -1,9 +1,43 @@
 """Tests for CheckpointDB — SQLite checkpoint with WAL mode."""
 from __future__ import annotations
 
+import logging
+from unittest.mock import patch
+
 import pytest
 
 from hklii_downloader.checkpoint import CheckpointDB, CaseRecord
+
+
+class TestLockFallbackWarning:
+    """S-4: silently swallowing an OSError when creating the .lock file
+    means two concurrent scrape processes race with no warning. If the
+    filesystem can't host the lock (e.g. NFS without lockd, some FUSE
+    mounts, read-only mounts), we must at least tell the operator."""
+
+    def test_oserror_creating_lock_file_logs_warning(self, tmp_path, caplog):
+        db_path = str(tmp_path / "checkpoint.db")
+        real_open = __import__("os").open
+
+        def fake_open(path, flags, *a, **kw):
+            if str(path).endswith(".lock"):
+                raise OSError(30, "Read-only file system")
+            return real_open(path, flags, *a, **kw)
+
+        with caplog.at_level(logging.WARNING, logger="hklii_downloader.checkpoint"):
+            with patch("hklii_downloader.checkpoint.os.open", side_effect=fake_open):
+                db = CheckpointDB(db_path)
+
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "lock" in r.getMessage().lower()
+        ]
+        assert warnings, (
+            f"expected a WARNING log about the lock fallback; got records: "
+            f"{[(r.name, r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        db.close()
 
 
 class TestCheckpointDB:
