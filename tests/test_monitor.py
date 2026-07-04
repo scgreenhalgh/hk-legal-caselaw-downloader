@@ -75,9 +75,9 @@ class TestEventsReader:
         # events.jsonl is append-only, so rows land in chronological order
         # (oldest first, newest at EOF) — the fixture models that.
         _write_events(out, [
-            {"ts": _iso(90), "kind": "request_failed"},    # out (window=30)
+            {"ts": _iso(90), "kind": "request_failed"},    # out (>30m ago)
             {"ts": _iso(60), "kind": "request_success"},   # out
-            {"ts": _iso(45), "kind": "request_success"},   # in
+            {"ts": _iso(25), "kind": "request_success"},   # in
             {"ts": _iso(20), "kind": "request_success"},   # in
             {"ts": _iso(10), "kind": "warmup"},            # in
             {"ts": _iso(5), "kind": "request_failed"},     # in
