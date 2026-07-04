@@ -106,6 +106,80 @@ class TestHeaderStripping:
         assert "Referer" in sent, "non-fingerprint headers should pass through"
 
 
+class TestSecFetchForwarding:
+    @pytest.mark.parametrize("profile", ["chrome136", "chrome146"])
+    async def test_forwards_sec_fetch_and_uir_to_wire(self, profile):
+        """XHR-shape sec-fetch/UIR overrides must reach curl_cffi.
+
+        Signal 6 (research/04-anti-detection-strategy.md:511): every
+        /api/getcasefiles, /api/getjudgment, /api/getappealhistory call
+        must ship XHR-shape headers (Sec-Fetch-Mode: cors,
+        Sec-Fetch-Dest: empty, Sec-Fetch-Site: same-origin, no
+        Sec-Fetch-User, no Upgrade-Insecure-Requests) because that's what
+        a real browser's fetch()/XHR to a same-origin JSON API emits.
+
+        The M-2 fix in ProxyHeadersFactory.generate() produces exactly
+        those headers for /api/* URLs. But if the wrapper strips them
+        as "fingerprint conflicts", curl_cffi's baked chrome136/146
+        navigation defaults win — every /api/* call ships with
+        Sec-Fetch-Mode: navigate + UIR: 1, which is the classic
+        "not an XHR from JS" tell across 20 exit IPs and ~228K calls.
+
+        sec-fetch-* and UIR are BEHAVIORAL (per-request) not
+        fingerprint-baked: caller overrides must pass through.
+        """
+        from hklii_downloader.impersonate_client import ImpersonateAsyncClient
+
+        captured = {}
+
+        class FakeSession:
+            async def get(self, url, headers=None, **kw):
+                captured["headers"] = headers or {}
+                resp = MagicMock()
+                resp.status_code = 200
+                return resp
+            async def close(self):
+                pass
+
+        c = ImpersonateAsyncClient(rng=random.Random(0))
+        c._impersonate = profile  # exercise chrome136 and chrome146
+        c._session = FakeSession()
+
+        await c.get(
+            "https://www.hklii.hk/api/getjudgment",
+            headers={
+                "sec-fetch-mode": "cors",
+                "sec-fetch-dest": "empty",
+                "sec-fetch-site": "same-origin",
+                "sec-fetch-user": "?0",
+            },
+        )
+
+        sent = captured["headers"]
+        assert sent.get("sec-fetch-mode") == "cors", (
+            f"sec-fetch-mode override must pass through for XHR shape "
+            f"({profile}); got: {sent!r}"
+        )
+        assert sent.get("sec-fetch-dest") == "empty", (
+            f"sec-fetch-dest override must pass through for XHR shape "
+            f"({profile}); got: {sent!r}"
+        )
+        assert sent.get("sec-fetch-site") == "same-origin", (
+            f"sec-fetch-site override must pass through for XHR shape "
+            f"({profile}); got: {sent!r}"
+        )
+        assert sent.get("sec-fetch-user") == "?0", (
+            f"sec-fetch-user override must pass through for XHR shape "
+            f"({profile}); got: {sent!r}"
+        )
+        # Caller did not send UIR — wrapper must not inject it.
+        lower_keys = {k.lower() for k in sent}
+        assert "upgrade-insecure-requests" not in lower_keys, (
+            f"UIR must not appear when caller did not send it ({profile}); "
+            f"got: {sent!r}"
+        )
+
+
 class TestExceptionTranslation:
     async def test_curl_timeout_becomes_httpx_timeout(self):
         from hklii_downloader.impersonate_client import ImpersonateAsyncClient
