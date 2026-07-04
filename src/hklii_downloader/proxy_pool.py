@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .parser import referer_for as _referer_for
+
 _monotonic = time.monotonic
 
 
@@ -126,7 +128,7 @@ class HeaderRotator:
         self._headers = self._build_headers()
 
     def referer_for(self, url: str) -> str:
-        return "https://www.hklii.hk/"
+        return _referer_for(url)
 
 
 class ProxySession:
@@ -295,7 +297,9 @@ class ProxyPool:
             raise RuntimeError("Must call preflight() before making requests")
 
         if self.direct:
-            return await self._direct_client.get(url, **kwargs)
+            direct_headers = dict(kwargs.pop("headers", None) or {})
+            direct_headers.setdefault("Referer", _referer_for(url))
+            return await self._direct_client.get(url, headers=direct_headers, **kwargs)
 
         idx = await self._acquire_session()
         session = self.sessions[idx]

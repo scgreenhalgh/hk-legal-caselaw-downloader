@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -11,6 +11,8 @@ _URL_PATTERN = re.compile(
 )
 
 BASE_URL = "https://www.hklii.hk"
+
+_CASE_PATH_PATTERN = re.compile(r"^/(en|tc)/cases/([a-z]+)/(\d{4})(?:/\d+/?)?$")
 
 
 @dataclass(frozen=True)
@@ -36,7 +38,38 @@ class HKLIICase:
 
 
 def referer_for(url: str) -> str:
-    # Stub — real derivation lands in the next commit.
+    """Return a plausible SPA Referer for an HKLII request URL.
+
+    Real Chrome sets Referer to the URL that fired the XHR. A hardcoded
+    homepage Referer on every /api/* call is a one-line log-analysis signal.
+    Falls back to the homepage for anything we can't derive safely.
+    """
+    parsed = urlparse(url)
+    if parsed.netloc != "www.hklii.hk":
+        return f"{BASE_URL}/"
+
+    if parsed.path == "/api/getjudgment":
+        qs = parse_qs(parsed.query)
+        lang = qs.get("lang", [""])[0]
+        court = qs.get("abbr", [""])[0]
+        year = qs.get("year", [""])[0]
+        if lang and court and year:
+            return f"{BASE_URL}/{lang}/cases/{court}/{year}/"
+        return f"{BASE_URL}/"
+
+    if parsed.path == "/api/getcasefiles":
+        qs = parse_qs(parsed.query)
+        court = qs.get("caseDb", [""])[0]
+        lang = qs.get("lang", [""])[0]
+        if lang and court:
+            return f"{BASE_URL}/{lang}/cases/{court}/"
+        return f"{BASE_URL}/"
+
+    m = _CASE_PATH_PATTERN.match(parsed.path)
+    if m:
+        lang, court, year = m.groups()
+        return f"{BASE_URL}/{lang}/cases/{court}/{year}/"
+
     return f"{BASE_URL}/"
 
 
