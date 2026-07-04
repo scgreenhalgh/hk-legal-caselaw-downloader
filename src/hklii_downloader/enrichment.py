@@ -69,6 +69,9 @@ async def enrich_summaries_for_case(
     stem: str, output_dir: Path, content_html: str,
 ) -> None:
     from .enumerator import extract_press_summary_urls
+    # Lazy import: scraper.py imports from this module, so a top-level
+    # import here would form a cycle. See B5.
+    from .scraper import _looks_like_challenge_page
     urls = extract_press_summary_urls(content_html)
     for lang_label, lang_short in (("English", "en"), ("Chinese", "zh")):
         kind = f"summary_{lang_short}"
@@ -78,6 +81,17 @@ async def enrich_summaries_for_case(
             continue
         try:
             html = await fetch_press_summary(url, get)
+            # HKLII WAF interstitials arrive as HTTP 200 with challenge HTML,
+            # so raise_for_status() inside fetch_press_summary is a no-op.
+            # Without this shape check the interstitial saves to disk as a
+            # "press summary" and the DB marks it downloaded — enrich would
+            # never revisit it. See B5 in scratchpad/REVIEW_VERDICT.md.
+            if _looks_like_challenge_page(html):
+                checkpoint.mark_enrichment(
+                    court, year, number, kind, "failed",
+                    error="challenge-page detected in press summary",
+                )
+                continue
             save_press_summary_local(html, output_dir, stem, lang_short)
             checkpoint.mark_enrichment(court, year, number, kind, "downloaded")
         except (httpx.RequestError, httpx.HTTPStatusError, OSError) as e:
