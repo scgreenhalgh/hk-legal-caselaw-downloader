@@ -131,8 +131,8 @@ async def enumerate_court(
         if save_dir is not None:
             save_dir.mkdir(parents=True, exist_ok=True)
             out = save_dir / f"{ts}_page{page_num:04d}.json"
-            out.write_text(
-                json.dumps(data, ensure_ascii=False), encoding="utf-8",
+            atomic_write_text(
+                out, json.dumps(data, ensure_ascii=False), encoding="utf-8",
             )
         return data
 
