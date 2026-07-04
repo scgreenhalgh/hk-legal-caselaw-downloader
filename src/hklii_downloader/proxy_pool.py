@@ -265,14 +265,14 @@ class ProxyPool:
         )
 
     async def preflight(self) -> PreflightResult:
-        home_ip = await self._fetch_ip(self._make_client(None))
+        home_ip = await self._fetch_ip(self._make_client(None), via="direct")
         self._home_ip = home_ip
         result = PreflightResult(home_ip=home_ip)
 
         for session in self.sessions:
             client = self._clients[session.index]
             try:
-                proxy_ip = await self._fetch_ip(client)
+                proxy_ip = await self._fetch_ip(client, via=session.proxy_url)
             except (httpx.RequestError, KeyError) as exc:
                 result.failed_proxies.append(
                     f"{session.proxy_url} unreachable: {exc}"
@@ -304,9 +304,12 @@ class ProxyPool:
             await client.get(_WARMUP_URL, headers=req_headers)
         except (httpx.RequestError, Exception):
             # Best-effort — do not fail preflight if the origin blips.
-            pass
+            return
+        _log.info(
+            "warmup GET %s via %s", _WARMUP_URL, session.proxy_url,
+        )
 
-    async def _fetch_ip(self, client: httpx.AsyncClient) -> str:
+    async def _fetch_ip(self, client, via: str = "direct") -> str:
         for echo_url, json_key in _IP_ECHO_URLS:
             try:
                 resp = await client.get(echo_url)
@@ -316,7 +319,11 @@ class ProxyPool:
                 # let a curl_cffi exception escape the except block.
                 if resp.status_code >= 400:
                     continue
-                return resp.json()[json_key]
+                ip = resp.json()[json_key]
+                _log.info(
+                    "IP echo %s via %s -> %s", echo_url, via or "direct", ip,
+                )
+                return ip
             except (httpx.RequestError, KeyError, json.JSONDecodeError):
                 continue
         raise httpx.ConnectError("All IP echo services unreachable")
@@ -385,7 +392,7 @@ class ProxyPool:
         self, session: ProxySession, client: httpx.AsyncClient,
     ) -> None:
         try:
-            current_ip = await self._fetch_ip(client)
+            current_ip = await self._fetch_ip(client, via=session.proxy_url)
         except httpx.RequestError as exc:
             _log.warning(
                 "runtime IP check for %s degraded: %s",
@@ -397,7 +404,7 @@ class ProxyPool:
             return
 
         try:
-            verify_ip = await self._fetch_ip(client)
+            verify_ip = await self._fetch_ip(client, via=session.proxy_url)
         except httpx.RequestError as exc:
             _log.warning(
                 "runtime IP check verify for %s degraded: %s",
