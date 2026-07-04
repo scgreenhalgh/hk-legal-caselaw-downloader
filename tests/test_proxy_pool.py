@@ -439,6 +439,48 @@ class TestProxyPool:
         assert result.home_ip == home_ip
         assert result.healthy_proxies == ["http://localhost:8888"]
 
+    async def test_fetch_ip_falls_back_on_non_httpx_http_error(self):
+        """curl_cffi's response.raise_for_status raises curl_cffi's own
+        HTTPError, not httpx.HTTPStatusError. In production, one httpbin
+        502 across 20 concurrent proxies aborted the whole preflight
+        because the curl_cffi exception wasn't in _fetch_ip's except
+        clause. Fix: check status_code directly, don't rely on
+        raise_for_status's exception class."""
+        class NotHttpxHTTPError(Exception):
+            """Simulates curl_cffi.requests.exceptions.HTTPError."""
+
+        class FakeResponse:
+            def __init__(self, status, payload=None):
+                self.status_code = status
+                self._payload = payload
+            def json(self):
+                return self._payload
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    raise NotHttpxHTTPError(f"HTTP {self.status_code}")
+
+        async def fake_get(url, **kwargs):
+            if "httpbin.org" in url:
+                return FakeResponse(502)
+            if "ipinfo.io" in url:
+                return FakeResponse(200, {"ip": "10.0.0.5"})
+            return FakeResponse(404)
+
+        class FakeClient:
+            get = staticmethod(fake_get)
+
+        pool = ProxyPool(
+            proxy_urls=[], direct=True,
+            _transport_factory=lambda p: httpx.MockTransport(
+                lambda r: httpx.Response(200)
+            ),
+        )
+        ip = await pool._fetch_ip(FakeClient())
+        assert ip == "10.0.0.5", (
+            f"expected fallback to ipinfo when httpbin raises a non-httpx "
+            f"exception; got {ip!r}"
+        )
+
     async def test_preflight_falls_back_when_primary_returns_non_json(self):
         """Corporate SSL-intercepting proxies and captive portals often return
         200 + HTML. Preflight must fall through to ipinfo.io."""
