@@ -321,9 +321,15 @@ The equivalent bare cron entry, escalating only on critical:
 
 ```bash
 */5 * * * * cd /path/to/hklii_downloader && \
-  uv run hklii monitor -o ./downloads/prod --quiet || \
+  uv run hklii monitor -o ./downloads/prod --quiet; \
   [ $? -eq 2 ] && notify-send "hklii scrape CRITICAL — check monitor"
 ```
+
+`||` between the monitor command and `[ $? -eq 2 ]` would parse as
+`(monitor || test) && notify` — bash's `||` and `&&` are left-associative at
+equal precedence — so the notification would also fire on a HEALTHY exit 0.
+Using `;` sequences the two commands so `$?` seen by `[` is always the
+monitor's own exit code.
 
 Pair this with the raw `jq` recipes above: `monitor` tells you *that* something
 drifted and roughly what; the recipes tell you the full per-proxy / per-hour /
