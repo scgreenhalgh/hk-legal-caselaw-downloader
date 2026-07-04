@@ -12,14 +12,22 @@ This module is the skeleton; behaviour is filled in test-first across the
 """
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 _CHECKPOINT_FILENAME = ".checkpoint.db"
 _EVENTS_FILENAME = "events.jsonl"
 _LOG_FILENAME = "scrape.log"
+
+# Event kinds surfaced (and 0-filled) in the recent-events table, in display
+# order. Any other kind seen in the window is still counted, appended after.
+_TRACKED_KINDS = (
+    "request_success", "request_failed", "warmup",
+    "challenge_detected", "pool_exhausted", "degraded",
+)
 
 
 class MonitorRunner:
@@ -100,12 +108,77 @@ class MonitorRunner:
     # ----------------------------------------------------------------- events
 
     def _read_events(self) -> dict[str, Any] | None:
+        """Count events by kind within the look-back window. Returns None
+        when events.jsonl is absent (a --no-events run)."""
+        if not self._events_path.exists():
+            return None
+        cutoff = self._now - timedelta(minutes=self._window_min)
+        rows = self._events_in_window(cutoff)
+
+        counts = {k: 0 for k in _TRACKED_KINDS}
+        for row in rows:
+            kind = row.get("kind")
+            if kind is None:
+                continue
+            counts[kind] = counts.get(kind, 0) + 1
+
         return {
             "window_min": self._window_min,
-            "counts_by_kind": {},
+            "counts_by_kind": counts,
             "proxy_hotspots": [],
             "recent_challenges": [],
         }
+
+    def _events_in_window(self, cutoff: datetime) -> list[dict[str, Any]]:
+        """Rows with `ts` >= cutoff, newest-first. Reads backward from EOF in
+        blocks and stops at the first row older than the window, so a 100MB
+        append-only log costs a couple of blocks, not a full scan."""
+        rows: list[dict[str, Any]] = []
+        block = 65536
+        with self._events_path.open("rb") as fh:
+            fh.seek(0, 2)
+            pos = fh.tell()
+            carry = b""  # partial head-of-line continuing into an earlier block
+            stop = False
+            while pos > 0 and not stop:
+                size = min(block, pos)
+                pos -= size
+                fh.seek(pos)
+                data = fh.read(size) + carry
+                parts = data.split(b"\n")
+                carry = parts[0]
+                for raw in reversed(parts[1:]):
+                    if self._consume_event_line(raw, cutoff, rows):
+                        stop = True
+                        break
+            if not stop:
+                self._consume_event_line(carry, cutoff, rows)
+        return rows
+
+    @staticmethod
+    def _consume_event_line(
+        raw: bytes, cutoff: datetime, rows: list[dict[str, Any]],
+    ) -> bool:
+        """Append a parsed in-window row; return True once a row older than
+        cutoff is seen so the backward scan can stop."""
+        raw = raw.strip()
+        if not raw:
+            return False
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            return False
+        ts = row.get("ts")
+        if not ts:
+            return False
+        try:
+            dt = datetime.fromisoformat(ts)
+        except ValueError:
+            return False
+        if dt >= cutoff:
+            rows.append(row)
+            return False
+        return True
 
     # -------------------------------------------------------------------- log
 
