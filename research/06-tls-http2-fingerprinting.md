@@ -180,7 +180,7 @@ _IMPERSONATE_PROFILES = (
 )
 ```
 
-Five entries. One is the alias `"chrome"`, which `curl_cffi` auto-resolves to its newest supported profile at import time — currently `chrome146` (June 2026). Four are explicit version pins.
+Five entries. One is the alias `"chrome"`, which `curl_cffi` resolves to its newest supported profile at `AsyncSession` construction (`src/hklii_downloader/impersonate_client.py:53-55` picks a string from the tuple; `AsyncSession(impersonate=…)` maps `"chrome"` to a concrete profile then) — currently `chrome146` (June 2026). Four are explicit version pins.
 
 The pool intentionally spans a version window. If a WAF is silly enough to allowlist a single JA4, we do not care — we spread across five hashes. If it flags "any Chrome older than 140" (which no WAF currently does — see the [04](./04-anti-detection-strategy.md) suspicion signal 8 discussion), we still have three modern entries in the pool.
 

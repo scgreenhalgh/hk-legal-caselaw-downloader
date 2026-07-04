@@ -81,7 +81,7 @@ Evidence: `scratchpad/endpointProbe.json:13` (finding c) and the raw `scratchpad
 ### What this means for the scraper
 
 - We **cannot** rely on `Retry-After` to pace ourselves. When a 429 or 503 arrives (rare — see below) there is nothing to read back.
-- We **must** implement our own pacing. That's what `RequestThrottler` at `src/hklii_downloader/proxy_pool.py:32-60` does: base delay 0.5–1.5 s, occasional 3–8 s "reading pauses" at 5% probability, bursts of 2–5 requests, and 2–4 s inter-burst gaps.
+- We **must** implement our own pacing. That's what `RequestThrottler` at `src/hklii_downloader/proxy_pool.py:32-60` does: the exact base delay, burst-and-gap structure, and long-pause probabilities are documented as the canonical source in [09 Scraper architecture](./09-scraper-architecture.md) § "RequestThrottler formula".
 - Because there is no CDN in the path, TLS fingerprint blocks and JA4/JA4H WAF rules are **not currently** what would stop us. That's why the F5-WAF myth (below) is a myth. But we still ship curl_cffi as belt-and-suspenders in case that changes — see [Anti-detection strategy](./04-anti-detection-strategy.md).
 
 ### Rate-limit probes (empirical)

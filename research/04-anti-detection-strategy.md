@@ -269,8 +269,9 @@ one throttler per session at `proxy_pool.py:234`), so the aggregate
 pool volume against HKLII is ~34,000 req/hr — but *no single source IP*
 exceeds ~1730 req/hr, which is what per-IP log rules key on. Throttler
 burst structure additionally prevents perfect uniformity within a proxy
-(base range 0.5-1.5 s, 5% chance of 3-8 s pause, bursts of 2-5 with 2-4 s
-inter-burst gap). The rule catches per-IP volume, not aggregate origin
+— specific numeric parameters live in [09](./09-scraper-architecture.md)
+§ "RequestThrottler formula", which is the authoritative source. The rule
+catches per-IP volume, not aggregate origin
 volume, and HKLII's plain-gunicorn stack has no header-advertised
 throttle on total-request rate ([03](./03-endpoint-reference.md)).
 

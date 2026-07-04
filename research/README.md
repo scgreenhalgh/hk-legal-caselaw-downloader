@@ -92,8 +92,10 @@ Post-authoring accuracy + coverage review completed 2026-07-04. Zero blocker fin
 - Chapter 01's corpus-size summary in this README's TOC updated to 118,188 across 13 slugs (matching the empirical probe) — homepage counter of 122,460 is called out as a delta explained in-chapter.
 - Enrichment cross-chapter roll-up added to the "Topic index" section above so a reader wanting the end-to-end enrichment story has a single entry point.
 
-**Remaining (nits):**
-- Chapter 06 § "Profile freshness policy" phrasing describes the bare-`chrome` alias resolution as happening "at import time" — it actually resolves at `AsyncSession` construction (`impersonate_client.py:53-55`). Semantic imprecision, not a correctness issue.
-- Chapter 08's `docker-compose.yml` service range cites lines 43-236; a more precise range would start at line 38 where `vpn-1:` opens.
-- Chapter 11 does not include a worked `jq` example for consuming `.enum_cache/*.json`. The format is documented in Chapter 09; a runbook recipe would close the loop.
-- Some `RequestThrottler` numeric parameters appear in both Chapter 07's warm-up preamble and Chapter 09's throttler section. Chapter 09 is the authoritative source; Chapter 07's mention is a cross-reference summary.
+**Remaining:** None.
+
+Every accuracy + coverage finding raised by the post-authoring review has been addressed. The four nits from the earlier pass have all been fixed inline:
+- Chapter 06's bare-`chrome` alias resolution now correctly attributed to `AsyncSession` construction (`impersonate_client.py:53-55`), not import time.
+- Chapter 08's `docker-compose.yml` service range corrected to `38-236` (where `vpn-1:` opens), not `43-236` (which was the first `SERVER_REGIONS` line).
+- Chapter 11 now includes a "Consuming `.enum_cache/` snapshots with `jq`" section with six worked recipes (counter drift, page-length sanity, neutral dedupe across pages, freshness monitoring, run-to-run diff, parallel-array probe).
+- `RequestThrottler` numeric parameters now live only in Chapter 09 (authoritative). Chapter 01 and Chapter 04 previously duplicated them; both have been reduced to cross-references pointing at Chapter 09's "RequestThrottler formula" section.

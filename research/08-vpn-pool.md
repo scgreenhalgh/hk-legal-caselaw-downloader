@@ -88,7 +88,7 @@ The 20 containers span seven Asia-Pacific regions. Distribution 2026-07-04:
 | Macao        |     2      | 8906–8907      | `macau403`, `macau404`                                                                                                      | Added 2026-07-04, max available    |
 | **Total**    |   **20**   | **8888–8907**  |                                                                                                                             |                                    |
 
-Exact assignments are in `docker-compose.yml:43-236` (line ranges by service index). The counts equal the "max available" from PIA — nothing was left on the table in these regions.
+Exact assignments are in `docker-compose.yml:38-236` (`vpn-1:` opens at line 38; each subsequent service block follows sequentially). The counts equal the "max available" from PIA — nothing was left on the table in these regions.
 
 Regions were picked for low RTT to `www.hklii.hk` (Singapore ~176ms/92KB/s median, cf. [Speed characteristics](#speed-characteristics-per-region)) and for topological plausibility: Asian residential-looking exit IPs blend into HKLII's normal audience better than US or European ones. HK/Macao are the closest but PIA's catalogue only offers 3 + 2 named servers, so they can't dominate.
 

@@ -266,6 +266,46 @@ rm -rf ./downloads/.enum_cache
 
 The next `hklii scrape` will re-populate it.
 
+### Consuming `.enum_cache/` snapshots with `jq`
+
+Each snapshot is `getcasefiles`'s exact JSON envelope: `{"totalfiles": N, "judgments": [...]}`. Useful one-liners:
+
+```bash
+# Counter-drift check: how did totalfiles change across today's runs for HKCFI-en?
+for f in ./downloads/.enum_cache/hkcfi_en/*_page0001.json; do
+  ts=$(basename "$f" | cut -d_ -f1)
+  n=$(jq '.totalfiles' "$f")
+  echo "$ts  $n"
+done | sort
+
+# Count judgments actually returned in the most recent single page — sanity-checks itemsPerPage:
+jq '.judgments | length' \
+  "$(ls -t ./downloads/.enum_cache/hkcfi_en/*.json | head -1)"
+
+# Verify no duplicates across all pages of the latest run (neutral citations must be unique):
+run_ts=$(ls -t ./downloads/.enum_cache/hkcfi_en/ | head -1 | cut -d_ -f1)
+jq -r '.judgments[].neutral' \
+  ./downloads/.enum_cache/hkcfi_en/${run_ts}_page*.json \
+  | sort | uniq -c | awk '$1 > 1'   # non-empty output = duplicates
+
+# Newest judgment in a given court+lang (for freshness monitoring):
+jq -r '.judgments[0] | "\(.date) \(.neutral)"' \
+  "$(ls -t ./downloads/.enum_cache/hkcfi_en/*.json | head -1)"
+
+# Compare two runs — which neutrals are new since the previous snapshot?
+old=$(ls -1 ./downloads/.enum_cache/hkcfi_en/*_page0001.json | sort | tail -2 | head -1)
+new=$(ls -1 ./downloads/.enum_cache/hkcfi_en/*_page0001.json | sort | tail -1)
+comm -23 \
+  <(jq -r '.judgments[].neutral' "$new" | sort) \
+  <(jq -r '.judgments[].neutral' "$old" | sort)
+
+# Confirm the probe finding that parallel[] is empty in current data — max array length seen:
+jq '[.judgments[].parallel | length] | max' \
+  "$(ls -t ./downloads/.enum_cache/hkcfi_en/*.json | head -1)"
+```
+
+The envelope schema is fixed at exactly two top-level keys (`totalfiles`, `judgments`) and each judgment record has five keys (`neutral`, `path`, `date`, `parallel`, `cases`) — see [03 Endpoint reference](./03-endpoint-reference.md) for the authoritative schema. Any `jq` recipe that assumes those keys will keep working as long as HKLII's API shape is stable.
+
 ## Logging locations
 
 `setup_logging` at `src/hklii_downloader/logging_setup.py:14-32` writes to `<output>/<subcommand>.log` using a `FileHandler` with `utf-8` encoding and the format `%(asctime)s %(levelname)-7s %(name)s: %(message)s`. Root logger is `hklii_downloader` at `logging.INFO`; existing handlers are cleared on entry so repeated invocations do not double up.
