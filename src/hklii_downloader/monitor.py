@@ -85,13 +85,24 @@ class MonitorRunner:
         alerts = self.evaluate_alerts(checkpoint, events, runtime_hours)
         return {
             "severity": self.severity_for(alerts),
-            "banner": "",
+            "banner": self._banner(checkpoint),
             "runtime_hours": runtime_hours,
             "checkpoint": checkpoint,
             "events": events,
             "log": log,
             "alerts": alerts,
         }
+
+    def _banner(self, checkpoint: dict[str, Any]) -> str:
+        total = checkpoint["total"]
+        downloaded = checkpoint["downloaded"]
+        pct = (downloaded / total * 100) if total else 0.0
+        h = checkpoint["runtime_hours"]
+        hour = f"{h:.1f}" if h is not None else "?"
+        return (
+            f"hklii scrape @ {self._output_dir} — hour {hour}, "
+            f"{downloaded}/{total} ({pct:.1f}%)"
+        )
 
     @staticmethod
     def severity_for(alerts: list[dict[str, str]]) -> str:
@@ -315,7 +326,44 @@ class MonitorRunner:
     # -------------------------------------------------------------------- log
 
     def _read_log(self) -> dict[str, Any]:
-        return {"recent_warnings": []}
+        """Tail the last 200 lines of scrape.log and keep the last 5 WARN/
+        ERROR/CRITICAL records, reformatted as `[HH:MM:SS] message`. Returns
+        recent_warnings=None when there is no log file."""
+        if not self._log_path.exists():
+            return {"recent_warnings": None}
+        warnings = []
+        for line in self._tail_lines(self._log_path, 200):
+            parsed = self._parse_log_warning(line)
+            if parsed is not None:
+                warnings.append(parsed)
+        return {"recent_warnings": warnings[-5:]}
+
+    @staticmethod
+    def _tail_lines(path: Path, n: int) -> list[str]:
+        block = 65536
+        data = b""
+        with path.open("rb") as fh:
+            fh.seek(0, 2)
+            pos = fh.tell()
+            while pos > 0 and data.count(b"\n") <= n:
+                size = min(block, pos)
+                pos -= size
+                fh.seek(pos)
+                data = fh.read(size) + data
+        return data.decode("utf-8", "replace").splitlines()[-n:]
+
+    @staticmethod
+    def _parse_log_warning(line: str) -> str | None:
+        """`<date> <time,ms> <LEVEL> <name>: <msg>` → `[HH:MM:SS] <msg>` for
+        WARNING/ERROR/CRITICAL records; None otherwise (INFO, tracebacks)."""
+        if ": " not in line:
+            return None
+        prefix, msg = line.split(": ", 1)
+        parts = prefix.split()
+        if len(parts) < 3 or parts[2] not in ("WARNING", "ERROR", "CRITICAL"):
+            return None
+        hhmmss = parts[1].split(",")[0]
+        return f"[{hhmmss}] {msg.strip()}"
 
     def evaluate_alerts(
         self,
@@ -409,8 +457,80 @@ class MonitorRunner:
 
         return alerts
 
-    def render_text(self, summary: dict[str, Any]) -> str:
-        return ""
-
     def render_json(self, summary: dict[str, Any]) -> str:
-        return ""
+        return json.dumps(summary, indent=2, ensure_ascii=False)
+
+    def render_text(self, summary: dict[str, Any]) -> str:
+        rule = "─" * 62
+        lines = [self._headline(summary), rule]
+
+        checkpoint = summary["checkpoint"]
+        if checkpoint is None:
+            lines.append(summary["alerts"][0]["reason"])
+            return "\n".join(lines)
+
+        lines.append(f"{'status':<14} {'count':>7}")
+        lines.append(f"{'─' * 14} {'─' * 7}")
+        for key in ("downloaded", "in_progress", "failed", "pending"):
+            lines.append(f"{key:<14} {checkpoint[key]:>7}")
+        lines.append(rule)
+
+        lines.append("top error prefixes")
+        if checkpoint["top_error_prefixes"]:
+            for ep in checkpoint["top_error_prefixes"]:
+                lines.append(f"  {ep['prefix']:<40} {ep['count']:>5}")
+        else:
+            lines.append("  (none)")
+        lines.append(rule)
+
+        events = summary["events"]
+        lines.append(f"recent events (last {self._window_min} min)")
+        if events is None:
+            lines.append("  N/A (events.jsonl not found — --no-events run?)")
+        else:
+            counts = events["counts_by_kind"]
+            for kind in _TRACKED_KINDS:
+                lines.append(f"  {kind:<22} {counts.get(kind, 0):>6}")
+        lines.append(rule)
+
+        lines.append("per-proxy failure hotspots (>3σ above mean)")
+        if events is None:
+            lines.append("  N/A")
+        elif events["proxy_hotspots"]:
+            for hotspot in events["proxy_hotspots"]:
+                lines.append(
+                    f"  {hotspot['proxy_url']:<30} failed={hotspot['failed']}"
+                )
+        else:
+            lines.append("  (none)")
+        lines.append(rule)
+
+        lines.append("last 5 log warnings")
+        warns = summary["log"]["recent_warnings"]
+        if warns is None:
+            lines.append("  (no log file)")
+        elif warns:
+            lines.extend(f"  {w}" for w in warns)
+        else:
+            lines.append("  (none)")
+
+        return "\n".join(lines)
+
+    def _headline(self, summary: dict[str, Any]) -> str:
+        """Top line: `[SEVERITY]` then either the most-severe alert reason
+        (when anything fired) or the scrape banner + rate/ETA (when healthy)."""
+        severity = summary["severity"]
+        alerts = summary["alerts"]
+        if alerts:
+            critical = [a for a in alerts if a["level"] == "CRITICAL"]
+            top = critical[0] if critical else alerts[0]
+            return f"[{severity}] {top['reason']}"
+
+        banner = summary["banner"]
+        checkpoint = summary["checkpoint"]
+        extra = ""
+        if checkpoint and checkpoint.get("downloaded_per_hour") is not None:
+            extra = f", ~{checkpoint['downloaded_per_hour']:.0f}/hr"
+            if checkpoint.get("eta_hours") is not None:
+                extra += f", ETA ~{checkpoint['eta_hours']:.1f}h"
+        return f"[{severity}] {banner}{extra}"
