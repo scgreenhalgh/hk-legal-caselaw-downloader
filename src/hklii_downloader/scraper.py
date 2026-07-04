@@ -26,9 +26,36 @@ _RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
 _BODY_PREVIEW_LEN = 200
 
 
+_CHALLENGE_MARKERS = (
+    # English — Cloudflare / generic WAF / rate-limit interstitials.
+    "just a moment",
+    "cf-challenge",
+    "cloudflare",
+    "please enable javascript",
+    "verify you are human",
+    "access denied",
+    "too many requests",
+    # Traditional Chinese — HKLII serves bilingual content, any localized
+    # challenge would slip past an English-only denylist.
+    "請稍候",
+    "驗證您是人類",
+    "請啟用 JavaScript",
+    "訪問受限",
+    "系統維護",
+    "拒絕存取",
+)
+
+
 def _looks_like_challenge_page(content_html: str) -> bool:
-    # Stub — real detection lands in the next commit.
-    return False
+    """True if the HTML looks like a WAF/challenge/error interstitial.
+
+    ASCII markers matched case-insensitively; CJK markers matched exactly
+    (Python str.lower() is a no-op on CJK characters).
+    """
+    if not content_html:
+        return False
+    haystack = content_html.lower()
+    return any(marker.lower() in haystack for marker in _CHALLENGE_MARKERS)
 
 
 @dataclass
@@ -243,6 +270,13 @@ class BulkScraper:
 
             judgment = parse_judgment_response(case, data)
             output_dir = self._output_dir / record.court / str(record.year)
+
+            if _looks_like_challenge_page(judgment.content_html):
+                self._checkpoint.mark_failed(
+                    record.court, record.year, record.number,
+                    "challenge-page detected in content_html",
+                )
+                return False
 
             content_ok = bool(judgment.content_html.strip())
             can_try_doc = "doc" in self._formats and judgment.doc_url
