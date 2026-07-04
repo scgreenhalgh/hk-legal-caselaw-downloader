@@ -358,3 +358,119 @@ class TestEvaluateAlerts:
         alerts = r.evaluate_alerts(_cp(in_progress=100), None, 4.0)
         assert "CRITICAL" in _levels(alerts)
         assert not any("degraded" in a["reason"] for a in alerts)
+
+
+def _summary(**over):
+    base = {
+        "severity": "HEALTHY",
+        "banner": "hklii scrape @ ./output — hour 4.2, 47320/114398 (41.4%)",
+        "runtime_hours": 4.2,
+        "checkpoint": {
+            "downloaded": 47320, "in_progress": 19, "failed": 142,
+            "pending": 66917, "total": 114398,
+            "downloaded_per_hour": 7100.0, "eta_hours": 9.4,
+            "runtime_hours": 4.2, "run_start": "2026-07-04T08:00:00+00:00",
+            "run_start_source": "min_last_seen_at", "warning": None,
+            "top_error_prefixes": [
+                {"prefix": "empty-content, doc-fetch-failed", "count": 87},
+                {"prefix": "http-503", "count": 33},
+            ],
+        },
+        "events": {
+            "window_min": 30,
+            "counts_by_kind": {
+                "request_success": 4102, "request_failed": 88, "warmup": 0,
+                "challenge_detected": 0, "pool_exhausted": 0, "degraded": 0,
+            },
+            "proxy_hotspots": [],
+            "recent_challenges": [],
+        },
+        "log": {"recent_warnings": [
+            "[16:47:12] FAILED hkcfi/2024/1023: empty-content, doc-fetch-failed"]},
+        "alerts": [],
+    }
+    base.update(over)
+    return base
+
+
+class TestRenderJson:
+    def test_valid_json_with_documented_shape(self, tmp_path):
+        text = MonitorRunner(tmp_path).render_json(_summary())
+        obj = json.loads(text)  # must be valid JSON
+        assert obj["severity"] == "HEALTHY"
+        assert set(obj) >= {
+            "severity", "banner", "runtime_hours", "checkpoint", "events",
+            "log", "alerts"}
+        assert obj["checkpoint"]["downloaded"] == 47320
+        assert obj["checkpoint"]["downloaded_per_hour"] == 7100.0
+        assert obj["events"]["counts_by_kind"]["request_success"] == 4102
+
+
+class TestRenderText:
+    def test_healthy_headline_has_banner_rate_eta(self, tmp_path):
+        text = MonitorRunner(tmp_path).render_text(_summary())
+        head = (text.splitlines() or [""])[0]
+        assert head.startswith("[HEALTHY] hklii scrape @ ./output")
+        assert "47320/114398 (41.4%)" in head
+        assert "~7100/hr" in head
+        assert "ETA ~9.4h" in head
+
+    def test_critical_headline_leads_with_alert_reason(self, tmp_path):
+        summary = _summary(
+            severity="CRITICAL",
+            alerts=[{"level": "CRITICAL",
+                     "reason": "error-prefix 'empty-content, doc-fetch-failed' has 187 hits",
+                     "detail": "x"}],
+        )
+        head = (MonitorRunner(tmp_path).render_text(summary).splitlines() or [""])[0]
+        assert head.startswith("[CRITICAL]")
+        assert "187 hits" in head
+
+    def test_has_all_sections(self, tmp_path):
+        text = MonitorRunner(tmp_path).render_text(_summary())
+        assert "downloaded" in text and "47320" in text
+        assert "top error prefixes" in text
+        assert "empty-content, doc-fetch-failed" in text and "87" in text
+        assert "recent events" in text
+        assert "request_success" in text and "4102" in text
+        assert "hotspots" in text
+        assert "log warnings" in text
+        assert "FAILED hkcfi/2024/1023" in text
+
+    def test_events_section_na_when_no_events(self, tmp_path):
+        text = MonitorRunner(tmp_path).render_text(_summary(events=None))
+        assert "N/A" in text
+
+
+class TestLogReader:
+    LOG = (
+        "2026-07-04 16:40:00,000 INFO    hklii_downloader.scraper: enumerating hkcfi\n"
+        "2026-07-04 16:44:03,111 WARNING hklii_downloader.scraper: FAILED hkcfi/2024/1019: http-503\n"
+        "2026-07-04 16:47:12,123 WARNING hklii_downloader.scraper: FAILED hkcfi/2024/1023: empty-content, doc-fetch-failed\n"
+    )
+
+    def test_tails_warnings_only(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        CheckpointDB(str(out / ".checkpoint.db")).close()
+        (out / "scrape.log").write_text(self.LOG, encoding="utf-8")
+        warns = MonitorRunner(out).run()["log"]["recent_warnings"]
+        assert warns == [
+            "[16:44:03] FAILED hkcfi/2024/1019: http-503",
+            "[16:47:12] FAILED hkcfi/2024/1023: empty-content, doc-fetch-failed",
+        ]
+
+    def test_missing_log_file_yields_none(self, tmp_path):
+        out = tmp_path / "out"
+        out.mkdir()
+        CheckpointDB(str(out / ".checkpoint.db")).close()
+        log = MonitorRunner(out).run()["log"]
+        assert log["recent_warnings"] is None
+
+    def test_run_sets_banner(self, tmp_path):
+        seen = 1_700_000_000
+        out = _build_checkpoint(tmp_path, last_seen_at=seen)
+        now = datetime.fromtimestamp(seen, tz=timezone.utc) + timedelta(hours=2)
+        banner = MonitorRunner(out, now=now).run()["banner"]
+        assert "hour 2.0" in banner
+        assert "4/15 (26.7%)" in banner
