@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import random
 from unittest.mock import AsyncMock, patch
 
@@ -392,6 +393,69 @@ class TestProxyPool:
             await pool.get("https://www.hklii.hk/api/test")
             with pytest.raises(IPLeakError):
                 await pool.get("https://www.hklii.hk/api/test")
+
+    async def test_runtime_ip_check_logs_when_echoes_unreachable(self, caplog):
+        """B3: when both IP echo services blip mid-run, the runtime leak
+        check silently returns. Without a log signal there's no way to
+        distinguish 'both echoes blipped' from 'proxy is healthy' — and
+        if gluetun's kill-switch simultaneously fails, home IP leaks
+        with zero warning. The swallow path MUST emit a WARNING with
+        the proxy_url so the operator can grep scrape.log."""
+        proxy_url = "http://localhost:8888"
+        home_ip = "203.0.113.1"
+        proxy_ip = "198.51.100.5"
+
+        # Both echoes return 503 → _fetch_ip exhausts its list and raises
+        # httpx.ConnectError("All IP echo services unreachable"), which is
+        # caught by the swallow at proxy_pool.py:386-387.
+        def make_transport(_proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin.org" in url or "ipinfo.io" in url:
+                    return httpx.Response(503, text="Service unavailable")
+                return httpx.Response(200, json={"content": "ok"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=[proxy_url],
+            ip_check_interval=1,
+            _transport_factory=make_transport,
+        )
+        pool._preflight_done = True
+        pool._home_ip = home_ip
+        # Bypass preflight, but ensure request_count > 0 so the runtime
+        # check fires on the next get(). The check runs BEFORE the API
+        # call when count > 0 and count % interval == 0.
+        pool.sessions[0].record_success()  # count → 1
+
+        with patch(
+            "hklii_downloader.proxy_pool.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            with caplog.at_level(
+                logging.WARNING, logger="hklii_downloader.proxy_pool"
+            ):
+                await pool.get("https://www.hklii.hk/api/test")
+
+        warnings = [
+            r for r in caplog.records
+            if r.name == "hklii_downloader.proxy_pool"
+            and r.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1, (
+            f"expected exactly one WARNING when both echoes fail, got "
+            f"{len(warnings)}: {[r.getMessage() for r in warnings]}"
+        )
+        msg = warnings[0].getMessage()
+        assert "runtime IP check" in msg, (
+            f"WARNING must mention 'runtime IP check' so operators can "
+            f"grep scrape.log; got: {msg!r}"
+        )
+        assert proxy_url in msg, (
+            f"WARNING must include proxy_url {proxy_url!r} so the "
+            f"degraded proxy is identifiable; got: {msg!r}"
+        )
+        assert proxy_ip is not None  # silence unused-var linters
 
     async def test_preflight_handles_unreachable_proxy(self):
         home_ip = "203.0.113.1"
