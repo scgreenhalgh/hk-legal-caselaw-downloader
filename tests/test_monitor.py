@@ -72,13 +72,15 @@ class TestEventsReader:
     def test_counts_by_kind_within_window_only(self, tmp_path):
         out = tmp_path / "out"
         out.mkdir()
+        # events.jsonl is append-only, so rows land in chronological order
+        # (oldest first, newest at EOF) — the fixture models that.
         _write_events(out, [
+            {"ts": _iso(90), "kind": "request_failed"},    # out (window=30)
+            {"ts": _iso(60), "kind": "request_success"},   # out
             {"ts": _iso(45), "kind": "request_success"},   # in
             {"ts": _iso(20), "kind": "request_success"},   # in
-            {"ts": _iso(5), "kind": "request_failed"},     # in
             {"ts": _iso(10), "kind": "warmup"},            # in
-            {"ts": _iso(60), "kind": "request_success"},   # out (window=30)
-            {"ts": _iso(90), "kind": "request_failed"},    # out
+            {"ts": _iso(5), "kind": "request_failed"},     # in
         ])
         summary = MonitorRunner(out, window_min=30, now=NOW).run()
         ev = summary["events"]
