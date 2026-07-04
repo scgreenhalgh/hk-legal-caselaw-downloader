@@ -1096,6 +1096,64 @@ class TestProxyPoolEvents:
             f"so silent-misrouting detection works; got {proxy_echoes}"
         )
 
+    async def test_fetch_ip_log_omits_home_ip_when_via_direct(self, caplog):
+        """B8: preflight's direct-mode _fetch_ip logs the observed IP at
+        INFO on the stdlib logger, which lands in scrape.log — the file
+        operators tail during long runs and share screenshots of. The
+        home WAN IP must NOT appear on that path. Proxy IPs MUST still
+        print so silent-misrouting detection from log tails still works.
+        This is orthogonal to B7 (the structured event) because
+        --no-events disables events.jsonl but NEVER the stdlib log."""
+        home_ip = "203.0.113.99"
+        proxy_ip = "198.51.100.7"
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    ip = home_ip if proxy_url is None else proxy_ip
+                    return httpx.Response(
+                        200, json={"origin": ip, "ip": ip},
+                    )
+                return httpx.Response(200, text="<html>HKLII</html>")
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=make_transport,
+        )
+        with caplog.at_level(
+            logging.INFO, logger="hklii_downloader.proxy_pool"
+        ):
+            await pool.preflight()
+
+        pp_records = [
+            r for r in caplog.records
+            if r.name == "hklii_downloader.proxy_pool"
+        ]
+        pp_messages = [r.getMessage() for r in pp_records]
+
+        # No proxy_pool log record — INFO or otherwise — may contain the
+        # home IP octets. scrape.log is the operator-facing audit trail.
+        for m in pp_messages:
+            assert home_ip not in m, (
+                f"scrape.log record leaks home WAN IP {home_ip!r}: {m!r}"
+            )
+
+        # Canary preservation: at least one IP echo INFO record MUST
+        # contain the proxy exit IP so operators eyeballing scrape.log
+        # can spot silent misrouting (a proxy printing the home IP).
+        ip_echoes = [m for m in pp_messages if "IP echo" in m]
+        assert len(ip_echoes) >= 2, (
+            f"expected at least two IP echo records (direct + proxy); "
+            f"got {ip_echoes}"
+        )
+        assert any(proxy_ip in m for m in ip_echoes), (
+            f"proxy IP {proxy_ip!r} must still appear in an IP echo "
+            f"INFO so silent-misrouting checks from log tails work; "
+            f"got {ip_echoes}"
+        )
+
     async def test_events_none_is_a_valid_noop(self, tmp_path):
         def make_transport(proxy_url):
             def handler(request):
