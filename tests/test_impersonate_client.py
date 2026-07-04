@@ -3,10 +3,59 @@ from __future__ import annotations
 
 import random
 import re
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+
+
+def _find_free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+@pytest.fixture
+def echo_server():
+    """Local HTTP/1.1 server that captures the exact wire headers seen.
+
+    Returns (port, captured) where captured is a list[dict[str, str]] of
+    lowercase header dicts, one per request. Used to verify what
+    curl_cffi actually put on the wire versus what the caller passed in
+    Python — the difference is the C-level bake we're checking.
+    """
+    captured: list[dict[str, str]] = []
+
+    class _EchoHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            captured.append(
+                {k.lower(): v for k, v in self.headers.items()}
+            )
+            body = b'{"ok": true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):  # silence
+            pass
+
+    port = _find_free_port()
+    server = HTTPServer(("127.0.0.1", port), _EchoHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port, captured
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 class TestProfileSelection:
@@ -180,6 +229,135 @@ class TestSecFetchForwarding:
         assert "upgrade-insecure-requests" not in lower_keys, (
             f"UIR must not appear when caller did not send it ({profile}); "
             f"got: {sent!r}"
+        )
+
+
+class TestWireLevelBakeSuppressed:
+    """Ship level (Round 4 review): curl_cffi bakes Sec-Fetch-User: ?1
+    and Upgrade-Insecure-Requests: 1 into every impersonated request at
+    the C layer. Popping them from the caller's Python dict does nothing
+    — they still reach the wire because `c.impersonate(profile,
+    default_headers=True)` in curl_cffi/requests/utils.py adds them
+    regardless of what the caller passes in .get(headers=…).
+
+    Real Chrome fetch()/XHR to a same-origin JSON API sends neither.
+    Every /api/getjudgment (~114K calls) and /api/getappealhistory
+    (~114K calls) shipping UIR:1 + Sec-Fetch-User:?1 is ModSecurity
+    Signal 6 (research/04-anti-detection-strategy.md:511) — the classic
+    "not an XHR from JS" tell across all 20 exit IPs.
+
+    Fix: construct AsyncSession(default_headers=False, ...) so the
+    C-level bake is suppressed and only the caller's dict reaches the
+    wire. The wrapper must then stop stripping the "fingerprint"
+    headers (UA, Accept, Accept-Language, etc.) since with
+    default_headers=False, curl_cffi no longer supplies them — the
+    caller (HeaderRotator) owns the full header block.
+    """
+
+    @pytest.mark.parametrize("profile", ["chrome136", "chrome146"])
+    async def test_sec_fetch_user_and_uir_absent_on_wire(
+        self, profile, echo_server
+    ):
+        """Wire-echoed headers must NOT include sec-fetch-user or
+        upgrade-insecure-requests when the caller passed XHR-shape
+        headers to /api/*. The check is at the wire level (via a
+        local echo server) — not the Python-side dict — because
+        curl_cffi's C-level bake happens after the caller's dict
+        is composed."""
+        from hklii_downloader.impersonate_client import ImpersonateAsyncClient
+
+        port, captured = echo_server
+        c = ImpersonateAsyncClient(rng=random.Random(0))
+        c._impersonate = profile
+        # Rebuild the underlying session with our chosen profile so the
+        # C-level bake happens for the profile we're asserting on.
+        from curl_cffi.requests import AsyncSession
+        await c._session.close()
+        c._session = AsyncSession(impersonate=profile, timeout=5.0)
+
+        try:
+            # Caller passes XHR-shape headers with Chrome-consistent
+            # UA + Accept-Language so mimicry is preserved even after
+            # the C-level defaults are suppressed.
+            await c.get(
+                f"http://127.0.0.1:{port}/api/getjudgment",
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/136.0.7103.92 Safari/537.36"
+                    ),
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "sec-fetch-mode": "cors",
+                    "sec-fetch-dest": "empty",
+                    "sec-fetch-site": "same-origin",
+                },
+            )
+        finally:
+            await c.aclose()
+
+        assert captured, "echo server captured nothing"
+        wire = captured[-1]
+        assert "sec-fetch-user" not in wire, (
+            f"Sec-Fetch-User leaked to wire for {profile}. Caller did "
+            f"not send it — curl_cffi's C-level bake did. Full wire "
+            f"headers: {wire!r}"
+        )
+        assert "upgrade-insecure-requests" not in wire, (
+            f"Upgrade-Insecure-Requests leaked to wire for {profile}. "
+            f"Caller did not send it — curl_cffi's C-level bake did. "
+            f"Full wire headers: {wire!r}"
+        )
+
+    @pytest.mark.parametrize("profile", ["chrome136", "chrome146"])
+    async def test_caller_ua_and_accept_language_preserved(
+        self, profile, echo_server
+    ):
+        """Suppressing default_headers means the caller must own UA +
+        Accept-Language for mimicry. Verify they still reach the wire
+        (i.e., the wrapper does not strip them anymore)."""
+        from hklii_downloader.impersonate_client import ImpersonateAsyncClient
+
+        port, captured = echo_server
+        c = ImpersonateAsyncClient(rng=random.Random(0))
+        c._impersonate = profile
+        from curl_cffi.requests import AsyncSession
+        await c._session.close()
+        c._session = AsyncSession(impersonate=profile, timeout=5.0)
+
+        caller_ua = (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/136.0.7103.92 Safari/537.36"
+        )
+        try:
+            await c.get(
+                f"http://127.0.0.1:{port}/api/getjudgment",
+                headers={
+                    "User-Agent": caller_ua,
+                    "Accept": "*/*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "sec-fetch-mode": "cors",
+                    "sec-fetch-dest": "empty",
+                    "sec-fetch-site": "same-origin",
+                },
+            )
+        finally:
+            await c.aclose()
+
+        assert captured, "echo server captured nothing"
+        wire = captured[-1]
+        assert wire.get("user-agent") == caller_ua, (
+            f"caller UA did not reach wire for {profile}; got "
+            f"{wire.get('user-agent')!r}. Wrapper is stripping the "
+            f"caller's UA, but default_headers=False means curl_cffi "
+            f"no longer supplies one. Full wire headers: {wire!r}"
+        )
+        assert wire.get("accept-language") == "en-US,en;q=0.9", (
+            f"caller Accept-Language did not reach wire for {profile}; "
+            f"got {wire.get('accept-language')!r}. Full wire headers: "
+            f"{wire!r}"
         )
 
 
