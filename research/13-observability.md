@@ -14,8 +14,10 @@ to disable it entirely on storage-constrained runs.
 
 > **A note on IPs in these files.** `events.jsonl` and `scrape.log` both
 > contain proxy exit IPs (deliberately — see
-> [11 Operations runbook](./11-operations-runbook.md) § "Silent-misrouting
-> detection") and may contain the operator's home WAN IP in narrow paths
+> [11 Operations runbook](./11-operations-runbook.md) § "Canary run
+> pattern" for the IP-echo / M-4 warm-up log lines that let the operator
+> confirm each proxy is actually tunnelling) and may contain the
+> operator's home WAN IP in narrow paths
 > that were left un-redacted on purpose (the `Home IP: <ip>` preflight line
 > in `stdout` and the `IPLeakError` safety-net message on real leak events).
 > This is deliberate; local-artifact home-IP exposure is out of scope for
