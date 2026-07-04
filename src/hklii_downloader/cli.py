@@ -677,5 +677,140 @@ async def _run(
     click.echo(f"\nDone. {ok}/{len(urls)} case(s) downloaded.")
 
 
+@main.command("recheck-html")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./downloads"),
+    help="Directory containing existing downloads + .checkpoint.db.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap the number of pending rows rechecked in this pass.",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct mode.",
+)
+def recheck_html(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    limit: int | None,
+    yes: bool,
+) -> None:
+    """Re-check rows captured via doc-fallback for newly-available HTML.
+
+    HKLII shows "Only the Word format is available at the moment" on
+    very recent judgments; `scrape --allow-doc` captures the .doc/.docx
+    and stamps html_pending_at_hklii on those rows. This pass walks
+    those rows, re-fetches getjudgment, and saves html/txt/json when
+    HKLII has extracted the HTML. Rows still empty at HKLII get their
+    timestamp bumped so the FIFO order rechecks them again next pass.
+
+    \b
+    Examples:
+      hklii recheck-html --proxy http://localhost:8888
+      hklii recheck-html --proxy http://localhost:8888 --limit 500
+      hklii recheck-html --direct --yes --limit 10
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+
+    if direct and not yes:
+        click.confirm(
+            "Rechecking without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+
+    asyncio.run(_run_recheck_html(
+        output=output,
+        proxies=list(proxies),
+        direct=direct,
+        limit=limit,
+    ))
+
+
+async def _run_recheck_html(
+    output: Path,
+    proxies: list[str],
+    direct: bool,
+    limit: int | None,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .html_recheck import HtmlRecheckRunner
+    from .proxy_pool import ProxyPool
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        raise click.UsageError(
+            f"No checkpoint DB at {db_path}. Run `hklii scrape` first."
+        )
+    db = CheckpointDB(str(db_path))
+
+    pending_count = len(db.pending_html_recheck(limit=None))
+    if pending_count == 0:
+        click.echo("No rows are flagged html_pending_at_hklii. Nothing to do.")
+        db.close()
+        return
+
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies)
+
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight — every proxy was "
+                    "leaked or unreachable."
+                )
+            workers = max(1, len(result.healthy_proxies))
+
+        target = pending_count if limit is None else min(limit, pending_count)
+        click.echo(
+            f"Pending html_pending_at_hklii rows: {pending_count}; "
+            f"target this pass: {target}."
+        )
+
+        runner = HtmlRecheckRunner(
+            get=pool.get,
+            checkpoint=db,
+            output_dir=output,
+            workers=workers,
+            limit=limit,
+        )
+        counts = await runner.recheck_all()
+        click.echo(
+            f"\nDone. Newly captured: {counts['newly_captured']}, "
+            f"still pending: {counts['still_pending']}, "
+            f"failed: {counts['failed']}."
+        )
+    finally:
+        await pool.close()
+        db.close()
+
+
 if __name__ == "__main__":
     main()

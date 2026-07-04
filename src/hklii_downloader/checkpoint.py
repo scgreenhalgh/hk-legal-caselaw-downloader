@@ -193,6 +193,31 @@ class CheckpointDB:
         )
         self._conn.commit()
 
+    def bump_html_pending_ts(
+        self, court: str, year: int, number: int, ts: int,
+    ) -> None:
+        """Update only html_pending_at_hklii — don't touch status/formats."""
+        self._conn.execute(
+            "UPDATE cases SET html_pending_at_hklii=? "
+            "WHERE court=? AND year=? AND number=?",
+            (ts, court, year, number),
+        )
+        self._conn.commit()
+
+    def get_formats(
+        self, court: str, year: int, number: int,
+    ) -> list[str] | None:
+        """Return the current formats list for a row, or None if the row
+        does not exist or was never marked downloaded."""
+        row = self._conn.execute(
+            "SELECT formats FROM cases "
+            "WHERE court=? AND year=? AND number=?",
+            (court, year, number),
+        ).fetchone()
+        if not row or row[0] is None:
+            return None
+        return json.loads(row[0])
+
     def pending_html_recheck(self, limit: int | None = None) -> list[CaseRecord]:
         """Rows previously captured via doc-fallback whose HTML may now
         be available at HKLII. status must be 'downloaded' — this is a
