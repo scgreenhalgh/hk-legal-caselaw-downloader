@@ -154,6 +154,58 @@ class TestEnrichSummariesForCase:
         assert "summary_en" in errs
         assert "No space" in errs["summary_en"] or "Errno 28" in errs["summary_en"]
 
+    async def test_fetch_press_summary_rejects_challenge_page(self, tmp_path):
+        """B5: WAF interstitials returned with HTTP 200 must not land on disk
+        as press summaries. If the response body looks like a challenge page
+        (Cloudflare 'Just a moment...' etc.), mark the enrichment as failed
+        with a descriptive error and do NOT stamp 'downloaded' nor write the
+        file.
+
+        Without this guard, `hklii enrich` never revisits the case (it filters
+        on status='pending') and the corpus silently accumulates WAF HTML
+        mislabelled as English press summaries.
+        """
+        from hklii_downloader.enrichment import enrich_summaries_for_case
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-01-01")
+        html = '<a href="/doc/foo/es.htm">Press Summary (English)</a>'
+
+        challenge_body = (
+            "<html><head><title>Just a moment...</title></head>"
+            "<body>Checking your browser before accessing... "
+            "Please enable JavaScript. cloudflare</body></html>"
+        )
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, text=challenge_body,
+                                  request=httpx.Request("GET", url))
+
+        await enrich_summaries_for_case(
+            mock_get, db, "hkcfa", 2026, 25,
+            "hkcfa_2026_25", tmp_path, html,
+        )
+
+        # No file on disk: the WAF interstitial must not be persisted.
+        summary_path = tmp_path / "hkcfa_2026_25.summary_en.html"
+        assert not summary_path.exists(), (
+            f"challenge-page HTML must not be saved, but found: {summary_path}"
+        )
+
+        # DB row marked failed, not stamped 'downloaded'.
+        row = db.get_enrichment("hkcfa", 2026, 25)
+        assert row["summary_en"] == "failed", (
+            f"challenge page must mark failed, got {row['summary_en']}"
+        )
+
+        # Error message must name the cause so operators can diagnose.
+        errs = db.get_enrichment_errors("hkcfa", 2026, 25)
+        assert "summary_en" in errs
+        assert "challenge-page" in errs["summary_en"], (
+            f"error should name 'challenge-page', got: {errs['summary_en']!r}"
+        )
+
 
 class TestEnrichAppealHistoryForCase:
     async def test_oserror_during_save_marks_failed(self, tmp_path):
