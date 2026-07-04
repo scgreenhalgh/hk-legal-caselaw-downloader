@@ -1556,3 +1556,128 @@ class TestBulkScraperPoolExhausted:
                 f"expected error to start with 'pool-exhausted', "
                 f"got: {row[0]!r}"
             )
+
+
+def _read_events(out_dir) -> list[dict]:
+    p = Path(out_dir) / "events.jsonl"
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines()]
+
+
+class TestBulkScraperEvents:
+    """The scraper feeds the observability layer: case-level terminal
+    failures emit `case_failed`, WAF interstitials emit `challenge_detected`
+    plus a raw failure sample, and mid-run pool death emits `pool_exhausted`.
+    EventLogger is optional — None must remain a valid no-op."""
+
+    async def test_emits_case_failed_on_terminal_failure(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        empty = {**SAMPLE_JUDGMENT_RESPONSE, "content": "", "doc": None}
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=empty,
+                                  request=httpx.Request("GET", url))
+
+        out = tmp_path / "out"
+        db = _make_db()
+        _seed_db(db, count=1)
+        ev = StructuredEventLogger(out)
+        await ev.start()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=out, events=ev,
+        )
+        await scraper.download_all()
+        await ev.aclose()
+
+        rows = _read_events(out)
+        failed = [r for r in rows if r["kind"] == "case_failed"]
+        assert len(failed) == 1, f"expected 1 case_failed row, got {rows}"
+        assert failed[0]["court"] == "hkcfi"
+        assert failed[0]["num"] == 1
+        assert "empty-content" in failed[0]["error_msg"]
+        assert failed[0]["error_class"] == "empty-content", (
+            f"error_class should bucket cleanly, got {failed[0]['error_class']!r}"
+        )
+
+    async def test_emits_challenge_detected_and_raw_sample(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        challenge = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "<html><body>Just a moment... cloudflare</body></html>",
+        }
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=challenge,
+                                  request=httpx.Request("GET", url))
+
+        out = tmp_path / "out"
+        db = _make_db()
+        _seed_db(db, count=1)
+        ev = StructuredEventLogger(out)
+        await ev.start()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=out, events=ev,
+        )
+        await scraper.download_all()
+        await ev.aclose()
+
+        rows = _read_events(out)
+        challenges = [r for r in rows if r["kind"] == "challenge_detected"]
+        assert len(challenges) == 1, (
+            f"expected 1 challenge_detected row, got {rows}"
+        )
+        assert challenges[0]["court"] == "hkcfi"
+
+        # A raw response sample must be dumped for post-run WAF analysis.
+        samples = list((out / "failure_samples").glob("*.html"))
+        assert len(samples) == 1, f"expected 1 failure sample, got {samples}"
+        assert "Just a moment" in samples[0].read_text()
+
+    async def test_emits_pool_exhausted_on_all_proxies_dead(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+        from hklii_downloader.proxy_pool import AllProxiesDeadError
+
+        async def mock_get(url, **kw):
+            raise AllProxiesDeadError("all proxy sessions are dead")
+
+        out = tmp_path / "out"
+        db = _make_db()
+        _seed_db(db, count=2)
+        ev = StructuredEventLogger(out)
+        await ev.start()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=out, events=ev,
+            _backoff_base=0.0,
+        )
+        await scraper.download_all()
+        await ev.aclose()
+
+        rows = _read_events(out)
+        exhausted = [r for r in rows if r["kind"] == "pool_exhausted"]
+        assert len(exhausted) == 2, (
+            f"expected 2 pool_exhausted rows (one per claimed case), got {rows}"
+        )
+        assert all(r["error_class"] == "pool-exhausted" for r in exhausted), (
+            f"pool_exhausted rows should bucket by 'pool-exhausted', got {exhausted}"
+        )
+
+    async def test_events_none_is_a_valid_noop(self, tmp_path):
+        empty = {**SAMPLE_JUDGMENT_RESPONSE, "content": "", "doc": None}
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=empty,
+                                  request=httpx.Request("GET", url))
+
+        out = tmp_path / "out"
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=out, events=None,
+        )
+        # Must not raise, and must not create an events.jsonl.
+        result = await scraper.download_all()
+        assert result.failed == 1
+        assert not (out / "events.jsonl").exists()
