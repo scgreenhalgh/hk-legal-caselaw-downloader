@@ -70,6 +70,9 @@ class MonitorRunner:
         connection to `.checkpoint.db`. Returns None if the DB is absent."""
         if not self._db_path.exists():
             return None
+        # Capture mtime before opening the connection so a read cannot
+        # perturb the fallback run-start signal.
+        db_mtime = self._db_path.stat().st_mtime
         conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
         try:
             counts = {
@@ -82,6 +85,9 @@ class MonitorRunner:
                 "SELECT SUBSTR(error, 1, 40) AS err, COUNT(*) FROM cases "
                 "WHERE status='failed' GROUP BY err ORDER BY 2 DESC LIMIT 5"
             ).fetchall()
+            min_seen = conn.execute(
+                "SELECT MIN(last_seen_at) FROM cases"
+            ).fetchone()[0]
         finally:
             conn.close()
 
@@ -94,15 +100,45 @@ class MonitorRunner:
             for row in error_rows
             if row[0] is not None
         ]
+
+        # Run-start: prefer the earliest enumeration timestamp (a real per-row
+        # signal). Fall back to the checkpoint mtime when no row carries one,
+        # flagging that the rate/ETA are approximate.
+        warning = None
+        if min_seen is not None:
+            run_start = datetime.fromtimestamp(min_seen, tz=timezone.utc)
+            run_start_source = "min_last_seen_at"
+        else:
+            run_start = datetime.fromtimestamp(db_mtime, tz=timezone.utc)
+            run_start_source = "checkpoint_mtime"
+            warning = (
+                "run-start derived from .checkpoint.db mtime (no per-row "
+                "enumeration timestamp); rate/ETA are approximate."
+            )
+
+        runtime_hours = (self._now - run_start).total_seconds() / 3600.0
+        downloaded_per_hour = (
+            downloaded / runtime_hours if runtime_hours > 0 else None
+        )
+        remaining = pending + in_progress
+        eta_hours = (
+            remaining / downloaded_per_hour
+            if downloaded_per_hour and downloaded_per_hour > 0
+            else None
+        )
+
         return {
             "downloaded": downloaded,
             "in_progress": in_progress,
             "failed": failed,
             "pending": pending,
             "total": sum(counts.values()),
-            "downloaded_per_hour": None,
-            "eta_hours": None,
-            "runtime_hours": None,
+            "downloaded_per_hour": downloaded_per_hour,
+            "eta_hours": eta_hours,
+            "runtime_hours": runtime_hours,
+            "run_start": run_start.isoformat(),
+            "run_start_source": run_start_source,
+            "warning": warning,
             "top_error_prefixes": top_error_prefixes,
         }
 
