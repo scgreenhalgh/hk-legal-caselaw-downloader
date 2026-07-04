@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -1439,4 +1440,74 @@ class TestBulkScraperConcurrency:
         await scraper.download_all()
         assert max_in_flight == 1, (
             f"workers=1 should be sequential, saw max {max_in_flight}"
+        )
+
+
+class TestBulkScraperFailureLogging:
+    """B2 — the runbook's WAF-detection tripwire (line 367)
+    `grep 'FAILED\\|mark_failed\\|challenge-page detected' scrape.log`
+    returns empty because 9 mark_failed sites in scraper.py never emit a
+    WARNING log — only the DB error column. Over a 15-20h unattended
+    scrape that leaves the operator blind to a mid-run WAF ramp."""
+
+    async def test_download_failure_emits_warning_log(self, tmp_path, caplog):
+        """A 404 (permanent-error branch) must emit a WARNING record on
+        the `hklii_downloader.scraper` logger with 'FAILED' in the message
+        and the case_id substring so the runbook grep tripwire fires."""
+
+        async def mock_get(url, **kw):
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)  # hkcfi 2023 1
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="hklii_downloader.scraper"):
+            await scraper.download_all()
+
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "FAILED" in r.getMessage()
+        ]
+        assert warnings, (
+            f"expected WARNING log with 'FAILED' on mark_failed; got records: "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        # Case id must appear so operator can grep back to the failing row.
+        msg = warnings[0].getMessage()
+        assert "hkcfi" in msg and "2023" in msg and "1" in msg, (
+            f"expected case_id (hkcfi/2023/1) in FAILED log; got: {msg!r}"
+        )
+
+    async def test_challenge_page_emits_distinct_warning(self, tmp_path, caplog):
+        """The runbook grep also looks for literal 'challenge-page detected'
+        as a distinct WAF signal. Even though the FAILED log would contain
+        it via the err string, emit an additional distinct WARNING so the
+        signal is unmistakable in a 15-20h log tail."""
+
+        challenge_response = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "<html><body>Just a moment... cloudflare</body></html>",
+        }
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, json=challenge_response,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(get=mock_get, checkpoint=db, output_dir=tmp_path)
+
+        with caplog.at_level(logging.WARNING, logger="hklii_downloader.scraper"):
+            await scraper.download_all()
+
+        challenge_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "challenge-page detected" in r.getMessage()
+        ]
+        assert challenge_warnings, (
+            f"expected WARNING with 'challenge-page detected' prefix; "
+            f"got records: "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
         )
