@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -125,9 +126,64 @@ class MonitorRunner:
         return {
             "window_min": self._window_min,
             "counts_by_kind": counts,
-            "proxy_hotspots": [],
-            "recent_challenges": [],
+            "proxy_hotspots": self._proxy_hotspots(rows),
+            "recent_challenges": self._recent_challenges(rows),
         }
+
+    @staticmethod
+    def _proxy_hotspots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Proxies whose in-window failed count sits >3σ above the pool mean —
+        the individual-IP-ban signal. The pool is every proxy that served a
+        request in the window (a clean proxy counts as 0 failures), so one IP
+        burning while its peers stay healthy stands out."""
+        pool: dict[str, int] = {}
+        for row in rows:
+            kind = row.get("kind")
+            if kind not in ("request_success", "request_failed"):
+                continue
+            proxy = row.get("proxy_url")
+            if proxy is None:
+                continue
+            pool.setdefault(proxy, 0)
+            if kind == "request_failed":
+                pool[proxy] += 1
+
+        if len(pool) < 2:
+            return []
+        failed_counts = list(pool.values())
+        mean = statistics.fmean(failed_counts)
+        sigma = statistics.pstdev(failed_counts)
+        if sigma <= 0:
+            return []
+        threshold = mean + 3.0 * sigma
+        hotspots = [
+            {
+                "proxy_url": proxy,
+                "failed": count,
+                "mean": round(mean, 1),
+                "threshold": round(threshold, 1),
+            }
+            for proxy, count in pool.items()
+            if count > threshold
+        ]
+        hotspots.sort(key=lambda h: h["failed"], reverse=True)
+        return hotspots
+
+    @staticmethod
+    def _recent_challenges(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Up to 5 most-recent challenge_detected URLs + proxies for eyeball
+        WAF inspection. `rows` is newest-first, so slice the first 5."""
+        out = []
+        for row in rows:
+            if row.get("kind") != "challenge_detected":
+                continue
+            out.append({
+                "url": row.get("url"),
+                "proxy_url": row.get("proxy_url"),
+            })
+            if len(out) == 5:
+                break
+        return out
 
     def _events_in_window(self, cutoff: datetime) -> list[dict[str, Any]]:
         """Rows with `ts` >= cutoff, newest-first. Reads backward from EOF in
