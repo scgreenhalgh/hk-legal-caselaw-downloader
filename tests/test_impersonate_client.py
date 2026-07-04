@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import random
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -26,12 +27,48 @@ class TestProfileSelection:
             f"expected multiple profiles across seeds, got {picks}"
         )
 
-    def test_profile_pool_includes_diverse_browsers(self):
-        """Pool should include Chrome, Safari, Edge — not just one vendor."""
+    def test_profile_pool_is_modern_chrome_only(self):
+        """Policy (item M-3, 2026-07-04 audit): pool must be modern Chrome
+        only. Previous policy mixed vendors + old versions for TLS-fingerprint
+        diversity, but curl_cffi sets User-Agent per-profile, so a chrome104
+        profile in 2026 sent a Chrome/104 UA the origin's access-log parser
+        would flag as stale. UA freshness dominates vendor diversity — Chrome
+        is 65%+ of real browser share anyway. Bare 'chrome' alias is allowed
+        because it auto-tracks curl_cffi's newest profile."""
         from hklii_downloader.impersonate_client import _IMPERSONATE_PROFILES
-        prefixes = {p[:3] for p in _IMPERSONATE_PROFILES}
-        assert len(prefixes) >= 2, (
-            f"expected diverse browser vendors in pool, got {prefixes}"
+        for profile in _IMPERSONATE_PROFILES:
+            if profile == "chrome":
+                continue
+            assert profile.startswith("chrome"), (
+                f"profile {profile!r} is not chrome — pool must be Chrome-only"
+            )
+            m = re.match(r"^chrome(\d+)$", profile)
+            assert m, f"profile {profile!r} has non-numeric suffix"
+            version = int(m.group(1))
+            assert version >= 131, (
+                f"profile {profile!r} is version {version}; must be >=131 "
+                f"(late-2024 Chrome release). Stale UAs are a detection signal."
+            )
+
+    def test_bare_chrome_alias_included(self):
+        """The bare 'chrome' alias auto-tracks the newest supported profile —
+        picking it a fraction of the time keeps the fleet current as
+        curl_cffi ships new releases without needing pool updates."""
+        from hklii_downloader.impersonate_client import _IMPERSONATE_PROFILES
+        assert "chrome" in _IMPERSONATE_PROFILES, (
+            "expected bare 'chrome' alias in pool for auto-tracking"
+        )
+
+    def test_no_stale_profiles(self):
+        """Explicit guard against known-stale profiles sneaking back in
+        via a copy-paste. chrome104 = July 2022, chrome116 = Aug 2023 —
+        both send 3-4 year old Chrome UAs in 2026."""
+        from hklii_downloader.impersonate_client import _IMPERSONATE_PROFILES
+        stale = {"chrome104", "chrome110", "chrome116", "chrome120", "chrome124"}
+        intersect = set(_IMPERSONATE_PROFILES) & stale
+        assert not intersect, (
+            f"stale profiles found in pool: {intersect}. Drop these — they "
+            f"send 2022-2023 Chrome UAs that no real 2026 user emits."
         )
 
 
