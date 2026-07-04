@@ -206,6 +206,72 @@ class TestEnrichSummariesForCase:
             f"error should name 'challenge-page', got: {errs['summary_en']!r}"
         )
 
+    async def test_challenge_page_emits_event_and_sample(self, tmp_path):
+        """The press-summary challenge branch must also feed the observability
+        layer: emit an `enrichment_challenge` event and dump the raw WAF body
+        for post-run signature analysis. EventLogger is optional."""
+        from hklii_downloader.events import StructuredEventLogger
+        from hklii_downloader.enrichment import enrich_summaries_for_case
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-01-01")
+        html = '<a href="/doc/foo/es.htm">Press Summary (English)</a>'
+        challenge_body = (
+            "<html><head><title>Just a moment...</title></head>"
+            "<body>Please enable JavaScript. cloudflare</body></html>"
+        )
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, text=challenge_body,
+                                  request=httpx.Request("GET", url))
+
+        out = tmp_path / "out"
+        ev = StructuredEventLogger(out)
+        await ev.start()
+        await enrich_summaries_for_case(
+            mock_get, db, "hkcfa", 2026, 25,
+            "hkcfa_2026_25", out, html, events=ev,
+        )
+        await ev.aclose()
+
+        rows = [json.loads(x) for x in (out / "events.jsonl").read_text().splitlines()]
+        challenges = [r for r in rows if r["kind"] == "enrichment_challenge"]
+        assert len(challenges) == 1, (
+            f"expected 1 enrichment_challenge event, got {rows}"
+        )
+        assert challenges[0]["court"] == "hkcfa"
+        assert challenges[0]["num"] == 25
+
+        samples = list((out / "failure_samples").glob("*.html"))
+        assert len(samples) == 1, f"expected 1 WAF sample, got {samples}"
+        assert "Just a moment" in samples[0].read_text()
+
+        # Existing B5 behaviour preserved: DB row still marked failed.
+        assert db.get_enrichment("hkcfa", 2026, 25)["summary_en"] == "failed"
+
+    async def test_events_none_is_a_valid_noop_on_challenge(self, tmp_path):
+        from hklii_downloader.enrichment import enrich_summaries_for_case
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfa", 2026, 25, "N", "T", "2026-01-01")
+        html = '<a href="/doc/foo/es.htm">Press Summary (English)</a>'
+
+        async def mock_get(url, **kw):
+            return httpx.Response(
+                200, text="<html>Just a moment... cloudflare</html>",
+                request=httpx.Request("GET", url),
+            )
+
+        out = tmp_path / "out"
+        # events omitted entirely — must not raise, must still mark failed.
+        await enrich_summaries_for_case(
+            mock_get, db, "hkcfa", 2026, 25, "hkcfa_2026_25", out, html,
+        )
+        assert db.get_enrichment("hkcfa", 2026, 25)["summary_en"] == "failed"
+        assert not (out / "events.jsonl").exists()
+
 
 class TestEnrichAppealHistoryForCase:
     async def test_oserror_during_save_marks_failed(self, tmp_path):
