@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS cases (
     summary_zh_error      TEXT,
     appeal_history_status TEXT NOT NULL DEFAULT 'pending',
     appeal_history_error  TEXT,
+    html_pending_at_hklii INTEGER,
     PRIMARY KEY (court, year, number)
 );
 """
@@ -124,6 +125,10 @@ class CheckpointDB:
                 self._conn.execute(
                     f"ALTER TABLE cases ADD COLUMN {kind}_error TEXT"
                 )
+        if "html_pending_at_hklii" not in existing:
+            self._conn.execute(
+                "ALTER TABLE cases ADD COLUMN html_pending_at_hklii INTEGER"
+            )
 
     def upsert_case(
         self, court: str, year: int, number: int,
@@ -174,13 +179,41 @@ class CheckpointDB:
 
     def mark_downloaded(
         self, court: str, year: int, number: int, formats: list[str],
+        html_pending_ts: int | None = None,
     ) -> None:
+        # html_pending_ts=None means HTML was captured (or was never
+        # missing); clear any prior pending stamp. A non-None value
+        # means we fell back to the doc — stamp it so a future
+        # recheck-html pass can find these rows.
         self._conn.execute(
-            "UPDATE cases SET status='downloaded', formats=? "
+            "UPDATE cases SET status='downloaded', formats=?, "
+            "html_pending_at_hklii=? "
             "WHERE court=? AND year=? AND number=?",
-            (json.dumps(formats), court, year, number),
+            (json.dumps(formats), html_pending_ts, court, year, number),
         )
         self._conn.commit()
+
+    def pending_html_recheck(self, limit: int | None = None) -> list[CaseRecord]:
+        """Rows previously captured via doc-fallback whose HTML may now
+        be available at HKLII. status must be 'downloaded' — this is a
+        deliberate follow-up pass, not a first-time download."""
+        q = (
+            "SELECT court, year, number, neutral, title, date, lang "
+            "FROM cases WHERE status='downloaded' "
+            "AND html_pending_at_hklii IS NOT NULL "
+            "ORDER BY html_pending_at_hklii ASC"
+        )
+        if limit is not None:
+            q += f" LIMIT {int(limit)}"
+        rows = self._conn.execute(q).fetchall()
+        return [
+            CaseRecord(
+                court=r[0], year=r[1], number=r[2],
+                neutral=r[3], title=r[4], date=r[5],
+                status="downloaded", lang=r[6],
+            )
+            for r in rows
+        ]
 
     def mark_failed(self, court: str, year: int, number: int, error: str) -> None:
         self._conn.execute(
