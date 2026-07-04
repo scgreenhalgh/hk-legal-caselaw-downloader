@@ -30,6 +30,16 @@ _TRACKED_KINDS = (
     "challenge_detected", "pool_exhausted", "degraded",
 )
 
+# Alert thresholds — see scratchpad/REVIEW_VERDICT.md §hour-4. The failed-status
+# error-prefix breakdown is the widest-drift-catching signal; the rate band
+# tracks the ~7000/hr production target.
+_ERR_PREFIX_CRITICAL = 100      # a single prefix over this → critical
+_ERR_PREFIX_WARN = 20           # a single prefix in [20, 100] → warn
+_IN_PROGRESS_WORKER_MULT = 4    # in_progress over this x workers → critical (B6)
+_RATE_CRITICAL = 4000           # sustained rate under this → critical
+_RATE_WARN = 6000               # rate in [4000, 6000] → warn (target ~7000)
+_RATE_MIN_RUNTIME_H = 1.0       # rate alerts need >1h of data to be meaningful
+
 
 class MonitorRunner:
     def __init__(
@@ -53,15 +63,45 @@ class MonitorRunner:
         checkpoint = self._read_checkpoint()
         events = self._read_events()
         log = self._read_log()
+
+        # A missing .checkpoint.db is itself critical — we cannot assess
+        # health — but still surface whatever events/log exist.
+        if checkpoint is None:
+            return {
+                "severity": "CRITICAL",
+                "banner": f"hklii scrape @ {self._output_dir} — checkpoint DB not found",
+                "runtime_hours": None,
+                "checkpoint": None,
+                "events": events,
+                "log": log,
+                "alerts": [{
+                    "level": "CRITICAL",
+                    "reason": f"checkpoint DB not found at {self._db_path}",
+                    "detail": "cannot assess scrape health without .checkpoint.db",
+                }],
+            }
+
+        runtime_hours = checkpoint["runtime_hours"]
+        alerts = self.evaluate_alerts(checkpoint, events, runtime_hours)
         return {
-            "severity": "HEALTHY",
+            "severity": self.severity_for(alerts),
             "banner": "",
-            "runtime_hours": checkpoint["runtime_hours"] if checkpoint else None,
+            "runtime_hours": runtime_hours,
             "checkpoint": checkpoint,
             "events": events,
             "log": log,
-            "alerts": [],
+            "alerts": alerts,
         }
+
+    @staticmethod
+    def severity_for(alerts: list[dict[str, str]]) -> str:
+        """Collapse a list of alerts to a single severity by precedence."""
+        levels = {a["level"] for a in alerts}
+        if "CRITICAL" in levels:
+            return "CRITICAL"
+        if "WARN" in levels:
+            return "WARN"
+        return "HEALTHY"
 
     # ------------------------------------------------------------- checkpoint
 
@@ -283,8 +323,91 @@ class MonitorRunner:
         events: dict[str, Any] | None,
         runtime_hours: float | None,
     ) -> list[dict[str, str]]:
-        """Apply the hour-4 alert rules; return a list of alert dicts."""
-        return []
+        """Apply the hour-4 alert rules; return a list of alert dicts. Event
+        rules are skipped when `events` is None (a --no-events run) — the
+        checkpoint rules still fire."""
+        alerts: list[dict[str, str]] = []
+
+        for ep in checkpoint.get("top_error_prefixes", []):
+            count, prefix = ep["count"], ep["prefix"]
+            if count > _ERR_PREFIX_CRITICAL:
+                alerts.append({
+                    "level": "CRITICAL",
+                    "reason": f"error-prefix {prefix!r} has {count} hits",
+                    "detail": f"failed-status prefix over {_ERR_PREFIX_CRITICAL}",
+                })
+            elif count >= _ERR_PREFIX_WARN:
+                alerts.append({
+                    "level": "WARN",
+                    "reason": f"error-prefix {prefix!r} has {count} hits",
+                    "detail": (
+                        f"failed-status prefix in "
+                        f"{_ERR_PREFIX_WARN}-{_ERR_PREFIX_CRITICAL}"
+                    ),
+                })
+
+        in_progress = checkpoint.get("in_progress", 0)
+        ip_threshold = _IN_PROGRESS_WORKER_MULT * self._workers
+        if in_progress > ip_threshold:
+            alerts.append({
+                "level": "CRITICAL",
+                "reason": (
+                    f"in_progress {in_progress} > "
+                    f"{_IN_PROGRESS_WORKER_MULT}x workers ({self._workers})"
+                ),
+                "detail": "workers stranding rows in in_progress (B6 symptom)",
+            })
+
+        rate = checkpoint.get("downloaded_per_hour")
+        if (
+            rate is not None
+            and runtime_hours is not None
+            and runtime_hours > _RATE_MIN_RUNTIME_H
+        ):
+            if rate < _RATE_CRITICAL:
+                alerts.append({
+                    "level": "CRITICAL",
+                    "reason": f"downloaded rate {rate:.0f}/hr < {_RATE_CRITICAL}/hr",
+                    "detail": "sustained low throughput",
+                })
+            elif rate <= _RATE_WARN:
+                alerts.append({
+                    "level": "WARN",
+                    "reason": f"downloaded rate {rate:.0f}/hr below 7000/hr target",
+                    "detail": f"rate in {_RATE_CRITICAL}-{_RATE_WARN}/hr",
+                })
+
+        if events is not None:
+            counts = events.get("counts_by_kind", {})
+            window = events.get("window_min")
+            degraded = counts.get("degraded", 0)
+            if degraded > 0:
+                alerts.append({
+                    "level": "WARN",
+                    "reason": f"{degraded} degraded event(s) in last {window}min",
+                    "detail": "B3 IP-check swallow — potential leak window",
+                })
+            pool_exhausted = counts.get("pool_exhausted", 0)
+            if pool_exhausted > 0:
+                alerts.append({
+                    "level": "WARN",
+                    "reason": (
+                        f"{pool_exhausted} pool_exhausted event(s) "
+                        f"in last {window}min"
+                    ),
+                    "detail": "B6 pool blackout",
+                })
+            for hotspot in events.get("proxy_hotspots", []):
+                alerts.append({
+                    "level": "WARN",
+                    "reason": (
+                        f"proxy {hotspot['proxy_url']} failures "
+                        f"{hotspot['failed']} > 3σ above mean"
+                    ),
+                    "detail": "probable individual-IP ban",
+                })
+
+        return alerts
 
     def render_text(self, summary: dict[str, Any]) -> str:
         return ""
