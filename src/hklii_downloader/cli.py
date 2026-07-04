@@ -295,6 +295,72 @@ def verify(output: Path) -> None:
 @click.option(
     "-o", "--output",
     type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="Scrape output directory (containing .checkpoint.db).",
+)
+@click.option(
+    "--window-min",
+    type=int,
+    default=30,
+    help="Look back N minutes for \"recent\" events (default: 30).",
+)
+@click.option(
+    "--workers",
+    type=int,
+    default=20,
+    help="Configured worker count, for the in_progress alert (default: 20).",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit a structured JSON summary instead of the table.",
+)
+@click.option(
+    "--quiet",
+    is_flag=True,
+    default=False,
+    help="Suppress all output; just exit with the severity code.",
+)
+def monitor(
+    output: Path,
+    window_min: int,
+    workers: int,
+    as_json: bool,
+    quiet: bool,
+) -> None:
+    """Snapshot the health of a running scrape from its output directory.
+
+    Reads .checkpoint.db + events.jsonl + scrape.log; prints a compact
+    summary; exits 0 (healthy) / 1 (warn) / 2 (critical) so a cron job or
+    /loop wrapper can escalate during a long production run. Pure reader —
+    it never writes to the artifacts it observes.
+
+    \b
+    Examples:
+      hklii monitor -o ./downloads
+      hklii monitor -o ./downloads --json
+      hklii monitor -o ./downloads --window-min 60 --workers 20 --quiet
+    """
+    import sys
+
+    from .monitor import MonitorRunner
+
+    runner = MonitorRunner(output, window_min=window_min, workers=workers)
+    summary = runner.run()
+    if not quiet:
+        click.echo(
+            runner.render_json(summary) if as_json
+            else runner.render_text(summary)
+        )
+    sys.exit({"HEALTHY": 0, "WARN": 1, "CRITICAL": 2}[summary["severity"]])
+
+
+@main.command()
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
     default=Path("./downloads"),
     help="Directory containing existing downloads + .checkpoint.db.",
 )
