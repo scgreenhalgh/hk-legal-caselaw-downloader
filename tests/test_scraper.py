@@ -443,6 +443,201 @@ class TestBulkScraperEmptyContentWithDoc:
         assert result.downloaded == 0
 
 
+class TestBulkScraperDocFallbackMagicByteGuard:
+    """Doc-fallback poisoning defense: if Judiciary F5 flips WAF mid-run,
+    an HTTP 200 body may be an HTML challenge page (~2-8 KB), not a docx.
+    Sibling paths already guard against this:
+      - API branch: _looks_like_challenge_page on content_html (scraper.py:332)
+      - Press summary: same check in enrichment.py:88
+    _fetch_doc was the last un-guarded path. Writing HTML bytes to a .docx
+    file poisons RAG downstream (BadZipFile at ingest time), and stamps
+    'downloaded' in the checkpoint so a re-run won't re-fetch. The magic-byte
+    check (PK\\x03\\x04 for docx / \\xd0\\xcf\\x11\\xe0 for legacy .doc) is
+    cheap and content-driven — Content-Type can be stripped/rewritten by
+    proxies/CDNs, magic bytes come from the file itself."""
+
+    async def test_fetch_doc_rejects_html_body_with_invalid_magic(self, tmp_path):
+        # Doc-fallback path (content='') + doc URL that returns an HTML
+        # challenge page instead of docx bytes.
+        judgment_empty_html_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/foo.docx",
+        }
+        html_challenge_body = (
+            b"<html><head><title>Just a moment...</title></head>"
+            b"<body>cloudflare challenge</body></html>"
+        )
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_empty_html_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                # HTTP 200 but body is HTML (missing PK\x03\x04 / \xd0\xcf\x11\xe0)
+                return httpx.Response(
+                    200, content=html_challenge_body,
+                    headers={"Content-Type": "text/html"},
+                    request=httpx.Request("GET", url),
+                )
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+
+        # Row must transition to failed, not downloaded — otherwise a
+        # 2-8 KB HTML file sits on disk with a .docx extension.
+        assert result.failed == 1, (
+            f"expected doc-invalid-magic to fail row; got {result}"
+        )
+        assert result.downloaded == 0, (
+            f"invalid magic must NOT mark row downloaded; got {result}"
+        )
+
+        # No poisoned .docx / .doc on disk.
+        court_dir = tmp_path / "hkcfi" / "2023"
+        assert not (court_dir / "hkcfi_2023_1.docx").exists(), (
+            "invalid-magic body must NOT be written as .docx"
+        )
+        assert not (court_dir / "hkcfi_2023_1.doc").exists(), (
+            "invalid-magic body must NOT be written as .doc"
+        )
+
+        # Error message must include the distinctive prefix so the monitor's
+        # top-error-classes surface WAF-flip signals separately from generic
+        # doc-fetch failures.
+        row = db._conn.execute(
+            "SELECT status, error, formats FROM cases "
+            "WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row is not None
+        status, error, formats = row
+        assert status == "failed", f"expected status=failed, got {status!r}"
+        assert error is not None
+        assert "doc-invalid-magic" in error, (
+            f"expected 'doc-invalid-magic' prefix in error; got {error!r}"
+        )
+        # 3c = '<' — the first byte of the HTML body.
+        assert "3c" in error.lower(), (
+            f"expected first-byte hex in error; got {error!r}"
+        )
+        # No formats should be persisted — nothing landed on disk.
+        assert formats in (None, "[]"), (
+            f"expected no formats persisted on invalid-magic; got {formats!r}"
+        )
+
+    async def test_fetch_doc_rejects_html_body_even_when_content_ok(self, tmp_path):
+        # Even when HTML content_html is present (doc is supplementary),
+        # a WAF-flip on the doc-fetch endpoint is a signal that must not
+        # be silently swallowed. Fail the row so the runbook grep for
+        # 'doc-invalid-magic' surfaces it — otherwise a run-wide Judiciary
+        # WAF flip would hide behind 'downloaded=N' counters (html saved,
+        # doc silently dropped).
+        judgment_with_html_and_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "doc": "https://legalref.judiciary.hk/doc/foo.docx",
+        }
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_with_html_and_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=b"<html>challenge</html>",
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.failed == 1
+        assert result.downloaded == 0
+
+        court_dir = tmp_path / "hkcfi" / "2023"
+        assert not (court_dir / "hkcfi_2023_1.docx").exists(), (
+            "invalid-magic body must NOT be written as .docx"
+        )
+        row = db._conn.execute(
+            "SELECT status, error FROM cases "
+            "WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row[0] == "failed"
+        assert "doc-invalid-magic" in (row[1] or ""), (
+            f"expected 'doc-invalid-magic' in error; got {row[1]!r}"
+        )
+
+    async def test_fetch_doc_accepts_docx_zip_magic(self, tmp_path):
+        # Positive control — a real .docx starts with the ZIP magic
+        # PK\x03\x04 (docx is an OOXML ZIP archive). Must NOT be rejected.
+        judgment_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/foo.docx",
+        }
+        # Minimal ZIP header — first 4 bytes are the discriminator, remaining
+        # bytes are arbitrary since we only shape-check the first 4.
+        docx_bytes = b"PK\x03\x04" + b"\x00" * 60
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=docx_bytes,
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        assert result.failed == 0
+        assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.docx").exists()
+
+    async def test_fetch_doc_accepts_legacy_doc_ole_magic(self, tmp_path):
+        # Positive control — legacy .doc uses OLE compound magic
+        # \xd0\xcf\x11\xe0. Must NOT be rejected.
+        judgment_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/word.doc",
+        }
+        ole_bytes = b"\xd0\xcf\x11\xe0" + b"\x00" * 60
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=ole_bytes,
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        assert result.failed == 0
+        assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.doc").exists()
+
+
 class TestRetryBackoffJitter:
     """Deterministic `base * 2**attempt` makes 6 concurrent proxies retry in
     lockstep — itself a bot pattern in access logs (6 identical retry
