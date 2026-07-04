@@ -1511,3 +1511,48 @@ class TestBulkScraperFailureLogging:
             f"got records: "
             f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
         )
+
+
+class TestBulkScraperPoolExhausted:
+    """B6 — mid-run AllProxiesDeadError from ProxyPool.get is swallowed by
+    the worker's generic `except Exception:` (scraper.py:188). Row was
+    claimed as 'in_progress'; no mark_failed follows, so during a 30-60s
+    HKLII 502 blip the pool goes fully dead in 5-30s while workers rip
+    tens of thousands of pending rows into in_progress with no DB error.
+    Stats report a lie; --retry-failed won't recover them."""
+
+    async def test_worker_marks_failed_on_all_proxies_dead(self, tmp_path):
+        """Every row claimed while the pool is dead must be marked failed
+        with a 'pool-exhausted' error stamp, not stranded in in_progress."""
+        from hklii_downloader.proxy_pool import AllProxiesDeadError
+
+        async def mock_get(url, **kw):
+            raise AllProxiesDeadError("All proxy sessions are dead")
+
+        db = _make_db()
+        _seed_db(db, count=3)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            # _backoff_base=0 so the throttle sleep in the fix doesn't slow
+            # tests. The fix uses a fixed asyncio.sleep(0.5) — a 0.05
+            # override isn't wired to it, so we accept a small delay.
+            _backoff_base=0.0,
+        )
+        await scraper.download_all()
+
+        stats = db.stats()
+        assert stats == {
+            "total": 3, "downloaded": 0, "failed": 3,
+            "pending": 0, "in_progress": 0,
+        }, (
+            f"expected all 3 rows marked failed (not stranded in_progress); "
+            f"got {stats}"
+        )
+        rows = db._conn.execute(
+            "SELECT error FROM cases WHERE status='failed'"
+        ).fetchall()
+        for row in rows:
+            assert row[0].startswith("pool-exhausted"), (
+                f"expected error to start with 'pool-exhausted', "
+                f"got: {row[0]!r}"
+            )
