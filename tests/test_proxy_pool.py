@@ -94,6 +94,24 @@ class TestHeaderRotator:
         referer = rotator.referer_for("https://www.hklii.hk/api/getjudgment?abbr=hkcfi&year=2024&num=1")
         assert "hklii.hk" in referer
 
+    def test_referer_derives_year_list_page_for_getjudgment(self):
+        rotator = HeaderRotator(rng=random.Random(42))
+        referer = rotator.referer_for(
+            "https://www.hklii.hk/api/getjudgment?lang=en&abbr=hkcfi&year=2024&num=1234"
+        )
+        assert referer == "https://www.hklii.hk/en/cases/hkcfi/2024/", (
+            f"expected URL-derived referer, got {referer!r}"
+        )
+
+    def test_referer_derives_court_list_page_for_getcasefiles(self):
+        rotator = HeaderRotator(rng=random.Random(42))
+        referer = rotator.referer_for(
+            "https://www.hklii.hk/api/getcasefiles?caseDb=hkca&lang=tc&itemsPerPage=1000&page=1"
+        )
+        assert referer == "https://www.hklii.hk/tc/cases/hkca/", (
+            f"expected URL-derived referer, got {referer!r}"
+        )
+
     def test_rotate_gives_new_headers(self):
         rotator = HeaderRotator(rng=random.Random(42))
         first = rotator.generate()
@@ -236,6 +254,55 @@ class TestProxyPool:
         )
         resp = await pool.get("https://example.com")
         assert resp.status_code == 200
+
+    async def test_direct_mode_sets_referer_derived_from_url(self):
+        """Direct mode had NO Referer at all — pure API-first-hit signal.
+        Fix: derive Referer from URL context per request."""
+        captured = []
+
+        def make_transport(proxy_url):
+            def handler(request):
+                captured.append(dict(request.headers))
+                return httpx.Response(200, json={"data": "ok"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=[], direct=True,
+            _transport_factory=make_transport,
+        )
+        await pool.get(
+            "https://www.hklii.hk/api/getjudgment?lang=en&abbr=hkcfi&year=2024&num=1234"
+        )
+        assert captured, "direct-mode fetch never fired"
+        assert captured[0].get("referer") == "https://www.hklii.hk/en/cases/hkcfi/2024/", (
+            f"expected URL-derived Referer, got headers={captured[0]}"
+        )
+
+    async def test_proxy_mode_referer_derived_from_url(self):
+        """Proxy mode was hardcoded to homepage — every request advertised the
+        same Referer. Fix: derive per-URL."""
+        captured = []
+
+        def make_transport(proxy_url):
+            def handler(request):
+                captured.append(dict(request.headers))
+                return httpx.Response(200, json={"data": "ok"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            _transport_factory=make_transport,
+        )
+        pool._preflight_done = True
+        pool._home_ip = "203.0.113.1"
+
+        await pool.get(
+            "https://www.hklii.hk/api/getcasefiles?caseDb=hkcfi&lang=en&itemsPerPage=10000&page=1"
+        )
+        assert captured, "proxy-mode fetch never fired"
+        assert captured[0].get("referer") == "https://www.hklii.hk/en/cases/hkcfi/", (
+            f"expected URL-derived Referer, got headers={captured[0]}"
+        )
 
     async def test_runtime_ip_check_detects_leak(self):
         home_ip = "203.0.113.1"

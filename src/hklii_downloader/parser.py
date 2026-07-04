@@ -35,6 +35,11 @@ class HKLIICase:
         return f"{self.court}_{self.year}_{self.number}"
 
 
+def referer_for(url: str) -> str:
+    # Stub — real derivation lands in the next commit.
+    return f"{BASE_URL}/"
+
+
 def parse_hklii_url(url: str) -> HKLIICase:
     m = _URL_PATTERN.match(url)
     if not m:
