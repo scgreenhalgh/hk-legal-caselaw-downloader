@@ -206,15 +206,21 @@ class BulkScraper:
             downloaded=stats["downloaded"], failed=stats["failed"],
         )
 
+    def _fail(
+        self, court: str, year: int, number: int, error: str,
+    ) -> None:
+        """Mark a row failed AND emit a WARNING log — the runbook's
+        WAF tripwire greps for 'FAILED' in scrape.log
+        (see docs/RUNBOOK.md line 367). Writing to the DB error column
+        without logging leaves the operator blind over a 15-20h scrape."""
+        self._checkpoint.mark_failed(court, year, number, error)
+        _log.warning("FAILED %s/%s/%s: %s", court, year, number, error)
+
     async def _download_one(self, record: CaseRecord) -> bool:
         try:
             return await self._download_one_impl(record)
         except IPLeakError as e:
-            _log.warning(
-                "IPLeakError on %s/%s/%s: %s",
-                record.court, record.year, record.number, e,
-            )
-            self._checkpoint.mark_failed(
+            self._fail(
                 record.court, record.year, record.number,
                 f"IPLeakError: {e}",
             )
@@ -224,7 +230,7 @@ class BulkScraper:
                 "OSError during save %s/%s/%s: %s",
                 record.court, record.year, record.number, e,
             )
-            self._checkpoint.mark_failed(
+            self._fail(
                 record.court, record.year, record.number,
                 f"OSError during save: {e}",
             )
@@ -243,14 +249,14 @@ class BulkScraper:
                 if attempt < self._max_retries:
                     await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
-                self._checkpoint.mark_failed(
+                self._fail(
                     record.court, record.year, record.number,
                     f"{type(e).__name__} after {self._max_retries} retries: {e}",
                 )
                 return False
 
             if resp.status_code in _PERMANENT_ERRORS:
-                self._checkpoint.mark_failed(
+                self._fail(
                     record.court, record.year, record.number,
                     f"HTTP {resp.status_code}",
                 )
@@ -261,7 +267,7 @@ class BulkScraper:
                     await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
-                self._checkpoint.mark_failed(
+                self._fail(
                     record.court, record.year, record.number,
                     f"HTTP {resp.status_code} after {self._max_retries} retries; body: {preview}",
                 )
@@ -274,7 +280,7 @@ class BulkScraper:
                     await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
-                self._checkpoint.mark_failed(
+                self._fail(
                     record.court, record.year, record.number,
                     f"JSONDecodeError after {self._max_retries} retries; "
                     f"HTTP {resp.status_code}; body: {preview}",
@@ -285,7 +291,14 @@ class BulkScraper:
             output_dir = self._output_dir / record.court / str(record.year)
 
             if _looks_like_challenge_page(judgment.content_html):
-                self._checkpoint.mark_failed(
+                # Distinct WARNING so the runbook's grep for the literal
+                # 'challenge-page detected' string (line 367) surfaces the
+                # WAF signal even if only 1-2 rows out of thousands hit it.
+                _log.warning(
+                    "challenge-page detected on %s/%s/%s",
+                    record.court, record.year, record.number,
+                )
+                self._fail(
                     record.court, record.year, record.number,
                     "challenge-page detected in content_html",
                 )
@@ -296,7 +309,7 @@ class BulkScraper:
 
             if not content_ok and not can_try_doc:
                 doc_hint = f", doc_url={judgment.doc_url}" if judgment.doc_url else ""
-                self._checkpoint.mark_failed(
+                self._fail(
                     record.court, record.year, record.number,
                     f"empty-content{doc_hint}",
                 )
@@ -313,7 +326,7 @@ class BulkScraper:
                     actually_saved.add("doc")
                 elif not content_ok:
                     # Empty content AND doc fetch failed — nothing on disk
-                    self._checkpoint.mark_failed(
+                    self._fail(
                         record.court, record.year, record.number,
                         f"empty-content, doc-fetch-failed, doc_url={judgment.doc_url}",
                     )
