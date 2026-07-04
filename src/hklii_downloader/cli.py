@@ -15,7 +15,12 @@ DEFAULT_CONCURRENCY = 5
 
 class MutuallyExclusiveOption(click.Option):
     def handle_parse_result(self, ctx, opts, args):
-        if "proxy" in opts and "direct" in opts:
+        # `download` uses --proxy with dest 'proxy' (single value); scrape,
+        # enrich, and recheck-html use --proxy with dest 'proxies'
+        # (multiple=True). Check both so the mutex catches the bypass
+        # verified in Round 4 review, where the wrong dest name silently
+        # let `--proxy X --direct -y` proceed to hit hklii.hk directly.
+        if ("proxy" in opts or "proxies" in opts) and "direct" in opts:
             raise click.UsageError("--proxy and --direct are mutually exclusive.")
         return super().handle_parse_result(ctx, opts, args)
 
@@ -367,6 +372,7 @@ def monitor(
 @click.option(
     "-p", "--proxy", "proxies",
     multiple=True,
+    cls=MutuallyExclusiveOption,
     help="Proxy URL(s). Repeatable for multiple proxies.",
 )
 @click.option(
@@ -788,6 +794,7 @@ async def _run(
 @click.option(
     "-p", "--proxy", "proxies",
     multiple=True,
+    cls=MutuallyExclusiveOption,
     help="Proxy URL(s). Repeatable for multiple proxies.",
 )
 @click.option(
