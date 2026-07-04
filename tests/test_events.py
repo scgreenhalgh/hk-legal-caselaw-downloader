@@ -136,3 +136,127 @@ class TestStructuredEventLoggerAppend:
         row = json.loads((tmp_path / "events.jsonl").read_text().splitlines()[0])
         assert row["kind"] == "degraded"
         assert row["proxy_url"] == "http://localhost:8888"
+
+
+class TestFailureSampleDumper:
+    """The dumper saves the raw body + headers of challenge-page / failure
+    responses to <output>/failure_samples/ for post-run WAF signature
+    analysis. Hard caps stop a WAF loop from writing 228K sample files."""
+
+    def test_challenge_samples_capped_at_20_total(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        ev = StructuredEventLogger(tmp_path)
+        returns = [
+            ev.sample_failure(
+                f"challenge_hkcfi_2023_{i}",
+                f"<html>Just a moment {i}... cloudflare</html>",
+                {"Server": "cloudflare"},
+                is_challenge=True,
+            )
+            for i in range(25)
+        ]
+        assert sum(returns) == 20, (
+            f"exactly 20 challenge samples should be written, got {sum(returns)}"
+        )
+        assert returns[19] is True and returns[20] is False, (
+            "the 21st challenge hit must be count-only (return False)"
+        )
+        htmls = sorted((tmp_path / "failure_samples").glob("*.html"))
+        assert len(htmls) == 20, f"expected 20 .html samples, got {len(htmls)}"
+
+    def test_per_error_prefix_capped_at_5(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        ev = StructuredEventLogger(tmp_path)
+        returns = [
+            ev.sample_failure(
+                "HTTP 503",
+                f"<html>gateway error {i}</html>",
+                {"Server": "nginx"},
+            )
+            for i in range(7)
+        ]
+        assert sum(returns) == 5, (
+            f"per-prefix cap is 5, got {sum(returns)} writes"
+        )
+
+    def test_distinct_prefixes_have_independent_budgets(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        ev = StructuredEventLogger(tmp_path)
+        for i in range(5):
+            assert ev.sample_failure("HTTP 503", f"a{i}", {})
+        for i in range(5):
+            assert ev.sample_failure("HTTP 429", f"b{i}", {})
+        # 6th of each prefix is over budget.
+        assert ev.sample_failure("HTTP 503", "a5", {}) is False
+        assert ev.sample_failure("HTTP 429", "b5", {}) is False
+        htmls = list((tmp_path / "failure_samples").glob("*.html"))
+        assert len(htmls) == 10, (
+            f"two prefixes x 5 each = 10 samples, got {len(htmls)}"
+        )
+
+    def test_body_truncated_to_200kb(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        ev = StructuredEventLogger(tmp_path)
+        big = "x" * (300 * 1024)  # 300KB
+        ok = ev.sample_failure("challenge_big", big, {"Server": "x"},
+                               is_challenge=True)
+        assert ok
+        htmls = list((tmp_path / "failure_samples").glob("*.html"))
+        assert len(htmls) == 1
+        saved = htmls[0].read_bytes()
+        assert len(saved) <= 200 * 1024, (
+            f"body must be truncated to 200KB, got {len(saved)} bytes"
+        )
+
+    def test_headers_persisted_as_json_for_waf_fingerprinting(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        ev = StructuredEventLogger(tmp_path)
+        ev.sample_failure(
+            "challenge_hkcfi_2023_1",
+            "<html>Just a moment... cloudflare</html>",
+            {"Server": "cloudflare", "CF-Ray": "abc123", "Set-Cookie": "cf_clearance=x"},
+            is_challenge=True,
+        )
+        header_files = list((tmp_path / "failure_samples").glob("*.headers.json"))
+        assert len(header_files) == 1
+        doc = json.loads(header_files[0].read_text())
+        # Headers live under a 'headers' key so operators can jq
+        # `.headers.Server` / `.headers["CF-Ray"]` across samples.
+        assert doc["headers"]["Server"] == "cloudflare"
+        assert doc["headers"]["CF-Ray"] == "abc123"
+
+    def test_signature_with_unsafe_chars_is_sanitized(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        ev = StructuredEventLogger(tmp_path)
+        ok = ev.sample_failure(
+            "HTTP 503; path=/api/getjudgment?x=1",
+            "<html>err</html>",
+            {},
+        )
+        assert ok
+        htmls = list((tmp_path / "failure_samples").glob("*.html"))
+        assert len(htmls) == 1
+        # No path separators / query chars leak into the filename.
+        name = htmls[0].name
+        assert "/" not in name and "?" not in name and "=" not in name
+
+    def test_missing_headers_still_writes_body(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        ev = StructuredEventLogger(tmp_path)
+        ok = ev.sample_failure(
+            "challenge_summary_hkcfa_2026_25_en",
+            "<html>Just a moment... please enable JavaScript</html>",
+            None,  # enrichment path has only the body text, no response headers
+            is_challenge=True,
+        )
+        assert ok
+        htmls = list((tmp_path / "failure_samples").glob("*.html"))
+        assert len(htmls) == 1
+        assert "Just a moment" in htmls[0].read_text()
