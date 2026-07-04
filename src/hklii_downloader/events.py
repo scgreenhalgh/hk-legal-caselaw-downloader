@@ -25,13 +25,23 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .atomic_write import atomic_write_bytes, atomic_write_text
+
 _log = logging.getLogger("hklii_downloader.events")
 
 _EVENTS_FILENAME = "events.jsonl"
+_SAMPLES_DIRNAME = "failure_samples"
+
+# Global bucket key for the challenge-page sample budget (distinct from the
+# per-error-prefix budgets, which key on the caller's signature).
+_CHALLENGE_BUCKET = "\x00challenge"
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 # Sentinel pushed onto the queue by aclose() so the writer drains every
 # already-queued row before exiting.
@@ -50,16 +60,32 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _sanitize_signature(signature: str) -> str:
+    """Collapse anything that is not filesystem-safe into single underscores so
+    an error/URL-shaped signature becomes a valid, readable filename stem."""
+    safe = _UNSAFE_FILENAME_CHARS.sub("_", signature).strip("._")
+    return (safe or "sample")[:120]
+
+
 class StructuredEventLogger:
     def __init__(
         self,
         output_dir: Path | str,
         *,
         max_queue: int = 10_000,
+        challenge_sample_cap: int = 20,
+        per_prefix_sample_cap: int = 5,
+        max_sample_bytes: int = 200 * 1024,
     ):
         self._output_dir = Path(output_dir)
         self._events_path = self._output_dir / _EVENTS_FILENAME
+        self._samples_dir = self._output_dir / _SAMPLES_DIRNAME
         self._max_queue = max_queue
+
+        self._challenge_sample_cap = challenge_sample_cap
+        self._per_prefix_sample_cap = per_prefix_sample_cap
+        self._max_sample_bytes = max_sample_bytes
+        self._sample_counts: dict[str, int] = {}
 
         self._queue: asyncio.Queue | None = None
         self._writer_task: asyncio.Task | None = None
@@ -161,6 +187,69 @@ class StructuredEventLogger:
                     self._fsync()
             finally:
                 self._queue.task_done()
+
+    # ---------------------------------------------------------- failure samples
+
+    def sample_failure(
+        self,
+        signature: str,
+        body: str | bytes,
+        headers: dict | None = None,
+        *,
+        is_challenge: bool = False,
+    ) -> bool:
+        """Persist the raw body + headers of a failure/challenge response to
+        `failure_samples/` for post-run WAF signature analysis.
+
+        Caps: `challenge_sample_cap` total challenge hits, then
+        `per_prefix_sample_cap` per distinct error `signature`. Bodies are
+        truncated to `max_sample_bytes`. Beyond a cap the call is count-only
+        and returns False. Never raises — a sampling failure must not take
+        down the scrape."""
+        bucket = _CHALLENGE_BUCKET if is_challenge else signature
+        cap = (
+            self._challenge_sample_cap if is_challenge
+            else self._per_prefix_sample_cap
+        )
+        if self._sample_counts.get(bucket, 0) >= cap:
+            return False
+
+        try:
+            self._samples_dir.mkdir(parents=True, exist_ok=True)
+            base = self._unique_sample_base(_sanitize_signature(signature))
+
+            raw = body.encode("utf-8", "replace") if isinstance(body, str) else body
+            truncated = len(raw) > self._max_sample_bytes
+            if truncated:
+                raw = raw[: self._max_sample_bytes]
+            atomic_write_bytes(self._samples_dir / f"{base}.html", raw)
+
+            meta = {
+                "signature": signature,
+                "captured_at": _now_iso(),
+                "is_challenge": is_challenge,
+                "truncated": truncated,
+                "body_bytes": len(raw),
+                "headers": dict(headers) if headers else {},
+            }
+            atomic_write_text(
+                self._samples_dir / f"{base}.headers.json",
+                json.dumps(meta, indent=2, ensure_ascii=False),
+            )
+        except OSError as exc:
+            _log.warning("failed to write failure sample %r: %s", signature, exc)
+            return False
+
+        self._sample_counts[bucket] = self._sample_counts.get(bucket, 0) + 1
+        return True
+
+    def _unique_sample_base(self, base: str) -> str:
+        candidate = base
+        n = 1
+        while (self._samples_dir / f"{candidate}.html").exists():
+            candidate = f"{base}_{n}"
+            n += 1
+        return candidate
 
     # -------------------------------------------------------------------- I/O
 
