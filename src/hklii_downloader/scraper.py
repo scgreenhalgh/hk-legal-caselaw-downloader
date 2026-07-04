@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,12 +21,29 @@ from .enrichment import (
     enrich_summaries_for_case,
 )
 from .enumerator import enumerate_court
+from .events import StructuredEventLogger
 from .parser import HKLIICase
 from .proxy_pool import AllProxiesDeadError, IPLeakError
 
 _PERMANENT_ERRORS = {404, 410}
 _RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
 _BODY_PREVIEW_LEN = 200
+
+
+def _error_class(error: str) -> str:
+    """Bucket an error string to a short, greppable class for per-error-class
+    analytics — everything up to the first `: ; ,` delimiter. E.g.
+    'HTTP 503 after 3 retries; body: ...' -> 'HTTP 503 after 3 retries'."""
+    return re.split(r"[:;,]", error, maxsplit=1)[0].strip()[:60]
+
+
+def _response_headers(resp) -> dict:
+    """Best-effort header extraction that works for both httpx.Response
+    (tests) and curl_cffi's Response (production)."""
+    try:
+        return {k: v for k, v in resp.headers.items()}
+    except Exception:
+        return {}
 
 
 _CHALLENGE_MARKERS = (
@@ -91,6 +109,7 @@ class BulkScraper:
         with_appeal_history: bool = False,
         enum_max_age_hours: int = 0,
         save_enum_responses: bool = False,
+        events: StructuredEventLogger | None = None,
         _backoff_base: float = 1.0,
     ):
         self._get = get
@@ -104,7 +123,12 @@ class BulkScraper:
         self._with_appeal_history = with_appeal_history
         self._enum_max_age_hours = enum_max_age_hours
         self._save_enum_responses = save_enum_responses
+        self._events = events
         self._backoff_base = _backoff_base
+
+    def _emit(self, kind: str, **fields) -> None:
+        if self._events is not None:
+            self._events.emit(kind, **fields)
 
     async def enumerate(
         self, courts: list[str], langs: tuple[str, ...] = ("en", "tc"),
@@ -200,6 +224,7 @@ class BulkScraper:
                     self._fail(
                         record.court, record.year, record.number,
                         f"pool-exhausted: {exc}",
+                        event_kind="pool_exhausted",
                     )
                     success = False
                     await asyncio.sleep(0.5)
@@ -226,13 +251,23 @@ class BulkScraper:
 
     def _fail(
         self, court: str, year: int, number: int, error: str,
+        *, event_kind: str = "case_failed", **event_fields,
     ) -> None:
         """Mark a row failed AND emit a WARNING log — the runbook's
         WAF tripwire greps for 'FAILED' in scrape.log
         (see docs/RUNBOOK.md line 367). Writing to the DB error column
-        without logging leaves the operator blind over a 15-20h scrape."""
+        without logging leaves the operator blind over a 15-20h scrape.
+
+        Also emits one structured event (`event_kind`, default
+        `case_failed`) so events.jsonl carries the same failure with a
+        greppable `error_class`. The challenge / pool-exhausted sites pass
+        their own `event_kind` so they bucket separately in analytics."""
         self._checkpoint.mark_failed(court, year, number, error)
         _log.warning("FAILED %s/%s/%s: %s", court, year, number, error)
+        self._emit(
+            event_kind, court=court, year=year, num=number,
+            error_class=_error_class(error), error_msg=error, **event_fields,
+        )
 
     async def _download_one(self, record: CaseRecord) -> bool:
         try:
@@ -270,6 +305,7 @@ class BulkScraper:
                 self._fail(
                     record.court, record.year, record.number,
                     f"{type(e).__name__} after {self._max_retries} retries: {e}",
+                    url=case.api_url, retry_attempt=attempt,
                 )
                 return False
 
@@ -277,6 +313,8 @@ class BulkScraper:
                 self._fail(
                     record.court, record.year, record.number,
                     f"HTTP {resp.status_code}",
+                    url=case.api_url, http_status=resp.status_code,
+                    retry_attempt=attempt,
                 )
                 return False
 
@@ -285,9 +323,16 @@ class BulkScraper:
                     await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
+                if self._events is not None:
+                    self._events.sample_failure(
+                        f"HTTP_{resp.status_code}",
+                        resp.text, _response_headers(resp),
+                    )
                 self._fail(
                     record.court, record.year, record.number,
                     f"HTTP {resp.status_code} after {self._max_retries} retries; body: {preview}",
+                    url=case.api_url, http_status=resp.status_code,
+                    retry_attempt=attempt,
                 )
                 return False
 
@@ -298,10 +343,17 @@ class BulkScraper:
                     await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
+                if self._events is not None:
+                    self._events.sample_failure(
+                        f"JSONDecodeError_HTTP_{resp.status_code}",
+                        resp.text, _response_headers(resp),
+                    )
                 self._fail(
                     record.court, record.year, record.number,
                     f"JSONDecodeError after {self._max_retries} retries; "
                     f"HTTP {resp.status_code}; body: {preview}",
+                    url=case.api_url, http_status=resp.status_code,
+                    retry_attempt=attempt,
                 )
                 return False
 
@@ -316,9 +368,20 @@ class BulkScraper:
                     "challenge-page detected on %s/%s/%s",
                     record.court, record.year, record.number,
                 )
+                # Dump the raw response body + headers for post-run WAF
+                # fingerprint analysis (capped at 20 challenge samples/run).
+                if self._events is not None:
+                    self._events.sample_failure(
+                        f"challenge_{record.court}_{record.year}_{record.number}",
+                        resp.text, _response_headers(resp), is_challenge=True,
+                    )
                 self._fail(
                     record.court, record.year, record.number,
                     "challenge-page detected in content_html",
+                    event_kind="challenge_detected",
+                    proxy_url=getattr(resp, "hklii_proxy_url", None),
+                    url=case.api_url, http_status=resp.status_code,
+                    response_len=len(judgment.content_html),
                 )
                 return False
 
