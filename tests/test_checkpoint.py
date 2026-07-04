@@ -9,6 +9,83 @@ import pytest
 from hklii_downloader.checkpoint import CheckpointDB, CaseRecord
 
 
+class TestHtmlPendingTracker:
+    """Track cases captured via doc-fallback (empty content_html at HKLII).
+    Motivation: HKLII shows 'Only the Word format is available at the moment'
+    for recent-2026 judgments; we still save the .doc/.docx via --allow-doc,
+    but we should remember to re-check these cases on later runs to pick
+    up the HTML once HKLII processes it."""
+
+    def test_schema_has_html_pending_column(self):
+        db = CheckpointDB(":memory:")
+        cols = {row[1] for row in db._conn.execute("PRAGMA table_info(cases)").fetchall()}
+        assert "html_pending_at_hklii" in cols, (
+            f"expected html_pending_at_hklii column; got {sorted(cols)}"
+        )
+
+    def test_html_pending_is_null_by_default(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2026, 3816, "[2026] HKCFI 3816", "T v T", "2026-07-01")
+        row = db._conn.execute(
+            "SELECT html_pending_at_hklii FROM cases "
+            "WHERE court='hkcfi' AND year=2026 AND number=3816"
+        ).fetchone()
+        assert row[0] is None
+
+    def test_mark_downloaded_with_html_pending_ts_stamps_column(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2026, 3816, "[2026] HKCFI 3816", "T v T", "2026-07-01")
+        db.mark_downloaded("hkcfi", 2026, 3816, ["doc"], html_pending_ts=1751600000)
+        row = db._conn.execute(
+            "SELECT status, formats, html_pending_at_hklii FROM cases "
+            "WHERE court='hkcfi' AND year=2026 AND number=3816"
+        ).fetchone()
+        assert row[0] == "downloaded"
+        assert row[2] == 1751600000
+
+    def test_mark_downloaded_without_pending_ts_clears_prior_stamp(self):
+        """If a later run captures HTML, mark_downloaded is called with
+        html_pending_ts=None (the default) and any prior pending stamp
+        must be cleared."""
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2026, 3816, "[2026] HKCFI 3816", "T v T", "2026-07-01")
+        db.mark_downloaded("hkcfi", 2026, 3816, ["doc"], html_pending_ts=1751600000)
+        # Now HTML shows up on a later run:
+        db.mark_downloaded("hkcfi", 2026, 3816, ["html", "txt", "json"])
+        row = db._conn.execute(
+            "SELECT html_pending_at_hklii FROM cases "
+            "WHERE court='hkcfi' AND year=2026 AND number=3816"
+        ).fetchone()
+        assert row[0] is None, (
+            "expected html_pending_at_hklii cleared after HTML capture"
+        )
+
+    def test_pending_html_recheck_returns_only_flagged_downloaded_rows(self):
+        db = CheckpointDB(":memory:")
+        # Row 1: html available on original download (flag is NULL) — should NOT appear
+        db.upsert_case("hkcfi", 2025, 100, "[2025] HKCFI 100", "A v B", "2025-06-01")
+        db.mark_downloaded("hkcfi", 2025, 100, ["html", "txt", "json"])
+        # Row 2: doc-fallback taken (flag stamped) — SHOULD appear
+        db.upsert_case("hkcfi", 2026, 3816, "[2026] HKCFI 3816", "T v T", "2026-07-01")
+        db.mark_downloaded("hkcfi", 2026, 3816, ["doc"], html_pending_ts=1751600000)
+        # Row 3: not yet downloaded — should NOT appear (status='pending')
+        db.upsert_case("hkcfi", 2026, 3817, "[2026] HKCFI 3817", "X v Y", "2026-07-02")
+
+        rows = db.pending_html_recheck()
+        assert len(rows) == 1
+        assert rows[0].court == "hkcfi"
+        assert rows[0].year == 2026
+        assert rows[0].number == 3816
+
+    def test_pending_html_recheck_respects_limit(self):
+        db = CheckpointDB(":memory:")
+        for n in range(5):
+            db.upsert_case("hkcfi", 2026, 3800 + n, f"[2026] HKCFI {3800 + n}", "T v T", "2026-07-01")
+            db.mark_downloaded("hkcfi", 2026, 3800 + n, ["doc"], html_pending_ts=1751600000 + n)
+        rows = db.pending_html_recheck(limit=3)
+        assert len(rows) == 3
+
+
 class TestLockFallbackWarning:
     """S-4: silently swallowing an OSError when creating the .lock file
     means two concurrent scrape processes race with no warning. If the
