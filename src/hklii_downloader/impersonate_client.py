@@ -13,13 +13,13 @@ from typing import Any
 
 import httpx
 
-# curl_cffi's impersonation profiles map to real browser TLS + HTTP/2
-# fingerprints. Mix vendors so the run distribution looks like a real
-# traffic sample, not one homogeneous stack.
+# curl_cffi impersonation profiles — modern Chrome only. Bare "chrome"
+# tracks curl_cffi's newest supported profile automatically; explicit
+# version pins give TLS-fingerprint variety across recent Chromes. Older
+# profiles (chrome104/110/116/120/124) drop-shipped Chrome UAs from
+# 2022-2023 which flag on any UA-age heuristic in 2026.
 _IMPERSONATE_PROFILES = (
-    "chrome124", "chrome120", "chrome116", "chrome110", "chrome104",
-    "safari17_0", "safari15_5", "safari15_3",
-    "edge101", "edge99",
+    "chrome", "chrome146", "chrome142", "chrome136", "chrome131",
 )
 
 # Headers that curl_cffi's impersonation controls end-to-end. Passing
