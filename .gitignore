@@ -9,8 +9,11 @@ wheels/
 # Virtual environments
 .venv
 
-# Downloads
+# Downloads + canary runs
 downloads/
+output/
+canary_output/
+canary_output_*/
 
 # Secrets
 .env
