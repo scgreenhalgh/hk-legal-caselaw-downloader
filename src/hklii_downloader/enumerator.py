@@ -57,8 +57,12 @@ def parse_case_entry(data: dict, court: str) -> CaseEntry:
 
 
 def _jittered_backoff(base: float, attempt: int) -> float:
-    # Stub — real jitter lands in the next commit.
-    return base * (2 ** attempt)
+    """Exponential backoff with multiplicative uniform jitter in [0.5, 1.5].
+
+    Decorrelates concurrent-worker retries after a 5xx burst (see the
+    matching helper in scraper.py for rationale).
+    """
+    return base * (2 ** attempt) * random.uniform(0.5, 1.5)
 
 
 async def _get_json_with_retry(
@@ -73,7 +77,7 @@ async def _get_json_with_retry(
         except httpx.RequestError:
             if attempt >= max_retries:
                 raise
-            await asyncio.sleep(backoff_base * (2 ** attempt))
+            await asyncio.sleep(_jittered_backoff(backoff_base, attempt))
             continue
 
         status = resp.status_code
@@ -82,7 +86,7 @@ async def _get_json_with_retry(
         if status in _RETRYABLE_STATUSES or status >= 500:
             if attempt >= max_retries:
                 resp.raise_for_status()
-            await asyncio.sleep(backoff_base * (2 ** attempt))
+            await asyncio.sleep(_jittered_backoff(backoff_base, attempt))
             continue
 
         try:
@@ -90,7 +94,7 @@ async def _get_json_with_retry(
         except json.JSONDecodeError:
             if attempt >= max_retries:
                 raise
-            await asyncio.sleep(backoff_base * (2 ** attempt))
+            await asyncio.sleep(_jittered_backoff(backoff_base, attempt))
             continue
 
 

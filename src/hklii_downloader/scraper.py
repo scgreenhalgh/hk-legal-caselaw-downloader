@@ -48,8 +48,14 @@ _CHALLENGE_MARKERS = (
 
 
 def _jittered_backoff(base: float, attempt: int) -> float:
-    # Stub — real jitter lands in the next commit.
-    return base * (2 ** attempt)
+    """Exponential backoff with multiplicative uniform jitter in [0.5, 1.5].
+
+    Deterministic base * 2**attempt makes N concurrent workers retry in
+    lockstep after a 5xx burst — six identical retry intervals from six
+    subnets is a bot signal in access logs. Multiplying by U(0.5, 1.5)
+    decorrelates them.
+    """
+    return base * (2 ** attempt) * random.uniform(0.5, 1.5)
 
 
 def _looks_like_challenge_page(content_html: str) -> bool:
@@ -234,7 +240,7 @@ class BulkScraper:
                 resp = await self._get(case.api_url)
             except httpx.RequestError as e:
                 if attempt < self._max_retries:
-                    await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                    await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 self._checkpoint.mark_failed(
                     record.court, record.year, record.number,
@@ -251,7 +257,7 @@ class BulkScraper:
 
             if resp.status_code in _RETRYABLE_STATUSES:
                 if attempt < self._max_retries:
-                    await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                    await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
                 self._checkpoint.mark_failed(
@@ -264,7 +270,7 @@ class BulkScraper:
                 data = resp.json()
             except json.JSONDecodeError:
                 if attempt < self._max_retries:
-                    await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                    await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 preview = resp.text[:_BODY_PREVIEW_LEN].replace("\n", " ")
                 self._checkpoint.mark_failed(
@@ -334,11 +340,11 @@ class BulkScraper:
             except httpx.RequestError:
                 if attempt >= self._max_retries:
                     return False
-                await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                 continue
             if resp.status_code != 200:
                 if attempt < self._max_retries and resp.status_code >= 500:
-                    await asyncio.sleep(self._backoff_base * (2 ** attempt))
+                    await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 return False
             ext = ".docx" if judgment.doc_url.lower().endswith(".docx") else ".doc"
