@@ -32,6 +32,7 @@ def make_async_client(timeout: int = 30, proxy: str | None = None) -> httpx.Asyn
         headers=_BROWSER_HEADERS,
         proxy=proxy,
         trust_env=False,
+        http2=True,
     )
 
 
