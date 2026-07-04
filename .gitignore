@@ -18,3 +18,9 @@ downloads/
 # AI config
 .claude/
 .playwright-mcp/
+
+# runtime SQLite artifacts
+checkpoint.db
+checkpoint.db-shm
+checkpoint.db-wal
+.DS_Store
