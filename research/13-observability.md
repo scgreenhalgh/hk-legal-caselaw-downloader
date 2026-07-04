@@ -189,7 +189,7 @@ diff between two challenge hits to see whether they came from the same edge.
 
 ```bash
 # Server-header (or content-type) distribution across all samples
-jq -r '.headers.Server // .headers["content-type"] // "?"' \
+jq -r '.headers.server // .headers["content-type"] // "?"' \
   failure_samples/*.headers.json | sort | uniq -c
 
 # diff two challenge fingerprints — Set-Cookie / CF-Ray / Server drift
