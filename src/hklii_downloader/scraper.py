@@ -30,6 +30,26 @@ _PERMANENT_ERRORS = {404, 410}
 _RETRYABLE_STATUSES = {403, 429, 500, 502, 503, 504}
 _BODY_PREVIEW_LEN = 200
 
+# Magic-byte signatures for Word document bodies. Content-Type is
+# unreliable — some proxies/CDNs strip or rewrite it — so we shape-check
+# the file's own header instead. Without this guard, an HTTP 200 HTML
+# challenge page (~2-8 KB) served by a WAF mid-run would be written
+# verbatim to `.docx`, mark the row `downloaded`, and RAG downstream
+# would choke on BadZipFile at ingest time. Sibling defenses live in
+# content_shape._looks_like_challenge_page (API branch, enrichment).
+_DOC_MAGIC_SIGNATURES = (
+    b"PK\x03\x04",          # .docx / OOXML — ZIP archive
+    b"\xd0\xcf\x11\xe0",    # legacy .doc — OLE compound document
+)
+
+
+def _has_valid_doc_magic(body: bytes) -> bool:
+    """True if the first 4 bytes match a known Word document signature."""
+    if len(body) < 4:
+        return False
+    head = body[:4]
+    return any(head == sig for sig in _DOC_MAGIC_SIGNATURES)
+
 
 def _error_class(error: str) -> str:
     """Bucket an error string to a short, greppable class for per-error-class
@@ -372,8 +392,24 @@ class BulkScraper:
 
             if can_try_doc:
                 output_dir.mkdir(parents=True, exist_ok=True)
-                if await self._fetch_doc(judgment, output_dir):
+                doc_ok, doc_err = await self._fetch_doc(judgment, output_dir)
+                if doc_ok:
                     actually_saved.add("doc")
+                elif doc_err is not None:
+                    # Hard failure with a specific reason (e.g. invalid
+                    # magic bytes — a WAF-flip signal). Route through
+                    # `_fail` directly so the DB carries the specific
+                    # error class and events.jsonl buckets it, instead
+                    # of collapsing into the generic 'doc-fetch-failed'
+                    # message. This also fires when content_ok=True —
+                    # a run-wide Judiciary WAF flip must not hide behind
+                    # 'downloaded=N' counters with silently-dropped docs.
+                    self._fail(
+                        record.court, record.year, record.number, doc_err,
+                        event_kind="doc_invalid_magic",
+                        url=judgment.doc_url,
+                    )
+                    return False
                 elif not content_ok:
                     # Empty content AND doc fetch failed — nothing on disk
                     self._fail(
@@ -406,29 +442,54 @@ class BulkScraper:
 
         return False
 
-    async def _fetch_doc(self, judgment: Judgment, output_dir: Path) -> bool:
+    async def _fetch_doc(
+        self, judgment: Judgment, output_dir: Path,
+    ) -> tuple[bool, str | None]:
+        """Fetch and persist the doc-fallback body.
+
+        Returns (success, hard_error). `hard_error` is a specific failure
+        reason (e.g. 'doc-invalid-magic: 0x3c68746d') that the caller
+        must surface via `_fail` — bypassing the generic 'doc-fetch-failed'
+        message. `None` means transient (network / retryable HTTP), which
+        the caller may either ignore (content_ok=True) or generic-fail
+        (content_ok=False).
+
+        The magic-byte shape-check exists because HTTP 200 alone doesn't
+        prove the body is a docx — a WAF flip on Judiciary F5 mid-run
+        can return a 200 HTML challenge page (~2-8 KB) that we'd otherwise
+        write verbatim as `.docx`, stamp `downloaded`, and poison RAG.
+        Sibling defenses guard the API + press-summary paths already.
+        """
         from .atomic_write import atomic_write_bytes
         for attempt in range(self._max_retries + 1):
             try:
                 resp = await self._get(judgment.doc_url)
             except httpx.RequestError:
                 if attempt >= self._max_retries:
-                    return False
+                    return False, None
                 await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                 continue
             if resp.status_code != 200:
                 if attempt < self._max_retries and resp.status_code >= 500:
                     await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
-                return False
+                return False, None
+            if not _has_valid_doc_magic(resp.content):
+                magic_hex = resp.content[:4].hex() if resp.content else "empty"
+                # Distinct prefix so the monitor's top-error-classes bucket
+                # WAF-flip signals separately from generic 'doc-fetch-failed'.
+                return False, (
+                    f"doc-invalid-magic: 0x{magic_hex}, "
+                    f"doc_url={judgment.doc_url}"
+                )
             ext = ".docx" if judgment.doc_url.lower().endswith(".docx") else ".doc"
             path = output_dir / f"{judgment.case.filename_stem}{ext}"
             try:
                 atomic_write_bytes(path, resp.content)
-                return True
+                return True, None
             except OSError:
-                return False
-        return False
+                return False, None
+        return False, None
 
     async def _enrich_summaries(
         self, record: CaseRecord, judgment: Judgment, output_dir: Path,

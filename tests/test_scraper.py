@@ -72,7 +72,10 @@ class TestBulkScraperDoc:
                 return httpx.Response(200, json=judgment_with_doc,
                                       request=httpx.Request("GET", url))
             if "legalref" in url:
-                return httpx.Response(200, content=b"docbytes",
+                # Real .docx starts with PK\x03\x04 (OOXML ZIP magic).
+                # Anything else is rejected by the shape-check in
+                # _fetch_doc — see TestBulkScraperDocFallbackMagicByteGuard.
+                return httpx.Response(200, content=b"PK\x03\x04docbytes",
                                       request=httpx.Request("GET", url))
             return httpx.Response(404, request=httpx.Request("GET", url))
 
@@ -335,7 +338,7 @@ class TestBulkScraperDocRetry:
                 doc_calls += 1
                 if doc_calls == 1:
                     raise httpx.TimeoutException("first proxy timed out")
-                return httpx.Response(200, content=b"docx bytes",
+                return httpx.Response(200, content=b"PK\x03\x04docx bytes",
                                       request=httpx.Request("GET", url))
             return httpx.Response(404, request=httpx.Request("GET", url))
 
@@ -371,7 +374,7 @@ class TestBulkScraperEmptyContentWithDoc:
                 return httpx.Response(200, json=judgment_empty_html_with_doc,
                                       request=httpx.Request("GET", url))
             if "legalref" in url:
-                return httpx.Response(200, content=b"real docx bytes",
+                return httpx.Response(200, content=b"PK\x03\x04real docx bytes",
                                       request=httpx.Request("GET", url))
             return httpx.Response(404, request=httpx.Request("GET", url))
 
@@ -808,8 +811,9 @@ class TestBulkScraperHtmlPendingStamp:
             if "getjudgment" in url:
                 return httpx.Response(200, json=response,
                                       request=httpx.Request("GET", url))
-            # Doc fetch — anything non-empty passes.
-            return httpx.Response(200, content=b"\x00\x01docdata",
+            # Doc fetch — legacy .doc uses OLE compound magic
+            # \xd0\xcf\x11\xe0. See TestBulkScraperDocFallbackMagicByteGuard.
+            return httpx.Response(200, content=b"\xd0\xcf\x11\xe0docdata",
                                   request=httpx.Request("GET", url))
 
         db = _make_db()
