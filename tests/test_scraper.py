@@ -2024,6 +2024,16 @@ class TestBulkScraperEvents:
         assert "Just a moment" in samples[0].read_text()
 
     async def test_emits_pool_exhausted_on_all_proxies_dead(self, tmp_path):
+        # Task #65 changed the spec: pool-exhausted rows re-queue with a
+        # per-attempt event, then terminal-fail once the retry budget is
+        # exhausted. So a stuck pool now emits `max_retries` re-queue events
+        # + 1 terminal event per row, not a single terminal event. The
+        # observability contract preserved by this test is:
+        #   - pool_exhausted events fire on every retry AND on terminal fail
+        #   - error_class stays 'pool-exhausted' throughout so the monitor's
+        #     top-error-classes still buckets it consistently
+        #   - each row has exactly one terminal event (error_class contains
+        #     "after N retries")
         from hklii_downloader.events import StructuredEventLogger
         from hklii_downloader.proxy_pool import AllProxiesDeadError
 
@@ -2039,16 +2049,34 @@ class TestBulkScraperEvents:
             get=mock_get, checkpoint=db, output_dir=out, events=ev,
             _backoff_base=0.0,
         )
+        # Tune down so this test runs in ms, not minutes.
+        scraper._pool_exhausted_max_retries = 3
+        scraper._pool_exhausted_sleep = 0.001
         await scraper.download_all()
         await ev.aclose()
 
         rows = _read_events(out)
         exhausted = [r for r in rows if r["kind"] == "pool_exhausted"]
-        assert len(exhausted) == 2, (
-            f"expected 2 pool_exhausted rows (one per claimed case), got {rows}"
+        # With max_retries=3: attempts 1-2 emit re-queue, attempt 3 emits
+        # terminal — so 3 events per row × 2 rows == 6 total.
+        assert len(exhausted) == 6, (
+            f"expected 6 pool_exhausted events "
+            f"(2 re-queue + 1 terminal × 2 rows), got {len(exhausted)}: {exhausted}"
         )
-        assert all(r["error_class"] == "pool-exhausted" for r in exhausted), (
-            f"pool_exhausted rows should bucket by 'pool-exhausted', got {exhausted}"
+        # The class-level bucket is 'pool-exhausted' on every re-queue AND
+        # broadens to 'pool-exhausted after N retries' only on terminal.
+        assert all(
+            r["error_class"].startswith("pool-exhausted") for r in exhausted
+        ), (
+            f"pool_exhausted rows must bucket under 'pool-exhausted*'; "
+            f"got {exhausted}"
+        )
+        # Exactly one terminal event per row (2 total).
+        terminal = [
+            r for r in exhausted if "after" in r["error_class"]
+        ]
+        assert len(terminal) == 2, (
+            f"expected 1 terminal event per row (2 total); got {terminal}"
         )
 
     async def test_events_none_is_a_valid_noop(self, tmp_path):
