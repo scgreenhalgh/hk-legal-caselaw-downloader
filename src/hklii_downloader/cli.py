@@ -652,6 +652,14 @@ def monitor(
     default=False,
     help="Skip structured event logging to <output>/events.jsonl (storage-constrained runs).",
 )
+@click.option(
+    "--retry-failed",
+    is_flag=True,
+    default=False,
+    help="Flip {kind}_status='failed' back to 'pending' before this run. "
+         "Only touches the enrichment kinds this run is doing "
+         "(--summaries / --appeal-history).",
+)
 def enrich(
     output: Path,
     proxies: tuple[str, ...],
@@ -661,6 +669,7 @@ def enrich(
     limit: int | None,
     yes: bool,
     no_events: bool,
+    retry_failed: bool,
 ) -> None:
     """Backfill press summaries + appeal history for already-downloaded cases.
 
@@ -674,6 +683,7 @@ def enrich(
       hklii enrich --proxy http://localhost:8888
       hklii enrich --no-appeal-history --proxy http://localhost:8888
       hklii enrich --direct --yes --limit 10
+      hklii enrich --retry-failed --proxy ...   # retry previously-failed rows
     """
     if not proxies and not direct:
         raise click.UsageError("Must specify --proxy or --direct.")
@@ -697,6 +707,7 @@ def enrich(
         do_appeal_history=appeal_history,
         limit=limit,
         no_events=no_events,
+        retry_failed=retry_failed,
     ))
 
 
@@ -708,6 +719,7 @@ async def _run_enrich(
     do_appeal_history: bool,
     limit: int | None,
     no_events: bool = False,
+    retry_failed: bool = False,
 ) -> None:
     from .checkpoint import CheckpointDB
     from .enrichment import EnrichmentRunner
@@ -760,6 +772,12 @@ async def _run_enrich(
             pending_kinds += ["summary_en", "summary_zh"]
         if do_appeal_history:
             pending_kinds.append("appeal_history")
+        if retry_failed:
+            reset_n = db.reset_enrichment_failed_to_pending(pending_kinds)
+            click.echo(
+                f"--retry-failed: flipped {reset_n} failed enrichment "
+                "row(s) to pending."
+            )
         pending_cases = db.pending_any_enrichment(pending_kinds)
         target = len(pending_cases) if limit is None else min(limit, len(pending_cases))
         click.echo(f"Pending enrichment for {len(pending_cases)} case(s); target {target}.")

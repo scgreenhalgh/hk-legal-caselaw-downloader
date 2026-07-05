@@ -320,6 +320,32 @@ class CheckpointDB:
         self._conn.commit()
         return cur.rowcount
 
+    def reset_enrichment_failed_to_pending(self, kinds: list[str]) -> int:
+        """Flip failed enrichment rows for the given kinds back to pending.
+
+        Motivated by task #30: after a scrape run, some enrichment rows
+        land in 'failed' state — 81 appeal_history rows in the current
+        corpus, for example. pending_any_enrichment / _enrich_one both
+        gate on 'pending', so these need a reset before `hklii enrich`
+        can pick them up. Called by --retry-failed.
+
+        Rows in 'na' / 'downloaded' / 'pending' are left alone.
+        Returns the number of {kind}_status flips applied.
+        """
+        for k in kinds:
+            if k not in _ENRICHMENT_KINDS:
+                raise ValueError(f"unknown enrichment kind {k!r}")
+        total = 0
+        for kind in kinds:
+            cur = self._conn.execute(
+                f"UPDATE cases SET {kind}_status='pending', "
+                f"{kind}_error=NULL "
+                f"WHERE {kind}_status='failed'"
+            )
+            total += cur.rowcount
+        self._conn.commit()
+        return total
+
     def release_in_progress(self) -> None:
         self._conn.execute(
             "UPDATE cases SET status='pending' WHERE status='in_progress'",
