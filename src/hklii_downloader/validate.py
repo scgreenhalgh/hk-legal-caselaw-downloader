@@ -168,7 +168,16 @@ class Validator:
 
     def run(self) -> ValidationReport:
         rows = self._select_rows()
-        stems_in_db: set[str] = {f"{r[0]}_{r[1]}_{r[2]}" for r in rows}
+        # Orphan detection considers ANY row in the DB, not just
+        # 'downloaded' — a row flipped to 'pending' by a prior --fix
+        # still has legitimate on-disk sidecars that mustn't be
+        # re-flagged as orphans next validate.
+        stems_in_db: set[str] = {
+            f"{r[0]}_{r[1]}_{r[2]}"
+            for r in self._db._conn.execute(
+                "SELECT court, year, number FROM cases"
+            )
+        }
 
         discrepancies: list[Discrepancy] = []
         files_examined = 0
@@ -391,12 +400,70 @@ class Validator:
         return rows
 
     def apply_fixes(self, report: ValidationReport) -> int:
-        """Remediation stub. Real implementation lands in the --fix pair
-        (task #72). Kept here so the CLI can import cleanly and the
-        --fix flag exists in --help output; call raises rather than
-        silently no-op-ing so early callers don't miss the incomplete
-        state."""
-        raise NotImplementedError("--fix remediation not implemented yet")
+        """Apply remediations for a subset of discrepancies per spec §5.
+
+        Handled:
+          (a) orphans (warn, check 7) — delete file if mtime < run_start.
+          (b) presence (fatal, check 1) — flip row to pending, formats=NULL.
+          (c) magic + challenge_html (fatal, checks 2 + 3) — delete the
+              bad file, then flip row like (b).
+
+        NOT handled (returns without touching):
+          - stem_coords (check 4) — moving files across dirs needs human
+            judgment (which of two files is authoritative?).
+          - neutral_in_body (check 5) — spec §5(d) forbids auto-fix.
+          - enrichment (check 6) — sidecar/status contradictions can go
+            either way; enrichment re-runs will heal them.
+          - html_pending (check 8) — informational.
+
+        Returns the number of remediations applied so the caller can
+        report progress.
+        """
+        import time
+
+        run_start = time.time()
+        applied = 0
+
+        for d in report.discrepancies:
+            if d.severity == "fatal" and d.check == "presence":
+                self._db._conn.execute(
+                    "UPDATE cases SET status='pending', formats=NULL, "
+                    "error=NULL "
+                    "WHERE court=? AND year=? AND number=?",
+                    (d.court, d.year, d.number),
+                )
+                applied += 1
+            elif (
+                d.severity == "fatal"
+                and d.check in ("magic", "challenge_html")
+            ):
+                if d.path:
+                    target = self._output_dir / d.path
+                    try:
+                        if target.exists():
+                            target.unlink()
+                    except OSError:
+                        continue
+                self._db._conn.execute(
+                    "UPDATE cases SET status='pending', formats=NULL, "
+                    "error=NULL "
+                    "WHERE court=? AND year=? AND number=?",
+                    (d.court, d.year, d.number),
+                )
+                applied += 1
+            elif d.severity == "warn" and d.check == "orphans":
+                if not d.path:
+                    continue
+                target = self._output_dir / d.path
+                try:
+                    if target.exists() and target.stat().st_mtime < run_start:
+                        target.unlink()
+                        applied += 1
+                except OSError:
+                    continue
+
+        self._db._conn.commit()
+        return applied
 
     def _walk_output(self) -> Iterable[Path]:
         """Yield judgment/sidecar files under recognised court/year dirs.

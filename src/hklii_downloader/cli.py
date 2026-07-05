@@ -418,17 +418,25 @@ def validate(
 
         report = validator.run()
 
-        if fix and report.counts["discrepancies_by_severity"]["fatal"] > 0:
-            fatal_n = report.counts["discrepancies_by_severity"]["fatal"]
-            if not yes:
-                click.confirm(
-                    f"Apply --fix remediations for {fatal_n} fatal "
-                    "discrepancy(ies)?",
-                    abort=True,
-                )
-            applied = validator.apply_fixes(report)
-            click.echo(f"Applied {applied} remediation(s).", err=True)
-            report = validator.run()
+        if fix:
+            # --fix touches fatal check-1/2/3 rows AND orphan warns
+            # (spec §5(a)); other severities/checks are left alone.
+            actionable = sum(
+                1 for d in report.discrepancies
+                if (d.severity == "fatal"
+                    and d.check in ("presence", "magic", "challenge_html"))
+                or (d.severity == "warn" and d.check == "orphans")
+            )
+            if actionable > 0:
+                if not yes:
+                    click.confirm(
+                        f"Apply --fix remediations for {actionable} "
+                        "actionable discrepancy(ies)?",
+                        abort=True,
+                    )
+                applied = validator.apply_fixes(report)
+                click.echo(f"Applied {applied} remediation(s).", err=True)
+                report = validator.run()
 
         if report_path:
             report_path.write_text(report.to_json())
