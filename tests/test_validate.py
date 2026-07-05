@@ -573,3 +573,184 @@ class TestValidateSubcommand:
         assert result.exit_code == 2, result.output
         assert "magic" in result.output
         assert "fatal" in result.output
+
+
+class TestValidateFix:
+    def test_fix_flips_broken_rows_to_pending(self, tmp_path):
+        """Presence fatal (missing .txt) → --fix flips the row to pending
+        with formats=NULL, mirroring verify_downloaded_against_files."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(
+            db, "hkcfi", 2023, 1, "[2023] HKCFI 1",
+            formats=["html", "json", "txt"],
+        )
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.html", "body")
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.json", "{}")
+        # No .txt — presence fatal
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--fix", "--yes", "--json",
+        ])
+        assert result.exit_code == 0, result.output
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            stats = db.stats()
+            assert stats["pending"] == 1
+            assert stats["downloaded"] == 0
+            # formats cleared so a resume scrape re-picks the row cleanly
+            row = db._conn.execute(
+                "SELECT formats FROM cases WHERE court='hkcfi' "
+                "AND year=2023 AND number=1"
+            ).fetchone()
+            assert row[0] is None
+        finally:
+            db.close()
+
+    def test_fix_deletes_challenge_html_and_flips_row(self, tmp_path):
+        """Challenge HTML fatal → --fix deletes the bad file and flips
+        the row to pending."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(db, "hkcfi", 2023, 1, "[2023] HKCFI 1", formats=["html"])
+        html_path = _write(
+            out, "hkcfi", 2023, "hkcfi_2023_1.html",
+            "<title>Just a moment...</title>",
+        )
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--fix", "--yes", "--json",
+        ])
+        assert result.exit_code == 0, result.output
+        assert not html_path.exists(), "--fix must delete the challenge page"
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            assert db.stats()["pending"] == 1
+            assert db.stats()["downloaded"] == 0
+        finally:
+            db.close()
+
+    def test_fix_deletes_magic_mismatch_and_flips_row(self, tmp_path):
+        """Magic mismatch fatal → --fix deletes the bad file, flips row."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(db, "hkcfi", 2023, 1, "[2023] HKCFI 1", formats=["doc"])
+        # PK magic at .doc — mismatch (should be .docx)
+        doc_path = _write(
+            out, "hkcfi", 2023, "hkcfi_2023_1.doc", b"PK\x03\x04body",
+        )
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--fix", "--yes", "--json",
+        ])
+        assert result.exit_code == 0, result.output
+        assert not doc_path.exists()
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            assert db.stats()["pending"] == 1
+        finally:
+            db.close()
+
+    def test_fix_deletes_orphans_older_than_run_start(self, tmp_path):
+        """Orphans older than run start are safe to delete — --fix (a)."""
+        from hklii_downloader.cli import main
+        import os
+        import time
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        orphan = _write(out, "hkcfi", 9999, "hkcfi_9999_1.html", "orphan")
+        db.close()
+
+        old = time.time() - 3600
+        os.utime(orphan, (old, old))
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--fix", "--yes", "--json",
+        ])
+        assert result.exit_code == 0, result.output
+        assert not orphan.exists()
+
+    def test_fix_preserves_body_when_citation_missing(self, tmp_path):
+        """neutral_in_body is warn — never auto-fixed. Body file must
+        stay put, row stays 'downloaded'. Spec §5(d) forbids auto-repair
+        of body content because it needs human judgment."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(
+            db, "hkcfi", 2023, 1, "[2023] HKCFI 1",
+            formats=["html", "txt", "json"],
+        )
+        html_path = _write(out, "hkcfi", 2023, "hkcfi_2023_1.html", "unrelated")
+        txt_path = _write(out, "hkcfi", 2023, "hkcfi_2023_1.txt", "unrelated")
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.json", "{}")
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--fix", "--yes", "--json",
+        ])
+        # Post-fix: warn-only (neutral_in_body untouched)
+        assert result.exit_code == 1, result.output
+        assert html_path.exists()
+        assert txt_path.exists()
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            assert db.stats()["downloaded"] == 1
+        finally:
+            db.close()
+
+    def test_fix_no_yes_prompts_and_aborts_on_no(self, tmp_path):
+        """Without --yes, --fix asks; feeding 'n' via CliRunner input
+        aborts before any mutation."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(
+            db, "hkcfi", 2023, 1, "[2023] HKCFI 1",
+            formats=["html", "json", "txt"],
+        )
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.html", "body")
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.json", "{}")
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            ["validate", "-o", str(out), "--fix"],
+            input="n\n",
+        )
+        # Aborted → non-zero exit; row still marked downloaded, no mutation
+        assert result.exit_code != 0
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            assert db.stats()["downloaded"] == 1
+        finally:
+            db.close()
