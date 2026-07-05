@@ -346,3 +346,25 @@ class LegisRunner:
 
         await asyncio.gather(*[worker() for _ in range(self._workers)])
         return result
+
+
+class LegisHistoryRunner:
+    """Stub — full impl lands in the paired feat commit (task #87)."""
+
+    def __init__(
+        self, get, checkpoint, output_dir,
+        workers: int = 4, limit: int | None = None,
+    ) -> None:
+        self._get = get
+        self._checkpoint = checkpoint
+        self._output_dir = Path(output_dir)
+        self._workers = max(1, workers)
+        self._limit = limit
+
+    def enumerate_pending(self) -> int:
+        raise NotImplementedError
+
+    async def fetch_pending(
+        self, on_progress=None,
+    ) -> LegisRunResult:
+        raise NotImplementedError
