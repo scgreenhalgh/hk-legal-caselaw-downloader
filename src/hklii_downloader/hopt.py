@@ -60,8 +60,11 @@ _WIRE_ABBR_MAP = {
     "bahkg": "hktba",
 }
 
-# Match /en|tc/legis/<abbr>/<year>/<num>/... — extracts (year, num)
-_PATH_RE = re.compile(r"^/(?:en|tc)/legis/[a-z]+/(\d{4})/(\d+)/?")
+# Match /en|tc/legis/<abbr>/<year>/<num>/... — extracts (year, num).
+# HKLII uses `nd` ("No Date") for 10 old treaties whose promulgation
+# date isn't tracked (e.g. AGREEMENT ESTABLISHING THE INTER-AMERICAN
+# DEVELOPMENT BANK, AS AMENDED). Accept it as a valid year token.
+_PATH_RE = re.compile(r"^/(?:en|tc)/legis/[a-z]+/(nd|\d{4})/(\d+)/?")
 
 
 class HoptFetchError(RuntimeError):
@@ -70,7 +73,8 @@ class HoptFetchError(RuntimeError):
 
 @dataclass
 class HoptEntry:
-    year: int
+    year: str | int   # 4-digit str for normal treaties; "nd" for the
+                      # 10 "no date" ones. Callers should treat as str.
     num: int
     title: str
     neutral: str | None = None
@@ -127,7 +131,8 @@ def parse_hopt_files_response(body: dict) -> HoptListing:
         m = _PATH_RE.match(path)
         if not m:
             continue
-        year = int(m.group(1))
+        year_raw = m.group(1)
+        year: str | int = year_raw if year_raw == "nd" else int(year_raw)
         num = int(m.group(2))
         entries.append(HoptEntry(
             year=year, num=num,

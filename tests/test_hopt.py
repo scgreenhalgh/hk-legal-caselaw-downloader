@@ -198,6 +198,14 @@ class TestUrlAndAbbrMap:
         # The SPA-route abbr `bacpg` maps to the wire abbr `hktba`
         assert "abbr=hktba" in url
 
+    def test_gettreaty_url_supports_nd_year(self):
+        """No-date treaties (year=nd) must be constructible."""
+        from hklii_downloader.hopt import gettreaty_url
+
+        url = gettreaty_url(abbr="hkts", year="nd", num=8, lang="en")
+        assert "year=nd" in url
+        assert "num=8" in url
+
 
 class TestParseListingAndPath:
     def test_parse_hopt_files_response(self):
@@ -239,6 +247,26 @@ class TestParseListingAndPath:
         }
         parsed = parse_hopt_files_response(body)
         assert parsed.entries == []
+
+    def test_parse_hopt_files_accepts_nd_year(self):
+        """HKLII stores 10 old treaties with year=`nd` (No Date) instead
+        of a 4-digit year — /en/legis/hkts/nd/{num}/. Enumeration must
+        keep them so we can fetch and back them up."""
+        from hklii_downloader.hopt import parse_hopt_files_response
+
+        body = {
+            "totalfiles": 1,
+            "files": [{
+                "title": "AGREEMENT ESTABLISHING ASEAN + 3 …",
+                "path": "/en/legis/hkts/nd/8/",
+                "neutral": "[ND] HKTS 8",
+                "date": None,
+            }],
+        }
+        parsed = parse_hopt_files_response(body)
+        assert len(parsed.entries) == 1
+        assert parsed.entries[0].year == "nd"
+        assert parsed.entries[0].num == 8
 
 
 class TestSaveHoptLocal:
