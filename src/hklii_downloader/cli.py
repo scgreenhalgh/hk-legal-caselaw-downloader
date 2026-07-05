@@ -1183,6 +1183,7 @@ async def _run_recheck_html(
             output_dir=output,
             workers=workers,
             limit=limit,
+            events=events,
         )
         counts = await runner.recheck_all()
         click.echo(

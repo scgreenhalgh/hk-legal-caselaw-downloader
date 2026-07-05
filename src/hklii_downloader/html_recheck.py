@@ -60,10 +60,26 @@ class HtmlRecheckRunner:
         self._formats = (formats & default) if formats else default
         self._workers = max(1, workers)
         self._limit = limit
-        # events wiring for task #38 lands in the paired impl commit; the
-        # attribute exists here so tests can pass events= without a
-        # TypeError while assertions still fail on the missing emits.
+        # Post-run analytics hook — scraper.py already emits
+        # challenge_detected + case_failed; the recheck sweep must mirror
+        # that surface so a WAF-affected recheck pass isn't invisible in
+        # events.jsonl (task #38).
         self._events = events
+
+    def _emit_case_failed(
+        self, record: CaseRecord, *, url: str,
+        error_class: str, error_msg: str,
+        http_status: int | None = None,
+    ) -> None:
+        if self._events is None:
+            return
+        self._events.emit(
+            "case_failed",
+            court=record.court, year=record.year, num=record.number,
+            url=url, error_class=error_class, error_msg=error_msg,
+            http_status=http_status,
+            extra={"phase": "html_recheck"},
+        )
 
     async def recheck_all(self) -> dict[str, int]:
         pending = self._checkpoint.pending_html_recheck(limit=self._limit)
@@ -88,20 +104,57 @@ class HtmlRecheckRunner:
         )
         try:
             resp = await self._get(case.api_url)
-        except httpx.RequestError:
+        except httpx.RequestError as exc:
+            self._emit_case_failed(
+                record, url=case.api_url,
+                error_class="request_error",
+                error_msg=f"{type(exc).__name__}: {exc}",
+            )
             return "failed"
 
         if resp.status_code != 200:
+            self._emit_case_failed(
+                record, url=case.api_url,
+                error_class=f"http_{resp.status_code}",
+                error_msg=f"HTTP {resp.status_code} from HKLII",
+                http_status=resp.status_code,
+            )
             return "failed"
 
         try:
             data = resp.json()
-        except Exception:
+        except Exception as exc:
+            self._emit_case_failed(
+                record, url=case.api_url,
+                error_class="json_parse_error",
+                error_msg=f"{type(exc).__name__}: {exc}",
+                http_status=resp.status_code,
+            )
             return "failed"
 
         judgment = parse_judgment_response(case, data)
 
         if _looks_like_challenge_page(judgment.content_html):
+            if self._events is not None:
+                self._events.sample_failure(
+                    f"challenge_recheck_{record.court}_{record.year}_"
+                    f"{record.number}",
+                    judgment.content_html,
+                    None,
+                    is_challenge=True,
+                )
+                self._events.emit(
+                    "challenge_detected",
+                    court=record.court, year=record.year, num=record.number,
+                    url=case.api_url,
+                    error_class="challenge-page",
+                    error_msg=(
+                        "challenge-page detected in content_html "
+                        "during recheck-html"
+                    ),
+                    http_status=resp.status_code,
+                    response_len=len(judgment.content_html),
+                )
             return "failed"
 
         if not judgment.content_html.strip():
