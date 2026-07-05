@@ -743,10 +743,18 @@ class TestChallengePageDetection:
         html = "<html><body><p>Please verify you are human</p></body></html>"
         assert _looks_like_challenge_page(html)
 
-    def test_english_access_denied_detected(self):
-        from hklii_downloader.scraper import _looks_like_challenge_page
+    def test_bare_access_denied_no_longer_detected(self):
+        # Task #66 dropped the "access denied" marker: too common in
+        # legal English (medical/custody/premises access being denied)
+        # to keep as a bare-phrase substring match. A page reading only
+        # "Access Denied" no longer fires the detector; real Cloudflare
+        # block pages still fire via the "cloudflare" marker (see the
+        # test_real_cloudflare_page_still_detected_via_remaining_markers
+        # positive control below). The trade-off is documented in
+        # content_shape.py.
         html = "<html><body><h1>Access Denied</h1></body></html>"
-        assert _looks_like_challenge_page(html)
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page(html)
 
     def test_traditional_chinese_wait_challenge_detected(self):
         from hklii_downloader.scraper import _looks_like_challenge_page
