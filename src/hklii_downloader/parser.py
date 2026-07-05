@@ -14,11 +14,37 @@ BASE_URL = "https://www.hklii.hk"
 
 _CASE_PATH_PATTERN = re.compile(r"^/(en|tc)/cases/([a-z]+)/(\d{4})(?:/\d+/?)?$")
 
-# Neutral-citation-style caseno used by the /api/getappealhistory endpoint:
-# <COURT> <NUM>/<YEAR> e.g. "HKCFA 5/2024". Only this format maps cleanly
-# back to the URL court slug (lowercased); other on-wire formats like
-# "FACC3/2025" do not reveal the slug and fall through to homepage.
-_APPEAL_CASENO_PATTERN = re.compile(r"^([A-Za-z]+)\s+\d+/(\d{4})$")
+# /api/getappealhistory carries the caseno in two shapes:
+#   (a) Neutral-citation style: "HKCFA 5/2024" — court prefix is the
+#       lowercased URL slug directly.
+#   (b) Act-based compact style: "FACC3/2025", "HCMP2265/2025",
+#       "CACV45/2024" — court prefix is an act code; we resolve to the
+#       URL slug via COURT_PREFIX_MAP. Task #62.
+# Both shapes match _APPEAL_CASENO_PATTERN; \s* accepts zero or more
+# whitespace so the compact form parses.
+_APPEAL_CASENO_PATTERN = re.compile(r"^([A-Za-z]+)\s*\d+/(\d{4})$")
+
+# Act-prefix → HKLII URL slug. Prefixes are the alphabetic segment of
+# the caseno; e.g. HCMP001234/2025 → "hcmp" → hkcfi. Uppercase-matched
+# for stability across HKLII wire variations.
+COURT_PREFIX_MAP: dict[str, str] = {
+    # Court of First Instance (High Court, first instance)
+    "HCMP": "hkcfi", "HCA": "hkcfi", "HCB": "hkcfi", "HCPI": "hkcfi",
+    "HCCC": "hkcfi", "HCAJ": "hkcfi", "HCAL": "hkcfi", "HCCT": "hkcfi",
+    "HCCW": "hkcfi", "HCIA": "hkcfi", "HCIP": "hkcfi", "HCMA": "hkcfi",
+    "HCMC": "hkcfi", "HCPD": "hkcfi", "HCPT": "hkcfi", "HCSD": "hkcfi",
+    "HCZZ": "hkcfi",
+    # Court of Appeal
+    "CACV": "hkca", "CACC": "hkca", "CAAR": "hkca",
+    "CAAG": "hkca", "CAAM": "hkca", "CAAP": "hkca", "CAQL": "hkca",
+    "CAMP": "hkca",
+    # Court of Final Appeal
+    "FACC": "hkcfa", "FACV": "hkcfa", "FAMV": "hkcfa", "FAMP": "hkcfa",
+    # District Court
+    "DCCC": "hkdc", "DCCJ": "hkdc",
+    "DCCV": "hkdc", "DCEC": "hkdc", "DCMP": "hkdc", "DCPI": "hkdc",
+    "DCPA": "hkdc", "DCSA": "hkdc", "DCTC": "hkdc", "DCZZ": "hkdc",
+}
 
 
 @dataclass(frozen=True)
@@ -71,8 +97,17 @@ def referer_for(url: str) -> str:
             lang = "en"
         m = _APPEAL_CASENO_PATTERN.match(caseno)
         if m:
-            court, year = m.groups()
-            return f"{BASE_URL}/{lang}/cases/{court.lower()}/{year}/"
+            prefix, year = m.groups()
+            # Act-prefix carries the court identity for compact-shape
+            # casenos (HCMP2265/2025). Look up first; fall back to using
+            # the prefix directly (lowercase) for neutral-citation shape
+            # (HKCFA 5/2024 → "hkcfa"). Unknown prefixes with no self-slug
+            # semantics fall through to homepage.
+            slug = COURT_PREFIX_MAP.get(prefix.upper())
+            if slug is None and prefix.lower().startswith("hk"):
+                slug = prefix.lower()
+            if slug:
+                return f"{BASE_URL}/{lang}/cases/{slug}/{year}/"
         return f"{BASE_URL}/"
 
     if parsed.path == "/api/getcasefiles":
