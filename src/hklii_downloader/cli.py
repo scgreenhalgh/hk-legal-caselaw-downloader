@@ -455,6 +455,90 @@ def validate(
         db.close()
 
 
+@main.command("generate-html")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory containing downloaded artifacts + .checkpoint.db.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N candidates (default: process all).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Report candidate count without converting or updating DB.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Retry rows previously marked failed (html_generated_error).",
+)
+def generate_html(
+    output: Path,
+    limit: int | None,
+    dry_run: bool,
+    force: bool,
+) -> None:
+    """Convert doc-family files to .generated.html for empty-content rows.
+
+    Targets rows with formats=["doc"] only — the empty-content-at-HKLII
+    cases where no html/txt/json was ever available upstream. Writes
+    {stem}.generated.html alongside the original doc file, and records
+    the source extension in html_generated_from.
+
+    Uses pandoc for .docx and .rtf. Plain OLE .doc trampolines through
+    `soffice --headless --convert-to docx`; if libreoffice is missing,
+    those rows are recorded as failed with an install hint.
+
+    \b
+    Examples:
+      hklii generate-html
+      hklii generate-html --limit 10 --dry-run
+      hklii generate-html --force   # retry previously-failed rows
+    """
+    from .checkpoint import CheckpointDB
+    from .html_generator import HtmlGenerator
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        raise click.UsageError(f"No checkpoint DB at {db_path}.")
+
+    db = CheckpointDB(str(db_path))
+    try:
+        generator = HtmlGenerator(
+            db, output,
+            limit=limit, include_failed=force, dry_run=dry_run,
+        )
+        result = generator.generate_all()
+
+        if dry_run:
+            click.echo(f"Would process {result.candidates} candidate(s).")
+        else:
+            click.echo(
+                f"Processed {result.candidates}: "
+                f"generated={result.generated} failed={result.failed}"
+            )
+            stats = db.html_generation_stats()
+            click.echo(
+                f"Overall: generated={stats['generated']} "
+                f"failed={stats['failed']} pending={stats['pending']}"
+            )
+            if stats["by_source_ext"]:
+                by = ", ".join(
+                    f"{k}={v}" for k, v in sorted(stats["by_source_ext"].items())
+                )
+                click.echo(f"By source ext: {by}")
+    finally:
+        db.close()
+
+
 @main.command()
 @click.option(
     "-o", "--output",
