@@ -49,6 +49,18 @@ class LegisVersionRecord:
     status: str
 
 
+@dataclass
+class HoptRecord:
+    abbr: str      # bacpg | bahkg | hktmc | hktml | hkts
+    year: int
+    num: int
+    lang: str      # en | tc
+    title: str | None
+    neutral: str | None
+    doc_date: str | None
+    status: str
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS cases (
     court    TEXT NOT NULL,
@@ -96,6 +108,20 @@ CREATE TABLE IF NOT EXISTS legis_versions (
     error   TEXT,
     last_seen_at INTEGER,
     PRIMARY KEY (abbr, num, lang, vid)
+);
+CREATE TABLE IF NOT EXISTS hopt_documents (
+    abbr    TEXT NOT NULL,           -- bacpg | bahkg | hktmc | hktml | hkts
+    year    INTEGER NOT NULL,
+    num     INTEGER NOT NULL,
+    lang    TEXT NOT NULL,           -- en | tc
+    title   TEXT,
+    neutral TEXT,                    -- e.g. "[2018] HKTS 1"
+    doc_date TEXT,                   -- ISO date of the treaty/paper
+    status  TEXT NOT NULL DEFAULT 'pending',
+    formats TEXT,                    -- JSON list e.g. ["json"]
+    error   TEXT,
+    last_seen_at INTEGER,
+    PRIMARY KEY (abbr, year, num, lang)
 );
 """
 
@@ -666,25 +692,93 @@ class CheckpointDB:
         }
 
     def upsert_hopt_document(
-        self, abbr, year, num, lang, title,
-        neutral=None, doc_date=None, last_seen_at=None,
+        self, abbr: str, year: int, num: int, lang: str, title: str,
+        neutral: str | None = None, doc_date: str | None = None,
+        last_seen_at: int | None = None,
     ) -> None:
-        raise NotImplementedError
+        self._conn.execute(
+            "INSERT INTO hopt_documents "
+            "(abbr, year, num, lang, title, neutral, doc_date, "
+            "last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (abbr, year, num, lang) DO UPDATE SET "
+            "title=excluded.title, "
+            "neutral=COALESCE(excluded.neutral, hopt_documents.neutral), "
+            "doc_date=COALESCE(excluded.doc_date, hopt_documents.doc_date), "
+            "last_seen_at=COALESCE(excluded.last_seen_at, "
+            "                       hopt_documents.last_seen_at)",
+            (abbr, year, num, lang, title, neutral, doc_date, last_seen_at),
+        )
+        self._conn.commit()
 
-    def claim_pending_hopt(self):
-        raise NotImplementedError
+    def claim_pending_hopt(self) -> HoptRecord | None:
+        row = self._conn.execute(
+            "SELECT abbr, year, num, lang, title, neutral, doc_date "
+            "FROM hopt_documents WHERE status='pending' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        self._conn.execute(
+            "UPDATE hopt_documents SET status='in_progress' "
+            "WHERE abbr=? AND year=? AND num=? AND lang=?",
+            (row[0], row[1], row[2], row[3]),
+        )
+        self._conn.commit()
+        return HoptRecord(
+            abbr=row[0], year=row[1], num=row[2], lang=row[3],
+            title=row[4], neutral=row[5], doc_date=row[6],
+            status="in_progress",
+        )
 
-    def mark_hopt_downloaded(self, abbr, year, num, lang, formats) -> None:
-        raise NotImplementedError
+    def mark_hopt_downloaded(
+        self, abbr: str, year: int, num: int, lang: str,
+        formats: list[str],
+    ) -> None:
+        self._conn.execute(
+            "UPDATE hopt_documents SET status='downloaded', "
+            "formats=?, error=NULL "
+            "WHERE abbr=? AND year=? AND num=? AND lang=?",
+            (json.dumps(formats), abbr, year, num, lang),
+        )
+        self._conn.commit()
 
-    def mark_hopt_failed(self, abbr, year, num, lang, error) -> None:
-        raise NotImplementedError
+    def mark_hopt_failed(
+        self, abbr: str, year: int, num: int, lang: str, error: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE hopt_documents SET status='failed', error=? "
+            "WHERE abbr=? AND year=? AND num=? AND lang=?",
+            (error, abbr, year, num, lang),
+        )
+        self._conn.commit()
 
     def hopt_stats(self) -> dict:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM hopt_documents GROUP BY status"
+        ).fetchall()
+        counts = {r[0]: r[1] for r in rows}
+        return {
+            "total": sum(counts.values()),
+            "pending": counts.get("pending", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "downloaded": counts.get("downloaded", 0),
+            "failed": counts.get("failed", 0),
+        }
 
     def hopt_stats_by_abbr(self) -> dict:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT abbr, status, COUNT(*) FROM hopt_documents "
+            "GROUP BY abbr, status"
+        ).fetchall()
+        result: dict[str, dict[str, int]] = {}
+        for abbr, status, n in rows:
+            bucket = result.setdefault(abbr, {
+                "total": 0, "pending": 0, "in_progress": 0,
+                "downloaded": 0, "failed": 0,
+            })
+            bucket["total"] += n
+            bucket[status] = bucket.get(status, 0) + n
+        return result
 
     def upsert_legis_version(
         self, abbr: str, num: str, lang: str, vid: int,

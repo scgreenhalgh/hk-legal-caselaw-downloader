@@ -1562,6 +1562,192 @@ async def _run_backfill_legis_history(
         db.close()
 
 
+@main.command("scrape-hopt")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB + hopt artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--abbr", "abbr_str",
+    type=str,
+    default=None,
+    help="Comma-separated abbrs. Default: bacpg,bahkg,hktmc,hktml,hkts.",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "tc", "both"]),
+    default="both",
+    help="Language(s). Default: both.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N document fetches.",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+def scrape_hopt(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    abbr_str: str | None,
+    lang: str,
+    limit: int | None,
+    yes: bool,
+    no_events: bool,
+) -> None:
+    """Backup HKLII HOPT databases — treaties, gazettes, consultation papers.
+
+    Two-phase run: enumerate via gethoptfiles → fetch via gettreaty.
+    Note bacpg + bahkg share the wire abbr "hktba" but are stored under
+    their SPA-route abbr on disk (output/hopt/bacpg/... vs bahkg/...).
+
+    \b
+    Examples:
+      hklii scrape-hopt --proxy http://127.0.0.1:8888
+      hklii scrape-hopt --abbr hkts --lang en --limit 5 --direct --yes
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    from .hopt import HOPT_ABBRS, HOPT_LANGS
+    abbrs = tuple(
+        s.strip() for s in (abbr_str or ",".join(HOPT_ABBRS)).split(",")
+        if s.strip()
+    )
+    langs = HOPT_LANGS if lang == "both" else (lang,)
+    asyncio.run(_run_scrape_hopt(
+        output=output, proxies=list(proxies), direct=direct,
+        abbrs=abbrs, langs=langs, limit=limit, no_events=no_events,
+    ))
+
+
+async def _run_scrape_hopt(
+    output: Path, proxies: list[str], direct: bool,
+    abbrs: tuple[str, ...], langs: tuple[str, ...],
+    limit: int | None, no_events: bool = False,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .events import StructuredEventLogger
+    from .hopt import HoptRunner
+    from .proxy_pool import ProxyPool
+
+    output.mkdir(parents=True, exist_ok=True)
+    db_path = output / ".checkpoint.db"
+    db = CheckpointDB(str(db_path))
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight."
+                )
+            workers = max(1, len(result.healthy_proxies))
+
+        runner = HoptRunner(
+            get=pool.get, checkpoint=db, output_dir=output,
+            abbrs=abbrs, langs=langs, workers=workers, limit=limit,
+        )
+
+        click.echo(
+            f"Enumerating abbrs={list(abbrs)} langs={list(langs)}..."
+        )
+        upserted = await runner.enumerate_all()
+        click.echo(f"Upserted {upserted} hopt rows.")
+
+        stats = db.hopt_stats()
+        target = stats["pending"] if limit is None else min(
+            limit, stats["pending"],
+        )
+        click.echo(
+            f"Pending: {stats['pending']}, "
+            f"downloaded: {stats['downloaded']}, "
+            f"failed: {stats['failed']}. target this pass: {target}."
+        )
+        if target == 0:
+            click.echo("Nothing to fetch.")
+        else:
+            result = await _hopt_with_progress(runner, target)
+            click.echo(
+                f"\nDone. Downloaded: {result.downloaded}, "
+                f"Failed: {result.failed}."
+            )
+            click.echo(f"By abbr: {db.hopt_stats_by_abbr()}")
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+        db.close()
+
+
+async def _hopt_with_progress(runner, target: int):
+    from rich.progress import (
+        Progress, TextColumn, BarColumn,
+        MofNCompleteColumn, TaskProgressColumn,
+        TimeElapsedColumn, TimeRemainingColumn,
+    )
+    with Progress(
+        TextColumn("[bold blue]hopt"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[ok]}"),
+        TextColumn("[red]fail {task.fields[fail]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "hopt", total=target, ok=0, fail=0,
+        )
+        def on_progress(stats):
+            progress.update(
+                task_id,
+                completed=stats.downloaded + stats.failed,
+                ok=stats.downloaded, fail=stats.failed,
+            )
+        return await runner.fetch_pending(on_progress=on_progress)
+
+
 async def _legis_history_with_progress(runner, target: int):
     from rich.progress import (
         Progress, TextColumn, BarColumn,

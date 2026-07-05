@@ -146,21 +146,17 @@ class TestHoptAccessors:
     def test_hopt_stats_by_abbr(self, tmp_path):
         db = CheckpointDB(str(tmp_path / "cp.db"))
         try:
-            for abbr in ("hkts", "hkts", "bacpg", "bahkg"):
+            # Two hkts rows + one bacpg + one bahkg — each with unique
+            # (abbr, year, num, lang) so upsert stays insert.
+            for i, abbr in enumerate(("hkts", "hkts", "bacpg", "bahkg")):
                 db.upsert_hopt_document(
-                    abbr=abbr, year=2020, num=99, lang="en",
+                    abbr=abbr, year=2020, num=i + 1, lang="en",
                     title="T", neutral=None, doc_date=None,
                 )
-                # bump num to avoid PK collisions
-                db._conn.execute(
-                    "UPDATE hopt_documents SET num=num+1 "
-                    "WHERE abbr=? AND year=2020 AND num=99 AND lang='en'",
-                    (abbr,),
-                )
-                db._conn.commit()
             stats = db.hopt_stats_by_abbr()
-            assert "hkts" in stats
-            assert stats["hkts"]["total"] >= 1
+            assert stats["hkts"]["total"] == 2
+            assert stats["bacpg"]["total"] == 1
+            assert stats["bahkg"]["total"] == 1
         finally:
             db.close()
 
