@@ -348,6 +348,28 @@ class TestOrphansCheck:
         ]
         assert len(orphans) == 1
 
+    def test_orphans_ignores_generated_html_sidecar(self, tmp_path):
+        """{stem}.generated.html is written by `hklii generate-html`
+        (task #76). Its stem maps to the base row, so it must NOT be
+        flagged as an orphan on a subsequent validate run."""
+        from hklii_downloader.validate import Validator
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(db, "hkcfi", 2026, 1, "[2026] HKCFI 1", formats=["doc"])
+        _write(out, "hkcfi", 2026, "hkcfi_2026_1.docx",
+               b"PK\x03\x04payload")
+        _write(out, "hkcfi", 2026, "hkcfi_2026_1.generated.html",
+               "<p>generated</p>")
+
+        report = Validator(db, out, checks=["orphans"]).run()
+        db.close()
+
+        assert [
+            d for d in report.discrepancies if d.check == "orphans"
+        ] == []
+
     def test_orphans_ignores_dotfiles_and_non_slug_dirs(self, tmp_path):
         """The output directory contains `.enum_cache/` and
         `failure_samples/`; walking those as if they were court slugs
