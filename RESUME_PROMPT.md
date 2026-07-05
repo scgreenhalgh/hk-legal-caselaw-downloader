@@ -1,124 +1,55 @@
 /effort max
 
-You are resuming the HKLII downloader project. **Production scrape is either already running in a tmux session named `hklii`, or it needs to be launched.** Before anything, load context from memory in this order:
+This session is running with `ultracode`; use it where the spec calls for the multi-agent path. You are resuming the HKLII downloader project after a corpus-complete milestone. The next milestone is a **corpus validator**, not more scraping. Do not launch any scrape, enrich, or recheck runs.
 
-1. `/Users/seangreenhalgh/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md` (index)
-2. `memory/threat-model-local-vs-wire.md` (**READ THIS** — 5 review rounds re-litigated local IP hygiene; the threat scope is documented as out-of-scope)
-3. `memory/vpn-infrastructure.md` (20-endpoint gluetun + PIA pool on ports 8888-8907)
-4. `memory/hklii-court-databases.md` (per-slug counts, 118,188 total across 11 courts)
-5. `memory/cli-feature-matrix.md` (6 subcommands: download, scrape, verify, enrich, recheck-html, monitor)
-6. `scratchpad/REVIEW_VERDICT_V5.md` (final GO-WITH-CONDITIONS verdict + abort triggers + composite monitor command)
+## Load context (in this order)
 
-## Session position (as of resume)
+1. `/Users/seangreenhalgh/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md` — memory index. Scan entries, then open the supplementary files it points at that touch validation surface (checkpoint DB schema, artifact layout, enrichment status columns).
+2. `memory/session-2026-07-05-bugfix-and-sweep.md` — the just-shipped session retro. Reports the 100% corpus outcome, the five TDD fix pairs (#63–#67), the current test count, manual-grab receipts for the four linkage-stale rows, and the final artifact-size numbers.
+3. `memory/incident-2026-07-05-pool-storm.md` — retro for the pool-death that motivated the shipped #65 re-queue fix. Read this so you understand why the code around `AllProxiesDeadError` and the drain-recovery path looks the way it does before the validator starts asserting invariants over it.
+4. `/Users/seangreenhalgh/Developer/hklii_downloader/scratchpad/VALIDATOR_SPEC.md` — the design doc from the parallel workflow branch. This is the spec you will implement.
 
-- **main pushed to origin at `0c03cee`**, working tree clean. 63 commits ahead of the pre-fix baseline (`0fc4f84`).
-- **469 tests passing** (up from 369). Two-commit `test:` + `fix|feat:` pairs throughout.
-- **5 pre-flight review rounds ran this project cycle** (V1-V5 in `scratchpad/REVIEW_VERDICT{,_V2,_V3,_V4,_V5}.md`). All real blockers shipped; V5 returned **GO-WITH-CONDITIONS** with conditions satisfied by the production command as written.
-- **VPN pool**: 20 healthy `hklii-vpn-*` containers on ports 8888-8907 (`docker ps --filter name=hklii-vpn` to verify).
-- **Threat scope** documented in `research/04` § "Threat scope: local artifacts vs. the wire" (commit `959b467`). Local-artifact home-IP exposure is OUT OF SCOPE. Do NOT flag it in any review.
+Do NOT paraphrase these files into working memory; open them.
 
-## What's happening
+## Session position
 
-**Full-corpus production scrape.** 118,188 files across 11 API-alive HKLII courts (all except empty `hksct`/`ukpc`). Wall clock estimate: 16-21h. Disk estimate: ~13.4 GB. Command:
+Corpus at **162,331 / 162,331 rows (100.000%)**, ~20 GB of artifacts on disk across the 13 API-alive slugs. **481 tests.** Five fix pairs shipped this session cycle (#63 challenge-page false-positive, #64 Word 95 magic bytes, #65 pool-death re-queue, #66/#67 marker cleanup). Working tree should be clean; nothing is scraping; no tmux `hklii` session should exist.
 
-```bash
-mkdir -p output
-tmux new-session -d -s hklii "uv run hklii scrape \
-  \$(for p in \$(seq 8888 8907); do printf ' -p http://localhost:%d' \$p; done) \
-  --courts hkcfi,hkca,hkdc,hkcfa,hkldt,hkfc,hkct,hkmagc,hkcrc,hklat,hkoat \
-  --lang both \
-  --with-summaries --with-appeal-history --save-enum-responses \
-  --allow-doc -f html -f json -f txt -f doc \
-  -o ./output 2>&1 | tee output/run.stdout"
-```
+Threat scope is documented in `research/04` § "Threat scope: local artifacts vs. the wire" (commit `959b467`). Five pre-flight review rounds ran earlier in this project cycle. Local-artifact home-IP exposure is OUT OF SCOPE and must not be re-flagged.
 
-**FIRST ACTION**: check whether the tmux session already exists.
+## Immediate task
+
+Build the corpus validator per `scratchpad/VALIDATOR_SPEC.md`. TDD as always (failing test → paste literal output → implement → refactor). The spec owns the design; your job is to execute it, not redesign it. If the spec is ambiguous on a specific decision, ask before diverging.
+
+## First actions
+
+a. Verify a clean starting state before touching the spec:
 
 ```bash
-tmux ls 2>&1 | grep hklii || echo NO_SESSION
+# working tree + recent history
+git status
+git log --oneline -8
+
+# no rogue background work
+tmux ls 2>&1 | grep -i hklii || echo NO_TMUX
+docker ps --filter name=hklii-vpn --format 'table {{.Names}}\t{{.Status}}'
 ```
 
-- If `NO_SESSION`: fire the launch command above.
-- If session exists: skip the launch, jump to monitoring.
+Nothing should be scraping. If tmux or a container looks off, ask before killing anything.
 
-## Immediate task — start the /loop monitor
+b. Read the four pointer files above **in order**. Do not skim MEMORY.md and skip straight to the spec — the session and incident retros set the invariants the validator will assert.
 
-Once the scrape is running, kick the adaptive monitor cadence:
+c. Confirm ground truth by re-running the corpus fact-gathering commands the spec lists (row counts, per-slug counts, per-format file counts, enrichment status columns). Numbers must match the 162,331 / ~20 GB baseline in the 2026-07-05 session file. If they don't, STOP and surface — don't start writing tests against a moving corpus.
 
-**Hour 0-1** (early ban detection, warmup convergence):
-```
-/loop 5m uv run hklii monitor -o ./output --workers 20 --json
-```
-
-**Hour 1-6** (cumulative wire signals):
-```
-/loop 15m uv run hklii monitor -o ./output --workers 20 --json
-```
-
-**Hour 6+** (routine):
-```
-/loop 30m uv run hklii monitor -o ./output --workers 20 --json
-```
-
-Ask the user before swapping cadences.
-
-Each cycle: read the monitor JSON output. On exit 0 → single-line "healthy at hour X.Y, Y%, Z/hr". On exit 1 → surface the WARN alert. On exit 2 → alert loudly + recommend abort.
-
-## Extended manual checks (run once per hour or on any suspicion)
-
-```bash
-# W1 magic-byte scan — should print nothing
-find ./output -name "*.docx" -mmin -60 -exec sh -c '
-  magic=$(head -c 4 "$1" | xxd -p)
-  case "$magic" in 504b*|d0cf*) ;; *) echo "W1 SUSPECT: $1 magic=$magic" ;; esac
-' _ {} \;
-
-# W5 direct-mode sanity — must be 0
-grep -c 'via direct' ./output/scrape.log
-
-# Growth trajectory
-wc -l ./output/events.jsonl
-du -sh ./output/{failure_samples,.enum_cache,.} 2>/dev/null
-```
-
-## Abort triggers
-
-Kill the tmux session (`tmux kill-session -t hklii`) and surface to user when:
-
-| Trigger | Meaning |
-| --- | --- |
-| `hklii monitor` exit 2 | error-prefix > 100 OR in_progress > 80 OR rate < 4000/hr |
-| Any single proxy > 3σ failure count above pool mean | individual IP banned |
-| `direct=` counter > 0 | W5 fired (should be impossible for the shipped command) |
-| W1 SUSPECT hit | Judiciary WAF flipped |
-| Any `degraded` event in events.jsonl | proxy_pool safety-net swallowed a leak-detection |
-
-**Recovery**: restart with `--resume`. Same command, add `--resume`. Checkpoint DB survives kill/reboot (S-3 fsync-parent + WAL).
-
-## Filesystem layout during the run
-
-```
-./output/
-├── scrape.log                              human log (grep WARNING/ERROR)
-├── events.jsonl                            structured JSONL (jq recipes in research/13)
-├── run.stdout                              CLI stdout mirror
-├── .checkpoint.db                          SQLite WAL — cases table, status, error
-├── .enum_cache/                            raw getcasefiles JSON per (court, lang)
-├── failure_samples/                        first 20 challenge bodies + 5/prefix
-├── hkcfi/, hkca/, hkdc/, hkcfa/, hkldt/, hkfc/, hkct/, hkmagc/, hkcrc/, hklat/, hkoat/
-    └── {court}_{year}_{number}.{html,txt,json,doc|docx,summary_en.html,summary_tc.html,appeal_history.json}
-```
-
-## Open follow-up tasks (post-run cleanup, NOT blocking)
-
-- **#30** `pending_any_enrichment` should include `failed` rows (manual SQL workaround exists)
-- **#38** `HtmlRecheckRunner` challenge branch event emission
-- **#61** W5 — thread `HeaderRotator` into `proxy_pool.py:365-371` direct branch (~5 lines + 1 test). LAND BEFORE next `--direct` usage.
-- **#62** A2 — court-code → URL-slug lookup for `parser.referer_for` on `/api/getappealhistory` (~30 lines). Not a regression, just an unshipped improvement.
+d. Once ground truth matches, follow the TDD plan in the spec. Two commits per fix (`test:` then `feat:`/`fix:`), atomic scope, one logical change per commit.
 
 ## What NOT to do
 
-- Do NOT relitigate local-artifact home-IP exposure (`stdout`, `scrape.log`, `events.jsonl`, `.checkpoint.db`, `hklii monitor --json`). Documented OOS.
-- Do NOT run new pre-flight reviews. 5 rounds already ran; the codebase is heavily hardened. If concerned about something specific, spawn ONE targeted subagent, not a full HUNT-VERIFY workflow.
-- Do NOT swap `/loop` cadences without asking the user first.
-- Do NOT toggle `--direct` on any subcommand until W5 (#61) lands.
+- Do NOT launch `hklii scrape`, `hklii enrich`, `hklii recheck-html`, or any variant. Corpus is complete; there is nothing to fetch.
+- Do NOT re-litigate the fixes shipped as #63–#67 (challenge-page FP, DOCX/Word-95 magic, `AllProxiesDeadError` re-queue, marker cleanup). They landed with tests; treat them as done.
+- Do NOT drift into a fix-loop on `failed` rows. There are none — the manual grab already cleared the four linkage-stale rows and final status is 100.000%. If the validator flags a row as suspect, report it; do not "just try one more download" as a side-quest.
+- Do NOT relitigate local-artifact home-IP exposure. Documented OOS across five review rounds.
+- Do NOT run a fresh HUNT-VERIFY or full pre-flight review. If a specific concern arises, spawn ONE targeted subagent — not a workflow.
+- Do NOT modify `research/`, memory files, or shipped fix commits as part of this task. The validator is additive.
+
+Ask before touching anything outside the validator's scope.
