@@ -9,7 +9,12 @@ from __future__ import annotations
 
 _CHALLENGE_MARKERS = (
     # English — Cloudflare / generic WAF / rate-limit interstitials.
-    "just a moment",
+    # NB: the leading "just a moment..." marker requires the three-dot
+    # ellipsis to match Cloudflare's actual `<title>Just a moment...</title>`
+    # — without it, organic judgment text ("just a moment of anger",
+    # witness "just a moment.") false-positives (36 rows lost in the
+    # 2026-07-04 run before this tightening).
+    "just a moment...",
     "cf-challenge",
     "cloudflare",
     "please enable javascript",
