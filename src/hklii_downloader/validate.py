@@ -52,6 +52,13 @@ _ENRICHMENT_SUFFIXES = (
     ".summary_zh.html",
     ".appeal_history.json",
     ".generated.html",
+    # TC translation sidecars written by hklii backfill-case-translations
+    # (task #90). Peeling the .tc.{html,txt,json} suffix maps them back
+    # to the base judgment stem so orphan / stem_coords / enrichment
+    # attribution treats them as siblings, not orphans.
+    ".tc.html",
+    ".tc.txt",
+    ".tc.json",
 )
 
 # Judgment-body sidecar extensions we recognise for orphan/presence

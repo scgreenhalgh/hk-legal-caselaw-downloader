@@ -1562,6 +1562,163 @@ async def _run_backfill_legis_history(
         db.close()
 
 
+@main.command("backfill-case-translations")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB + case artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N fetches (smoke test).",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+def backfill_case_translations(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    limit: int | None,
+    yes: bool,
+    no_events: bool,
+) -> None:
+    """Fetch TC counterparts for EN judgments with has_translation=True.
+
+    Original scrape used --lang both with EN-wins semantics, so some
+    bilingual cases lost their TC translation. This subcommand walks
+    disk, reads each JSON's has_translation flag, and fills the gap by
+    fetching getjudgment?lang=tc + saving {stem}.tc.{html,txt,json}
+    sidecars alongside the EN files.
+
+    Idempotent — sidecar-existence check makes re-runs skip what's on
+    disk. No DB migration; state lives on disk.
+
+    \b
+    Examples:
+      hklii backfill-case-translations --proxy http://127.0.0.1:8888
+      hklii backfill-case-translations --limit 5 --direct --yes
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    asyncio.run(_run_backfill_case_translations(
+        output=output, proxies=list(proxies), direct=direct,
+        limit=limit, no_events=no_events,
+    ))
+
+
+async def _run_backfill_case_translations(
+    output: Path, proxies: list[str], direct: bool,
+    limit: int | None, no_events: bool = False,
+) -> None:
+    from .case_translations import (
+        CaseTranslationRunner, find_translation_targets,
+    )
+    from .events import StructuredEventLogger
+    from .proxy_pool import ProxyPool
+
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight."
+                )
+            workers = max(1, len(result.healthy_proxies))
+
+        click.echo("Scanning disk for has_translation=True judgments...")
+        target_count = sum(1 for _ in find_translation_targets(output))
+        click.echo(f"Found {target_count} pending translation(s).")
+        effective = min(limit, target_count) if limit is not None \
+            else target_count
+
+        if effective == 0:
+            click.echo("Nothing to fetch.")
+            return
+
+        runner = CaseTranslationRunner(
+            get=pool.get, output_dir=output,
+            workers=workers, limit=limit,
+        )
+        outcome = await _translations_with_progress(runner, effective)
+        click.echo(
+            f"\nDone. Downloaded: {outcome.downloaded}, "
+            f"Failed: {outcome.failed}."
+        )
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+
+
+async def _translations_with_progress(runner, target: int):
+    from rich.progress import (
+        Progress, TextColumn, BarColumn,
+        MofNCompleteColumn, TaskProgressColumn,
+        TimeElapsedColumn, TimeRemainingColumn,
+    )
+    with Progress(
+        TextColumn("[bold blue]tc"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[ok]}"),
+        TextColumn("[red]fail {task.fields[fail]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "translations", total=target, ok=0, fail=0,
+        )
+        def on_progress(stats):
+            progress.update(
+                task_id,
+                completed=stats.downloaded + stats.failed,
+                ok=stats.downloaded, fail=stats.failed,
+            )
+        return await runner.run(on_progress=on_progress)
+
+
 @main.command("scrape-hopt")
 @click.option(
     "-o", "--output",
