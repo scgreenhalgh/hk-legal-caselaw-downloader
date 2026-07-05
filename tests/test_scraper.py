@@ -1797,48 +1797,152 @@ class TestBulkScraperFailureLogging:
 
 
 class TestBulkScraperPoolExhausted:
-    """B6 — mid-run AllProxiesDeadError from ProxyPool.get is swallowed by
-    the worker's generic `except Exception:` (scraper.py:188). Row was
-    claimed as 'in_progress'; no mark_failed follows, so during a 30-60s
-    HKLII 502 blip the pool goes fully dead in 5-30s while workers rip
-    tens of thousands of pending rows into in_progress with no DB error.
-    Stats report a lie; --retry-failed won't recover them."""
+    """B6 + task #65 — when the pool goes fully dead mid-run, workers must
+    NOT drain the pending queue by terminal-failing each row. The 2026-07-04
+    production run lost 7,730 legit rows in ~44s that way when a spurious
+    session-kill cascade left the pool at zero live sessions. Correct
+    behavior: re-queue the row (release in_progress → pending) and sleep
+    so the pool has time to revive via cooldown. Only terminal-fail once
+    a row has cycled through pool-exhausted more than
+    `_pool_exhausted_max_retries` times — that's the safety net for a
+    genuinely stuck pool.
 
-    async def test_worker_marks_failed_on_all_proxies_dead(self, tmp_path):
-        """Every row claimed while the pool is dead must be marked failed
-        with a 'pool-exhausted' error stamp, not stranded in in_progress."""
+    Tests below use aggressively-tuned attributes so the retry loop finishes
+    in milliseconds; production defaults give ~2 minutes of retry budget
+    per row (60 retries * 2s), enough to survive typical mass-kill events
+    where cooldown is ~300s but sessions revive on a stagger."""
+
+    async def test_pool_death_re_queues_row_then_recovers(self, tmp_path):
+        """On the first hit, the worker must release the row (in_progress
+        → pending) and sleep, NOT mark it failed. When the pool recovers
+        on the retry, the row completes cleanly. Simulates the transient
+        session-kill storm scenario."""
         from hklii_downloader.proxy_pool import AllProxiesDeadError
 
+        attempts = {"count": 0}
+
         async def mock_get(url, **kw):
+            attempts["count"] += 1
+            # First getjudgment call → pool dead. Second call onward → live.
+            if attempts["count"] == 1:
+                raise AllProxiesDeadError("All proxy sessions are dead")
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            _backoff_base=0.0,
+        )
+        # Tune for tests — production defaults give ~2 minutes of retry.
+        scraper._pool_exhausted_max_retries = 5
+        scraper._pool_exhausted_sleep = 0.001
+        result = await scraper.download_all()
+
+        # Row must complete on the retry — pool-exhausted is transient.
+        assert result.downloaded == 1, (
+            f"row should be downloaded after pool recovered; got {result}"
+        )
+        assert result.failed == 0, (
+            f"transient pool death must NOT terminal-fail the row; "
+            f"got {result}"
+        )
+        # Confirm the mock was called at least twice — once during the
+        # pool-dead state, once after recovery.
+        assert attempts["count"] >= 2, (
+            f"expected re-queue then retry (>= 2 attempts); "
+            f"got {attempts['count']}"
+        )
+
+    async def test_pool_death_terminal_fails_only_after_max_retries(self, tmp_path):
+        """When the pool stays dead for the full retry budget (2026-07-04
+        incident recovered in 44s; production budget covers ~2min), THEN
+        the row terminal-fails with a distinctive prefix so --retry-failed
+        can pick it up next run.
+
+        Also asserts the row is actually retried at least `max_retries`
+        times before giving up — otherwise a regression where
+        `max_retries=1` (fail-fast) would pass this test's outcome check."""
+        from hklii_downloader.proxy_pool import AllProxiesDeadError
+
+        attempts = {"count": 0}
+
+        async def mock_get(url, **kw):
+            attempts["count"] += 1
             raise AllProxiesDeadError("All proxy sessions are dead")
 
         db = _make_db()
-        _seed_db(db, count=3)
+        _seed_db(db, count=1)
         scraper = BulkScraper(
             get=mock_get, checkpoint=db, output_dir=tmp_path,
-            # _backoff_base=0 so the throttle sleep in the fix doesn't slow
-            # tests. The fix uses a fixed asyncio.sleep(0.5) — a 0.05
-            # override isn't wired to it, so we accept a small delay.
             _backoff_base=0.0,
         )
-        await scraper.download_all()
+        scraper._pool_exhausted_max_retries = 3
+        scraper._pool_exhausted_sleep = 0.001
+        result = await scraper.download_all()
 
-        stats = db.stats()
-        assert stats == {
-            "total": 3, "downloaded": 0, "failed": 3,
-            "pending": 0, "in_progress": 0,
-        }, (
-            f"expected all 3 rows marked failed (not stranded in_progress); "
-            f"got {stats}"
+        assert result.downloaded == 0
+        assert result.failed == 1, (
+            f"row must terminal-fail after exhausting retries; got {result}"
         )
-        rows = db._conn.execute(
-            "SELECT error FROM cases WHERE status='failed'"
-        ).fetchall()
-        for row in rows:
-            assert row[0].startswith("pool-exhausted"), (
-                f"expected error to start with 'pool-exhausted', "
-                f"got: {row[0]!r}"
-            )
+        # The row must actually be retried max_retries times before giving
+        # up — pins down the retry-count guarantee so fail-fast regressions
+        # (max_retries=1) can't sneak through.
+        assert attempts["count"] >= 3, (
+            f"row should attempt at least max_retries (3) times before "
+            f"terminal-fail; got {attempts['count']}"
+        )
+        row = db._conn.execute(
+            "SELECT status, error FROM cases "
+            "WHERE court='hkcfi' AND year=2023 AND number=1"
+        ).fetchone()
+        assert row[0] == "failed"
+        # A distinctive prefix separates "gave up after N retries" from
+        # "got one pool_exhausted event" in the monitor's top-error-classes.
+        assert "pool-exhausted" in row[1], (
+            f"expected 'pool-exhausted' in error; got {row[1]!r}"
+        )
+
+    async def test_pool_death_retry_counter_is_per_row(self, tmp_path):
+        """Row A's pool-exhausted retries must not consume row B's retry
+        budget. Prevents a single sticky row from short-circuiting other
+        rows' recovery paths."""
+        from hklii_downloader.proxy_pool import AllProxiesDeadError
+
+        attempts = {"row1_attempts": 0, "row2_attempts": 0}
+
+        async def mock_get(url, **kw):
+            # Row 1 pool-dies once, then recovers. Row 2 pool-dies once,
+            # then recovers. If the counter is per-run instead of per-row,
+            # row 2 might terminal-fail because row 1 already used the budget.
+            if "num=1" in url:
+                attempts["row1_attempts"] += 1
+                if attempts["row1_attempts"] == 1:
+                    raise AllProxiesDeadError("all dead (row 1)")
+            elif "num=2" in url:
+                attempts["row2_attempts"] += 1
+                if attempts["row2_attempts"] == 1:
+                    raise AllProxiesDeadError("all dead (row 2)")
+            return httpx.Response(200, json=SAMPLE_JUDGMENT_RESPONSE,
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=2)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            _backoff_base=0.0,
+        )
+        scraper._pool_exhausted_max_retries = 2
+        scraper._pool_exhausted_sleep = 0.001
+        result = await scraper.download_all()
+
+        # Both rows recover after their independent single retry.
+        assert result.downloaded == 2, (
+            f"both rows should recover; got {result} "
+            f"(row1={attempts['row1_attempts']}, row2={attempts['row2_attempts']})"
+        )
+        assert result.failed == 0
 
 
 def _read_events(out_dir) -> list[dict]:
