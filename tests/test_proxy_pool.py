@@ -308,6 +308,68 @@ class TestProxyPool:
             f"expected URL-derived Referer, got headers={captured[0]}"
         )
 
+    async def test_direct_mode_ships_full_headerrotator_headers(self):
+        """W5 / task #61 — post-W2's default_headers=False regime,
+        direct mode was shipping bare {Referer, Host, accept-encoding}
+        — a much stronger bot signal than the proxy branch (which
+        already runs HeaderRotator.generate()). Fix: apply the same
+        HeaderRotator to the direct branch."""
+        captured = []
+
+        def make_transport(proxy_url):
+            def handler(request):
+                captured.append(dict(request.headers))
+                return httpx.Response(200, json={"data": "ok"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=[], direct=True,
+            _transport_factory=make_transport,
+        )
+        await pool.get(
+            "https://www.hklii.hk/api/getjudgment?lang=en&abbr=hkcfi&year=2024&num=1234"
+        )
+        h = captured[0]
+        assert h.get("user-agent", "").startswith("Mozilla/5.0"), (
+            f"missing HeaderRotator UA on direct branch — got headers={h}"
+        )
+        assert "chrome/" in h.get("user-agent", "").lower()
+        assert "accept-language" in h
+        assert h.get("accept-language", "").startswith("en-")
+        assert "sec-ch-ua" in h
+        assert h.get("sec-ch-ua-mobile") == "?0"
+        # For /api/ URLs, HeaderRotator downgrades to XHR shape
+        assert h.get("sec-fetch-mode") == "cors"
+        assert h.get("sec-fetch-dest") == "empty"
+        # sec-fetch-user + UIR are Chrome navigation-only; XHRs never
+        # send them (W2 baseline).
+        assert "sec-fetch-user" not in h
+        assert "upgrade-insecure-requests" not in h
+
+    async def test_direct_mode_kwargs_headers_override_rotator(self):
+        """Per-call header overrides win over HeaderRotator defaults —
+        callers still have final say (used e.g. by _fetch_ip's noop
+        transport probe)."""
+        captured = []
+
+        def make_transport(proxy_url):
+            def handler(request):
+                captured.append(dict(request.headers))
+                return httpx.Response(200, json={"data": "ok"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=[], direct=True,
+            _transport_factory=make_transport,
+        )
+        await pool.get(
+            "https://www.hklii.hk/api/getjudgment?lang=en&abbr=hkcfi&year=2024&num=1234",
+            headers={"X-Custom": "1", "User-Agent": "override/1"},
+        )
+        h = captured[0]
+        assert h.get("x-custom") == "1"
+        assert h.get("user-agent") == "override/1"
+
     async def test_proxy_mode_referer_derived_from_url(self):
         """Proxy mode was hardcoded to homepage — every request advertised the
         same Referer. Fix: derive per-URL."""
