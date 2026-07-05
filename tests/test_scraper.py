@@ -736,6 +736,45 @@ class TestChallengePageDetection:
         from hklii_downloader.scraper import _looks_like_challenge_page
         assert not _looks_like_challenge_page("")
 
+    def test_organic_just_a_moment_in_witness_testimony_not_flagged(self):
+        # Real production incident (2026-07-04 run): hkcfi/2023/1197 was
+        # mis-marked failed because the judgment quotes witness testimony
+        # containing "just a moment". Cloudflare's actual interstitial
+        # title is "Just a moment..." with a three-dot ellipsis; the bare
+        # phrase is far too common in transcripts.
+        html = (
+            "<html><body>"
+            "<p>Q: Do you know what the situation is in Niger today?</p>"
+            "<p>Candy:  No, just a moment.  I'm not asking you what the "
+            "situation is in Niger; I'm asking you today, do you...</p>"
+            "</body></html>"
+        )
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page(html)
+
+    def test_organic_just_a_moment_in_judicial_reasoning_not_flagged(self):
+        # hkcfi/2024/620 excerpt: "just a moment of anger" was flagged as
+        # a Cloudflare challenge page. Sibling of the previous test — same
+        # class, different phrasing.
+        html = (
+            "<html><body>"
+            "<p>The court accepts that this was not a premeditated attempt "
+            "to seriously harm or kill A1 or A2 other than just a moment "
+            "of anger, that in any event it was a private and personal "
+            "dispute...</p>"
+            "</body></html>"
+        )
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page(html)
+
+    def test_cloudflare_just_a_moment_ellipsis_still_detected(self):
+        # After tightening the marker to "just a moment..." (three dots),
+        # real Cloudflare interstitials MUST still fire. This is the exact
+        # title/H1 CF ships as of the incident window.
+        html = "<html><head><title>Just a moment...</title></head></html>"
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert _looks_like_challenge_page(html)
+
 
 class TestBulkScraperChallengePage:
     """A challenge page returned as content_html must mark the row failed with
