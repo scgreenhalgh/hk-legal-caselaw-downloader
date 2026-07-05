@@ -316,6 +316,24 @@ class CheckpointDB:
         )
         self._conn.commit()
 
+    def release_row(self, court: str, year: int, number: int) -> None:
+        """Flip a specific in_progress row back to pending.
+
+        Used by the pool-exhausted re-queue path (task #65): when a
+        worker sees AllProxiesDeadError, we release the row so it will
+        be re-claimed once the pool recovers, rather than terminal-failing
+        it. `error` is cleared so a subsequent success doesn't inherit
+        a stale error message. The status guard ensures we only touch
+        rows we actually hold (belt-and-suspenders against a race with
+        another worker)."""
+        self._conn.execute(
+            "UPDATE cases SET status='pending', error=NULL "
+            "WHERE status='in_progress' "
+            "AND court=? AND year=? AND number=?",
+            (court, year, number),
+        )
+        self._conn.commit()
+
     def pending_cases(self, courts: list[str] | None = None) -> list[CaseRecord]:
         if courts:
             placeholders = ",".join("?" * len(courts))

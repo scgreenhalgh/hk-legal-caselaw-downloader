@@ -88,6 +88,16 @@ class ScrapeResult:
 
 
 class BulkScraper:
+    # Task #65 — pool-exhausted (all sessions dead simultaneously) is a
+    # recoverable state. Instead of terminal-failing rows in the drain,
+    # we re-queue and sleep so the pool has time to revive via cooldown.
+    # Terminal-fail only after `max_retries` re-queue cycles; this gives
+    # each row a ~2-minute budget (60 * 2s) to ride out a mass-kill event.
+    # Both are class attrs so tests can tune them down for millisecond
+    # runtimes. See memory/incident-2026-07-05-pool-storm.md.
+    _pool_exhausted_max_retries: int = 60
+    _pool_exhausted_sleep: float = 2.0
+
     def __init__(
         self,
         get: Callable,
@@ -187,6 +197,11 @@ class BulkScraper:
 
         counter_lock = asyncio.Lock()
         stats = {"downloaded": 0, "failed": 0, "dispatched": 0}
+        # Per-row pool-exhausted retry counter (task #65). Keyed by
+        # (court, year, number). Only one worker holds a given row at a
+        # time (claim_pending is atomic), so per-row increments do not
+        # race across workers.
+        pool_exhausted_retries: dict[tuple[str, int, int], int] = {}
 
         async def worker() -> None:
             while True:
@@ -202,24 +217,57 @@ class BulkScraper:
                 try:
                     success = await self._download_one(record)
                 except AllProxiesDeadError as exc:
-                    # B6 — pool went dead mid-run (e.g. HKLII 502 burst
-                    # rippled through all 20 sessions in seconds). Without
-                    # this branch the generic Exception guard below would
-                    # swallow it silently, leaving this row in in_progress
-                    # with no DB error stamp — and the worker would immediately
-                    # loop back to claim_pending() at SQLite speed, ripping
-                    # thousands of pending rows into in_progress before the
-                    # pool has a chance to revive. Stamp the row failed with
-                    # a distinctive prefix, then throttle so
-                    # _revive_cooled_down_sessions has time to bring at least
-                    # one session back.
-                    self._fail(
-                        record.court, record.year, record.number,
-                        f"pool-exhausted: {exc}",
-                        event_kind="pool_exhausted",
+                    # Task #65 — pool went dead mid-run (e.g. a burst of
+                    # target-side timeouts pushed every ProxySession past
+                    # its failure counter in the same second). Terminal-
+                    # failing here drains the queue at SQLite speed
+                    # (7,730 rows in 44s during the 2026-07-04 incident).
+                    # Re-queue instead: release the row (in_progress →
+                    # pending) and sleep so cooldowns can elapse and
+                    # _revive_cooled_down_sessions can bring sessions back.
+                    # Only terminal-fail once we've exhausted the retry
+                    # budget (default: 60 * 2s = 2 minutes per row, plenty
+                    # to survive typical mass-kill events).
+                    key = (record.court, record.year, record.number)
+                    pool_exhausted_retries[key] = (
+                        pool_exhausted_retries.get(key, 0) + 1
                     )
-                    success = False
-                    await asyncio.sleep(0.5)
+                    attempt = pool_exhausted_retries[key]
+                    if attempt >= self._pool_exhausted_max_retries:
+                        # Pool never came back for this row within budget —
+                        # terminal-fail with a distinctive prefix so
+                        # --retry-failed can reclaim it next run.
+                        self._fail(
+                            record.court, record.year, record.number,
+                            f"pool-exhausted after {attempt} retries: {exc}",
+                            event_kind="pool_exhausted",
+                        )
+                        success = False
+                    else:
+                        # Re-queue and back off. The `dispatched` counter
+                        # is decremented so --limit budgets attempts, not
+                        # retries. The row goes back to pending; the next
+                        # claim (this worker's next iteration, or another
+                        # worker's) will pick it up once the pool revives.
+                        self._checkpoint.release_row(
+                            record.court, record.year, record.number,
+                        )
+                        self._emit(
+                            "pool_exhausted",
+                            court=record.court,
+                            year=record.year,
+                            num=record.number,
+                            error_class="pool-exhausted",
+                            error_msg=(
+                                f"re-queued (attempt {attempt}/"
+                                f"{self._pool_exhausted_max_retries}): "
+                                f"{exc}"
+                            ),
+                        )
+                        async with counter_lock:
+                            stats["dispatched"] -= 1
+                        await asyncio.sleep(self._pool_exhausted_sleep)
+                        continue
                 except Exception:
                     # Belt-and-braces: _download_one catches known errors
                     # already; this guard prevents an unforeseen bug from
