@@ -644,6 +644,26 @@ class CheckpointDB:
             "by_source_ext": by_ext,
         }
 
+    def upsert_legis_version(
+        self, abbr, num, lang, vid, version_date, last_seen_at=None,
+    ) -> None:
+        raise NotImplementedError
+
+    def claim_pending_legis_version(self):
+        raise NotImplementedError
+
+    def mark_legis_version_downloaded(self, abbr, num, lang, vid) -> None:
+        raise NotImplementedError
+
+    def mark_legis_version_failed(self, abbr, num, lang, vid, error) -> None:
+        raise NotImplementedError
+
+    def legis_version_stats(self) -> dict:
+        raise NotImplementedError
+
+    def pending_legis_versions(self):
+        raise NotImplementedError
+
     def upsert_legis_document(
         self, abbr: str, num: str, lang: str, title: str,
         last_seen_at: int | None = None,
