@@ -155,6 +155,109 @@ class TestHtmlRecheckRunner:
         assert result == {"newly_captured": 0, "still_pending": 0, "failed": 0}
 
 
+class _CapturingEvents:
+    """Minimal StructuredEventLogger stand-in for tests. Records calls
+    to emit() and sample_failure() so we can assert on them without
+    hitting the real event-file/dumper machinery."""
+
+    def __init__(self):
+        self.events: list[dict] = []
+        self.samples: list[dict] = []
+
+    def emit(self, kind: str, **fields) -> None:
+        self.events.append({"kind": kind, **fields})
+
+    def sample_failure(
+        self, name: str, body: str, headers, is_challenge: bool = False,
+    ) -> None:
+        self.samples.append({
+            "name": name,
+            "body_preview": body[:80] if isinstance(body, str) else body,
+            "is_challenge": is_challenge,
+        })
+
+
+class TestHtmlRecheckRunnerEvents:
+    """Task #38 — HtmlRecheckRunner missed challenge_detected and
+    case_failed emissions. Post-fix, the recheck path emits the same
+    shape scraper.py already does so post-run analytics can count
+    challenges hit during the recheck sweep."""
+
+    async def test_challenge_page_emits_challenge_detected(self, tmp_path):
+        from hklii_downloader.html_recheck import HtmlRecheckRunner
+
+        db = _make_db_with_pending_row()
+        events = _CapturingEvents()
+
+        async def mock_get(url, **kw):
+            resp = {**SAMPLE_RESP,
+                    "content": "<html>Just a moment... cloudflare</html>"}
+            return httpx.Response(200, json=resp,
+                                  request=httpx.Request("GET", url))
+
+        runner = HtmlRecheckRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html"}, events=events,
+        )
+        result = await runner.recheck_all()
+
+        assert result["failed"] == 1
+        kinds = [e["kind"] for e in events.events]
+        assert "challenge_detected" in kinds, (
+            f"expected challenge_detected emission, got {kinds}"
+        )
+        # Body sample should have been dumped for post-run WAF forensics
+        assert any(s["is_challenge"] for s in events.samples), (
+            "expected sample_failure(is_challenge=True), got "
+            f"{events.samples}"
+        )
+
+    async def test_http_failure_emits_case_failed(self, tmp_path):
+        """Non-200 upstream (or json-parse failure) counts as failed and
+        must land in the events stream so operators can tell "recheck
+        pass had upstream failures" from "no rows were pending"."""
+        from hklii_downloader.html_recheck import HtmlRecheckRunner
+
+        db = _make_db_with_pending_row()
+        events = _CapturingEvents()
+
+        async def mock_get(url, **kw):
+            return httpx.Response(503, text="upstream busy",
+                                  request=httpx.Request("GET", url))
+
+        runner = HtmlRecheckRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html"}, events=events,
+        )
+        result = await runner.recheck_all()
+
+        assert result["failed"] == 1
+        kinds = [e["kind"] for e in events.events]
+        assert "case_failed" in kinds, (
+            f"expected case_failed emission, got {kinds}"
+        )
+
+    async def test_events_none_stays_backwards_compatible(self, tmp_path):
+        """Passing events=None (or omitting it entirely) must not crash —
+        the CLI --no-events path still needs to work."""
+        from hklii_downloader.html_recheck import HtmlRecheckRunner
+
+        db = _make_db_with_pending_row()
+
+        async def mock_get(url, **kw):
+            resp = {**SAMPLE_RESP,
+                    "content": "<html>Just a moment... cloudflare</html>"}
+            return httpx.Response(200, json=resp,
+                                  request=httpx.Request("GET", url))
+
+        runner = HtmlRecheckRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html"},
+        )
+        result = await runner.recheck_all()
+        assert result["failed"] == 1
+
+
 class TestRecheckHtmlSubcommand:
     def test_subcommand_registered(self):
         from click.testing import CliRunner

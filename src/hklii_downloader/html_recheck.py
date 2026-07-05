@@ -49,6 +49,7 @@ class HtmlRecheckRunner:
         formats: set[str] | None = None,
         workers: int = 1,
         limit: int | None = None,
+        events=None,
     ):
         self._get = get
         self._checkpoint = checkpoint
@@ -59,6 +60,10 @@ class HtmlRecheckRunner:
         self._formats = (formats & default) if formats else default
         self._workers = max(1, workers)
         self._limit = limit
+        # events wiring for task #38 lands in the paired impl commit; the
+        # attribute exists here so tests can pass events= without a
+        # TypeError while assertions still fail on the missing emits.
+        self._events = events
 
     async def recheck_all(self) -> dict[str, int]:
         pending = self._checkpoint.pending_html_recheck(limit=self._limit)
