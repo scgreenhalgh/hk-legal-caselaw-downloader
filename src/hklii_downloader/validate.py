@@ -42,10 +42,16 @@ CHECK_KEYS = (
 # orphan/stem attribution. Ordering matters: longer suffixes first so
 # `hkcfi_2023_1.appeal_history.json` matches before falling through to
 # the generic `.json` handling below.
+#
+# `.generated.html` is written by `hklii generate-html` (task #76) for
+# rows whose formats=["doc"] and no native html exists. Its stem
+# attributes back to the base row, so it must be peeled here to avoid
+# an orphan warn on every subsequent validate.
 _ENRICHMENT_SUFFIXES = (
     ".summary_en.html",
     ".summary_zh.html",
     ".appeal_history.json",
+    ".generated.html",
 )
 
 # Judgment-body sidecar extensions we recognise for orphan/presence
