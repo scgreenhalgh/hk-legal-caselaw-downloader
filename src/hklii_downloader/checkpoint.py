@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS cases (
     appeal_history_status TEXT NOT NULL DEFAULT 'pending',
     appeal_history_error  TEXT,
     html_pending_at_hklii INTEGER,
+    html_generated_from   TEXT,
+    html_generated_error  TEXT,
     PRIMARY KEY (court, year, number)
 );
 """
@@ -128,6 +130,14 @@ class CheckpointDB:
         if "html_pending_at_hklii" not in existing:
             self._conn.execute(
                 "ALTER TABLE cases ADD COLUMN html_pending_at_hklii INTEGER"
+            )
+        if "html_generated_from" not in existing:
+            self._conn.execute(
+                "ALTER TABLE cases ADD COLUMN html_generated_from TEXT"
+            )
+        if "html_generated_error" not in existing:
+            self._conn.execute(
+                "ALTER TABLE cases ADD COLUMN html_generated_error TEXT"
             )
 
     def upsert_case(
@@ -483,24 +493,106 @@ class CheckpointDB:
     def mark_html_generated(
         self, court: str, year: int, number: int, source_ext: str,
     ) -> None:
-        """Stub — implemented in the feat pair."""
-        raise NotImplementedError("mark_html_generated pending impl")
+        """Record a successful doc → html conversion.
+
+        source_ext is the on-disk extension the html was generated from
+        (`.doc` / `.docx` / `.rtf`) — used later for provenance and
+        per-source-ext stats. Clears any prior error so a retry that
+        succeeds doesn't leave stale error text behind.
+        """
+        self._conn.execute(
+            "UPDATE cases SET html_generated_from=?, "
+            "html_generated_error=NULL "
+            "WHERE court=? AND year=? AND number=?",
+            (source_ext, court, year, number),
+        )
+        self._conn.commit()
 
     def mark_html_generation_failed(
         self, court: str, year: int, number: int, error: str,
     ) -> None:
-        """Stub — implemented in the feat pair."""
-        raise NotImplementedError("mark_html_generation_failed pending impl")
+        self._conn.execute(
+            "UPDATE cases SET html_generated_from=NULL, "
+            "html_generated_error=? "
+            "WHERE court=? AND year=? AND number=?",
+            (error, court, year, number),
+        )
+        self._conn.commit()
 
     def pending_html_generation(
         self, limit: int | None = None, include_failed: bool = False,
     ) -> list[CaseRecord]:
-        """Stub — implemented in the feat pair."""
-        raise NotImplementedError("pending_html_generation pending impl")
+        """Rows targeted for doc → html conversion.
+
+        A row qualifies iff its formats list is exactly ["doc"] — those
+        are the empty-content-at-HKLII cases where the doc-family file
+        is the only judgment content on disk. formats=[..., "doc", ...]
+        rows already have html/txt/json and are out of scope.
+
+        By default, rows previously marked failed are excluded so a
+        second run doesn't repeat the same failure — pass
+        include_failed=True (or the CLI's --force flag) to retry them.
+        """
+        where = (
+            "status='downloaded' "
+            "AND formats=?"
+            " AND html_generated_from IS NULL"
+        )
+        params: list = ['["doc"]']
+        if not include_failed:
+            where += " AND html_generated_error IS NULL"
+        q = (
+            "SELECT court, year, number, neutral, title, date, lang "
+            f"FROM cases WHERE {where}"
+        )
+        if limit is not None:
+            q += f" LIMIT {int(limit)}"
+        rows = self._conn.execute(q, params).fetchall()
+        return [
+            CaseRecord(
+                court=r[0], year=r[1], number=r[2],
+                neutral=r[3], title=r[4], date=r[5],
+                status="downloaded", lang=r[6],
+            )
+            for r in rows
+        ]
 
     def html_generation_stats(self) -> dict:
-        """Stub — implemented in the feat pair."""
-        raise NotImplementedError("html_generation_stats pending impl")
+        """Report generated/failed/pending counts + per-source-ext breakdown.
+
+        Scoped to formats=["doc"] rows (the population targeted for
+        conversion). Rows outside that scope don't factor in.
+        """
+        scope = "status='downloaded' AND formats='[\"doc\"]'"
+        generated = self._conn.execute(
+            f"SELECT COUNT(*) FROM cases WHERE {scope} "
+            "AND html_generated_from IS NOT NULL"
+        ).fetchone()[0]
+        failed = self._conn.execute(
+            f"SELECT COUNT(*) FROM cases WHERE {scope} "
+            "AND html_generated_from IS NULL "
+            "AND html_generated_error IS NOT NULL"
+        ).fetchone()[0]
+        pending = self._conn.execute(
+            f"SELECT COUNT(*) FROM cases WHERE {scope} "
+            "AND html_generated_from IS NULL "
+            "AND html_generated_error IS NULL"
+        ).fetchone()[0]
+
+        by_ext: dict[str, int] = {}
+        for row in self._conn.execute(
+            f"SELECT html_generated_from, COUNT(*) FROM cases "
+            f"WHERE {scope} AND html_generated_from IS NOT NULL "
+            "GROUP BY html_generated_from"
+        ).fetchall():
+            by_ext[row[0]] = row[1]
+
+        return {
+            "generated": generated,
+            "failed": failed,
+            "pending": pending,
+            "by_source_ext": by_ext,
+        }
 
     def close(self) -> None:
         self._conn.close()
