@@ -640,6 +640,51 @@ class TestBulkScraperDocFallbackMagicByteGuard:
         assert result.failed == 0
         assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.doc").exists()
 
+    async def test_fetch_doc_accepts_word_95_magic(self, tmp_path):
+        # Positive control — pre-OLE Word 6.0 / Word for Windows 95 uses
+        # the \xdb\xa5\x2d\x00 signature. Judiciary serves these for many
+        # 1990s judgments (e.g. direct probe of HCCT000064_1996.doc returned
+        # 10240 bytes starting `db a5 2d 00 00 00 09 04`). LibreOffice and
+        # Word 365 can open them; they belong in the corpus. Real production
+        # incident (2026-07-04 run): 11 such rows were mis-marked failed
+        # by W1 before the accept list was widened.
+        judgment_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/word95.doc",
+        }
+        word95_bytes = b"\xdb\xa5\x2d\x00" + b"\x00" * 60
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=word95_bytes,
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        assert result.failed == 0
+        assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.doc").exists()
+
+    def test_has_valid_doc_magic_rejects_rtf(self):
+        # Negative spec anchor — RTF (`{\rtf1...`, magic 0x7b5c7274) is not
+        # a Word format and must stay rejected even after the Word 6.0/95
+        # accept-list widening. Judiciary occasionally serves an RTF file
+        # at a `.doc` URL (6 such rows in the 2026-07-04 run); those are
+        # correctly failed rather than written as `.docx`.
+        from hklii_downloader.scraper import _has_valid_doc_magic
+        rtf_body = b"{\\rtf1\\ansi\\deff0 hello world}"
+        assert not _has_valid_doc_magic(rtf_body)
+
 
 class TestRetryBackoffJitter:
     """Deterministic `base * 2**attempt` makes 6 concurrent proxies retry in
