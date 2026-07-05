@@ -37,21 +37,42 @@ _BODY_PREVIEW_LEN = 200
 # verbatim to `.docx`, mark the row `downloaded`, and RAG downstream
 # would choke on BadZipFile at ingest time. Sibling defenses live in
 # content_shape._looks_like_challenge_page (API branch, enrichment).
-_DOC_MAGIC_SIGNATURES = (
-    b"PK\x03\x04",          # .docx / OOXML — ZIP archive
-    b"\xd0\xcf\x11\xe0",    # legacy .doc — OLE compound document (Word 97+)
-    b"\xdb\xa5\x2d\x00",    # pre-OLE Word 6.0 / Word for Windows 95 — Judiciary
-                            # serves these for many 1990s judgments (~11 rows
-                            # in the 2026-07-04 run before this widening).
-)
+# Signature → on-disk extension. Judiciary URLs are unreliable indicators
+# of the actual format (some `.doc` URLs serve RTF, some 1990s files use
+# pre-OLE Word), so we derive the extension from the file body's magic
+# bytes. Everything not in this map is rejected.
+_DOC_MAGIC_EXTENSIONS: dict[bytes, str] = {
+    b"PK\x03\x04": ".docx",          # OOXML — ZIP archive (Word 2007+)
+    b"\xd0\xcf\x11\xe0": ".doc",     # OLE compound document (Word 97+)
+    b"\xdb\xa5\x2d\x00": ".doc",     # pre-OLE Word 6.0 / Word for Windows 95
+                                     # — Judiciary serves these for many 1990s
+                                     # judgments (task #64).
+    b"{\\rt": ".rtf",                # RTF — Judiciary uses RTF for some
+                                     # 1990s-early-2000s files served at .doc
+                                     # URLs; content is real judgment text
+                                     # (task #67).
+}
+
+_DOC_MAGIC_SIGNATURES = tuple(_DOC_MAGIC_EXTENSIONS)
 
 
 def _has_valid_doc_magic(body: bytes) -> bool:
-    """True if the first 4 bytes match a known Word document signature."""
+    """True if the first 4 bytes match a known document signature."""
     if len(body) < 4:
         return False
     head = body[:4]
-    return any(head == sig for sig in _DOC_MAGIC_SIGNATURES)
+    return head in _DOC_MAGIC_EXTENSIONS
+
+
+def _extension_for_body(body: bytes) -> str | None:
+    """Return the on-disk extension for a validated document body, or None
+    if the magic doesn't match a known format. Callers should have already
+    gated on `_has_valid_doc_magic` — this is the sibling that names the
+    file. Extension is magic-driven so a mislabelled URL (e.g. RTF served
+    at `.doc`) still lands on a filesystem stem that matches the format."""
+    if len(body) < 4:
+        return None
+    return _DOC_MAGIC_EXTENSIONS.get(body[:4])
 
 
 def _error_class(error: str) -> str:
@@ -533,7 +554,11 @@ class BulkScraper:
                     f"doc-invalid-magic: 0x{magic_hex}, "
                     f"doc_url={judgment.doc_url}"
                 )
-            ext = ".docx" if judgment.doc_url.lower().endswith(".docx") else ".doc"
+            # Extension is magic-driven, not URL-driven — Judiciary is not
+            # a reliable indicator of format (some .doc URLs serve RTF, task
+            # #67). `_has_valid_doc_magic` already gated so `_extension_for_body`
+            # is guaranteed non-None here.
+            ext = _extension_for_body(resp.content)
             path = output_dir / f"{judgment.case.filename_stem}{ext}"
             try:
                 atomic_write_bytes(path, resp.content)
