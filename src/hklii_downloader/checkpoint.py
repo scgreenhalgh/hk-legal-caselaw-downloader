@@ -39,6 +39,16 @@ class LegisRecord:
     status: str
 
 
+@dataclass
+class LegisVersionRecord:
+    abbr: str
+    num: str
+    lang: str
+    vid: int
+    version_date: str | None
+    status: str
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS cases (
     court    TEXT NOT NULL,
@@ -75,6 +85,17 @@ CREATE TABLE IF NOT EXISTS legis_documents (
     error   TEXT,
     last_seen_at INTEGER,
     PRIMARY KEY (abbr, num, lang)
+);
+CREATE TABLE IF NOT EXISTS legis_versions (
+    abbr    TEXT NOT NULL,           -- ord | reg | instrument
+    num     TEXT NOT NULL,           -- chapter/rule number
+    lang    TEXT NOT NULL,           -- en | tc
+    vid     INTEGER NOT NULL,        -- capversion id (getcapversiontoc?id=vid)
+    version_date TEXT,               -- ISO date this version came into force
+    status  TEXT NOT NULL DEFAULT 'pending',
+    error   TEXT,
+    last_seen_at INTEGER,
+    PRIMARY KEY (abbr, num, lang, vid)
 );
 """
 
@@ -645,24 +666,87 @@ class CheckpointDB:
         }
 
     def upsert_legis_version(
-        self, abbr, num, lang, vid, version_date, last_seen_at=None,
+        self, abbr: str, num: str, lang: str, vid: int,
+        version_date: str, last_seen_at: int | None = None,
     ) -> None:
-        raise NotImplementedError
+        """Insert-or-update a historical-version row. Never touches
+        status — owned by the backfill workers."""
+        self._conn.execute(
+            "INSERT INTO legis_versions "
+            "(abbr, num, lang, vid, version_date, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (abbr, num, lang, vid) DO UPDATE SET "
+            "version_date=COALESCE(excluded.version_date, "
+            "                       legis_versions.version_date), "
+            "last_seen_at=COALESCE(excluded.last_seen_at, "
+            "                       legis_versions.last_seen_at)",
+            (abbr, num, lang, vid, version_date, last_seen_at),
+        )
+        self._conn.commit()
 
-    def claim_pending_legis_version(self):
-        raise NotImplementedError
+    def claim_pending_legis_version(self) -> LegisVersionRecord | None:
+        row = self._conn.execute(
+            "SELECT abbr, num, lang, vid, version_date "
+            "FROM legis_versions WHERE status='pending' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        self._conn.execute(
+            "UPDATE legis_versions SET status='in_progress' "
+            "WHERE abbr=? AND num=? AND lang=? AND vid=?",
+            (row[0], row[1], row[2], row[3]),
+        )
+        self._conn.commit()
+        return LegisVersionRecord(
+            abbr=row[0], num=row[1], lang=row[2], vid=row[3],
+            version_date=row[4], status="in_progress",
+        )
 
-    def mark_legis_version_downloaded(self, abbr, num, lang, vid) -> None:
-        raise NotImplementedError
+    def mark_legis_version_downloaded(
+        self, abbr: str, num: str, lang: str, vid: int,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE legis_versions SET status='downloaded', error=NULL "
+            "WHERE abbr=? AND num=? AND lang=? AND vid=?",
+            (abbr, num, lang, vid),
+        )
+        self._conn.commit()
 
-    def mark_legis_version_failed(self, abbr, num, lang, vid, error) -> None:
-        raise NotImplementedError
+    def mark_legis_version_failed(
+        self, abbr: str, num: str, lang: str, vid: int, error: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE legis_versions SET status='failed', error=? "
+            "WHERE abbr=? AND num=? AND lang=? AND vid=?",
+            (error, abbr, num, lang, vid),
+        )
+        self._conn.commit()
 
     def legis_version_stats(self) -> dict:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM legis_versions GROUP BY status"
+        ).fetchall()
+        counts = {r[0]: r[1] for r in rows}
+        return {
+            "total": sum(counts.values()),
+            "pending": counts.get("pending", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "downloaded": counts.get("downloaded", 0),
+            "failed": counts.get("failed", 0),
+        }
 
-    def pending_legis_versions(self):
-        raise NotImplementedError
+    def pending_legis_versions(self) -> list[LegisVersionRecord]:
+        rows = self._conn.execute(
+            "SELECT abbr, num, lang, vid, version_date "
+            "FROM legis_versions WHERE status='pending'"
+        ).fetchall()
+        return [
+            LegisVersionRecord(
+                abbr=r[0], num=r[1], lang=r[2], vid=r[3],
+                version_date=r[4], status="pending",
+            )
+            for r in rows
+        ]
 
     def upsert_legis_document(
         self, abbr: str, num: str, lang: str, title: str,
