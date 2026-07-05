@@ -820,6 +820,65 @@ class TestChallengePageDetection:
         from hklii_downloader.scraper import _looks_like_challenge_page
         assert _looks_like_challenge_page(html)
 
+    def test_organic_access_denied_in_bill_of_costs_not_flagged(self):
+        # Real production incident (2026-07-05 retry sweep): hkcfi/2011/523
+        # (bill of costs on insurance claim) fires on "access denied" —
+        # meaning access to medical care being denied, not a WAF page.
+        # Same class of FP as #63 but on a different marker.
+        html = (
+            "<html><body>"
+            "<p>Spectacles ordered nearly 3 months after access denied, "
+            "expenses not proved to be related to incident.</p>"
+            "<p>Swim caps ordered nearly 3 months after access denied, "
+            "expenses not proved to be related to the denial of access.</p>"
+            "</body></html>"
+        )
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page(html)
+
+    def test_organic_access_denied_in_family_court_not_flagged(self):
+        # hkfc/2012/56 excerpt (child access dispute in family court):
+        # "Access denied" refers to the parent's visitation being blocked.
+        html = (
+            "<html><body>"
+            "<p>(f) N's birthday and Access denied;</p>"
+            "<p>(g) Other Access denied dates including school events...</p>"
+            "</body></html>"
+        )
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page(html)
+
+    def test_organic_too_many_requests_in_testimony_not_flagged(self):
+        # hkca/1983/60 excerpt: witness described a defendant's behaviour
+        # as "one too many requests for money from TANG Lin". Not a rate-
+        # limit page — just the phrase used in cross-examination.
+        html = (
+            "<html><body>"
+            "<p>...will have all arisen out of one too many requests "
+            "for money from TANG Lin. And that I think, members of the "
+            "jury, is the crux of this case.</p>"
+            "</body></html>"
+        )
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page(html)
+
+    def test_real_cloudflare_page_still_detected_via_remaining_markers(self):
+        # After dropping "access denied" + "too many requests", real WAF
+        # pages must still fire via the remaining markers. A realistic CF
+        # "sorry, you have been blocked" page contains the CF brand text
+        # multiple times — this test locks in that the marker list is not
+        # so narrow that CF pages slip through entirely.
+        html = (
+            "<html><head><title>Attention Required! | Cloudflare</title></head>"
+            "<body><h1>Sorry, you have been blocked</h1>"
+            "<p>You are unable to access this site.</p>"
+            "<p>This website is using a security service to protect "
+            "itself. Please enable JavaScript and reload the page. "
+            "Cloudflare Ray ID: xxxxx.</p></body></html>"
+        )
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert _looks_like_challenge_page(html)
+
 
 class TestBulkScraperChallengePage:
     """A challenge page returned as content_html must mark the row failed with
