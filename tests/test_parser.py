@@ -107,13 +107,44 @@ class TestRefererFor:
             == "https://www.hklii.hk/"
         )
 
-    def test_getappealhistory_url_unparseable_caseno_returns_homepage(self):
-        # caseno that does not match <COURT> <NUM>/<YEAR> — fall back safely.
-        # (Real production values like `FACC3/2025` have no space between court
-        # prefix and number and don't reveal the URL slug; safest is homepage.)
+    def test_getappealhistory_compact_facc_resolves_to_hkcfa(self):
+        # Task #62: real production caseno shape is compact
+        # (no space between court prefix and number). Historic behaviour
+        # fell to homepage. Post-fix: COURT_PREFIX_MAP lets us derive
+        # the URL slug from the act prefix (FACC → hkcfa).
         url = (
             "https://www.hklii.hk/api/getappealhistory"
             "?caseno=FACC3%2F2025"
+        )
+        assert referer_for(url) == "https://www.hklii.hk/en/cases/hkcfa/2025/"
+
+    def test_getappealhistory_compact_hcmp_resolves_to_hkcfi(self):
+        url = (
+            "https://www.hklii.hk/api/getappealhistory"
+            "?caseno=HCMP2265%2F2025"
+        )
+        assert referer_for(url) == "https://www.hklii.hk/en/cases/hkcfi/2025/"
+
+    def test_getappealhistory_compact_cacv_resolves_to_hkca(self):
+        url = (
+            "https://www.hklii.hk/api/getappealhistory"
+            "?caseno=CACV45%2F2024&lang=tc"
+        )
+        assert referer_for(url) == "https://www.hklii.hk/tc/cases/hkca/2024/"
+
+    def test_getappealhistory_compact_dccc_resolves_to_hkdc(self):
+        url = (
+            "https://www.hklii.hk/api/getappealhistory"
+            "?caseno=DCCC12%2F2023"
+        )
+        assert referer_for(url) == "https://www.hklii.hk/en/cases/hkdc/2023/"
+
+    def test_getappealhistory_unknown_prefix_still_returns_homepage(self):
+        # A prefix outside COURT_PREFIX_MAP can't be resolved to a slug,
+        # so fall back to homepage — same as pre-fix behaviour for these.
+        url = (
+            "https://www.hklii.hk/api/getappealhistory"
+            "?caseno=ZZZZ99%2F2024"
         )
         assert referer_for(url) == "https://www.hklii.hk/"
 
