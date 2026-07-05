@@ -404,3 +404,172 @@ class TestValidateReportSchema:
             assert k in d["counts"], f"missing counts.{k}"
         for sev in ("fatal", "warn", "info"):
             assert sev in d["counts"]["discrepancies_by_severity"]
+
+
+class TestValidateSubcommand:
+    def test_validate_in_group_help(self):
+        from hklii_downloader.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["--help"])
+        assert "validate" in result.output
+
+    def test_validate_help_lists_flags(self):
+        from hklii_downloader.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["validate", "--help"])
+        assert result.exit_code == 0
+        for flag in ("--sample", "--seed", "--checks", "--fix", "--report"):
+            assert flag in result.output, f"missing {flag} in help output"
+
+    def test_validate_missing_db_exits_3(self, tmp_path):
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "empty"
+        out.mkdir()
+        runner = CliRunner()
+        result = runner.invoke(main, ["validate", "-o", str(out), "--json"])
+        assert result.exit_code == 3, result.output
+
+    def test_sample_mode_limits_row_scan(self, tmp_path):
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        for i in range(1, 101):
+            _make_case(db, "hkcfi", 2023, i, f"[2023] HKCFI {i}", formats=[])
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out),
+            "--sample", "10", "--seed", "0", "--json",
+        ])
+        assert result.exit_code == 0, result.output
+        report = json.loads(result.output)
+        assert report["counts"]["rows_examined"] == 10
+        assert report["counts"]["sampled"] is True
+
+    def test_exit_code_2_on_fatal(self, tmp_path):
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(db, "hkcfi", 2023, 1, "[2023] HKCFI 1", formats=["doc"])
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.doc", b"{\\rtf1 body")
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--checks", "magic", "--json",
+        ])
+        assert result.exit_code == 2, result.output
+
+    def test_exit_code_1_on_warn_only(self, tmp_path):
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        # Orphan file — no DB row → warn discrepancy
+        _write(out, "hkcfi", 9999, "hkcfi_9999_1.html", "orphan body")
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--checks", "orphans", "--json",
+        ])
+        assert result.exit_code == 1, result.output
+
+    def test_exit_code_0_on_clean(self, tmp_path):
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        CheckpointDB(str(out / ".checkpoint.db")).close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["validate", "-o", str(out), "--json"])
+        assert result.exit_code == 0, result.output
+
+    def test_report_flag_writes_json_file(self, tmp_path):
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        CheckpointDB(str(out / ".checkpoint.db")).close()
+        report_path = tmp_path / "report.json"
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out),
+            "--report", str(report_path), "--json",
+        ])
+        assert result.exit_code == 0, result.output
+        assert report_path.exists()
+        d = json.loads(report_path.read_text())
+        assert d["schema_version"] == 1
+
+    def test_json_and_text_mutually_exclusive(self, tmp_path):
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        CheckpointDB(str(out / ".checkpoint.db")).close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--json", "--text",
+        ])
+        assert result.exit_code != 0
+
+    def test_checks_flag_narrows_scope(self, tmp_path):
+        """--checks presence,magic runs those two only; other checks that
+        would fire (neutral_in_body warn on missing citation) don't."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(
+            db, "hkcfi", 2023, 1, "[2023] HKCFI 1",
+            formats=["html", "txt", "json"],
+        )
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.html", "unrelated body")
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.txt", "unrelated body")
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.json", "{}")
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out),
+            "--checks", "presence,magic", "--json",
+        ])
+        assert result.exit_code == 0, result.output
+        report = json.loads(result.output)
+        assert report["counts"]["checks_run"] == ["presence", "magic"]
+        assert report["counts"]["discrepancies_by_severity"]["warn"] == 0
+
+    def test_text_output_has_sections_and_summary(self, tmp_path):
+        """Text writer emits a section per firing check and a totals table.
+        Spec §3: first 20 discrepancies + `... N more` tail."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(db, "hkcfi", 2023, 1, "[2023] HKCFI 1", formats=["doc"])
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.doc", b"{\\rtf1 body")
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out),
+            "--checks", "magic", "--text",
+        ])
+        assert result.exit_code == 2, result.output
+        assert "magic" in result.output
+        assert "fatal" in result.output
