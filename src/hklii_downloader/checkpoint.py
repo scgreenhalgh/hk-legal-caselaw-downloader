@@ -620,6 +620,33 @@ class CheckpointDB:
             "by_source_ext": by_ext,
         }
 
+    def upsert_legis_document(
+        self, abbr: str, num: str, lang: str, title: str,
+        last_seen_at: int | None = None,
+    ) -> None:
+        """Stub — implemented in the feat pair (task #84)."""
+        raise NotImplementedError
+
+    def claim_pending_legis(self):
+        raise NotImplementedError
+
+    def mark_legis_downloaded(
+        self, abbr: str, num: str, lang: str,
+        latest_vid: int, latest_version_date: str, formats: list[str],
+    ) -> None:
+        raise NotImplementedError
+
+    def mark_legis_failed(
+        self, abbr: str, num: str, lang: str, error: str,
+    ) -> None:
+        raise NotImplementedError
+
+    def legis_stats(self) -> dict:
+        raise NotImplementedError
+
+    def legis_stats_by_abbr(self) -> dict:
+        raise NotImplementedError
+
     def close(self) -> None:
         self._conn.close()
         if self._lock_fd is not None:
