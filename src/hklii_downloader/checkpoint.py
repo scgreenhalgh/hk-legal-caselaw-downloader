@@ -30,6 +30,15 @@ class CaseRecord:
     lang: str = "en"
 
 
+@dataclass
+class LegisRecord:
+    abbr: str          # capType — ord | reg | instrument
+    num: str           # chapter/rule number as string ("1", "622C")
+    lang: str          # en | tc
+    title: str | None
+    status: str
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS cases (
     court    TEXT NOT NULL,
@@ -54,6 +63,19 @@ CREATE TABLE IF NOT EXISTS cases (
     html_generated_error  TEXT,
     PRIMARY KEY (court, year, number)
 );
+CREATE TABLE IF NOT EXISTS legis_documents (
+    abbr    TEXT NOT NULL,           -- capType (ord | reg | instrument)
+    num     TEXT NOT NULL,           -- chapter/rule number (1, 32, 622C)
+    lang    TEXT NOT NULL,           -- en | tc
+    title   TEXT,
+    latest_vid          INTEGER,     -- version id captured in this backup
+    latest_version_date TEXT,        -- publication date of that version
+    status  TEXT NOT NULL DEFAULT 'pending',
+    formats TEXT,                    -- JSON list e.g. ["versions","content"]
+    error   TEXT,
+    last_seen_at INTEGER,
+    PRIMARY KEY (abbr, num, lang)
+);
 """
 
 _ENRICHMENT_KINDS = ("summary_en", "summary_zh", "appeal_history")
@@ -69,7 +91,9 @@ class CheckpointDB:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._check_integrity(path)
-        self._conn.execute(_SCHEMA)
+        # _SCHEMA holds multiple CREATE TABLE statements; sqlite3.execute
+        # only handles one at a time, so we use executescript here.
+        self._conn.executescript(_SCHEMA)
         self._migrate_enrichment_columns()
         self._conn.commit()
 
@@ -624,28 +648,97 @@ class CheckpointDB:
         self, abbr: str, num: str, lang: str, title: str,
         last_seen_at: int | None = None,
     ) -> None:
-        """Stub — implemented in the feat pair (task #84)."""
-        raise NotImplementedError
+        """Insert or refresh a legislation row. Never touches status —
+        that's owned by the scrape workers via claim/mark methods."""
+        self._conn.execute(
+            "INSERT INTO legis_documents "
+            "(abbr, num, lang, title, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (abbr, num, lang) DO UPDATE SET "
+            "title=excluded.title, "
+            "last_seen_at=COALESCE(excluded.last_seen_at, "
+            "                       legis_documents.last_seen_at)",
+            (abbr, num, lang, title, last_seen_at),
+        )
+        self._conn.commit()
 
-    def claim_pending_legis(self):
-        raise NotImplementedError
+    def claim_pending_legis(
+        self, abbr: str | None = None,
+    ) -> LegisRecord | None:
+        if abbr:
+            row = self._conn.execute(
+                "SELECT abbr, num, lang, title FROM legis_documents "
+                "WHERE status='pending' AND abbr=? LIMIT 1",
+                (abbr,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT abbr, num, lang, title FROM legis_documents "
+                "WHERE status='pending' LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        self._conn.execute(
+            "UPDATE legis_documents SET status='in_progress' "
+            "WHERE abbr=? AND num=? AND lang=?",
+            (row[0], row[1], row[2]),
+        )
+        self._conn.commit()
+        return LegisRecord(
+            abbr=row[0], num=row[1], lang=row[2],
+            title=row[3], status="in_progress",
+        )
 
     def mark_legis_downloaded(
         self, abbr: str, num: str, lang: str,
         latest_vid: int, latest_version_date: str, formats: list[str],
     ) -> None:
-        raise NotImplementedError
+        self._conn.execute(
+            "UPDATE legis_documents SET status='downloaded', "
+            "formats=?, latest_vid=?, latest_version_date=?, error=NULL "
+            "WHERE abbr=? AND num=? AND lang=?",
+            (json.dumps(formats), latest_vid, latest_version_date,
+             abbr, num, lang),
+        )
+        self._conn.commit()
 
     def mark_legis_failed(
         self, abbr: str, num: str, lang: str, error: str,
     ) -> None:
-        raise NotImplementedError
+        self._conn.execute(
+            "UPDATE legis_documents SET status='failed', error=? "
+            "WHERE abbr=? AND num=? AND lang=?",
+            (error, abbr, num, lang),
+        )
+        self._conn.commit()
 
     def legis_stats(self) -> dict:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM legis_documents GROUP BY status"
+        ).fetchall()
+        counts = {r[0]: r[1] for r in rows}
+        return {
+            "total": sum(counts.values()),
+            "pending": counts.get("pending", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "downloaded": counts.get("downloaded", 0),
+            "failed": counts.get("failed", 0),
+        }
 
     def legis_stats_by_abbr(self) -> dict:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT abbr, status, COUNT(*) FROM legis_documents "
+            "GROUP BY abbr, status"
+        ).fetchall()
+        result: dict[str, dict[str, int]] = {}
+        for abbr, status, n in rows:
+            bucket = result.setdefault(abbr, {
+                "total": 0, "pending": 0, "in_progress": 0,
+                "downloaded": 0, "failed": 0,
+            })
+            bucket["total"] += n
+            bucket[status] = bucket.get(status, 0) + n
+        return result
 
     def close(self) -> None:
         self._conn.close()
