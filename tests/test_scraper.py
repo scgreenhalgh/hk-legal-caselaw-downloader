@@ -675,15 +675,83 @@ class TestBulkScraperDocFallbackMagicByteGuard:
         assert result.failed == 0
         assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.doc").exists()
 
-    def test_has_valid_doc_magic_rejects_rtf(self):
-        # Negative spec anchor — RTF (`{\rtf1...`, magic 0x7b5c7274) is not
-        # a Word format and must stay rejected even after the Word 6.0/95
-        # accept-list widening. Judiciary occasionally serves an RTF file
-        # at a `.doc` URL (6 such rows in the 2026-07-04 run); those are
-        # correctly failed rather than written as `.docx`.
-        from hklii_downloader.scraper import _has_valid_doc_magic
-        rtf_body = b"{\\rtf1\\ansi\\deff0 hello world}"
-        assert not _has_valid_doc_magic(rtf_body)
+    async def test_fetch_doc_accepts_rtf_and_writes_dot_rtf(self, tmp_path):
+        # Task #67 — RTF files served at `.doc` URLs are complete
+        # judgments (verified across HCMA001041_1997, HCMA001055_1997,
+        # HCMA000131_1989 — real coram/parties/reasoning). Judiciary chose
+        # RTF for some 1990s-early-2000s files. Accept them and write to
+        # `.rtf` so the extension matches the format (writing RTF bytes
+        # to `.docx` still poisons RAG at ingest time).
+        judgment_with_doc = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/legacy.doc",
+        }
+        rtf_body = b"{\\rtf1\\ansi\\ansicpg936\\uc2 hello judgment}"
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_with_doc,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=rtf_body,
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1, (
+            f"RTF served at .doc URL must be accepted; got {result}"
+        )
+        assert result.failed == 0
+        # Extension is magic-driven — RTF magic writes to `.rtf`, not `.doc`.
+        assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.rtf").exists(), (
+            "RTF body must write to `.rtf` extension"
+        )
+        assert not (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.doc").exists(), (
+            "RTF body must NOT be written to `.doc` — extension must match magic"
+        )
+
+    async def test_fetch_doc_magic_drives_extension_not_url(self, tmp_path):
+        # Regression guard for #67 — the extension-picker was previously
+        # URL-suffix-based (`.docx` if url ends `.docx` else `.doc`). Now
+        # it's magic-driven. Locks in that a docx URL returning OLE-Word
+        # bytes writes to `.doc` (magic wins), not `.docx` (URL says).
+        # Not a scenario Judiciary currently ships, but a real hardening
+        # against silent mislabelling.
+        judgment_with_docx_url = {
+            **SAMPLE_JUDGMENT_RESPONSE,
+            "content": "",
+            "doc": "https://legalref.judiciary.hk/doc/labeled.docx",
+        }
+        ole_bytes = b"\xd0\xcf\x11\xe0" + b"\x00" * 60  # legacy .doc magic
+
+        async def mock_get(url, **kw):
+            if "getjudgment" in url:
+                return httpx.Response(200, json=judgment_with_docx_url,
+                                      request=httpx.Request("GET", url))
+            if "legalref" in url:
+                return httpx.Response(200, content=ole_bytes,
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(404, request=httpx.Request("GET", url))
+
+        db = _make_db()
+        _seed_db(db, count=1)
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "json", "doc"}, _backoff_base=0.0,
+        )
+        result = await scraper.download_all()
+        assert result.downloaded == 1
+        # Magic (OLE) drives the extension → `.doc`, even though the URL
+        # said `.docx`.
+        assert (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.doc").exists()
+        assert not (tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.docx").exists()
 
 
 class TestRetryBackoffJitter:
