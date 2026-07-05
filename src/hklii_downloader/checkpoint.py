@@ -665,6 +665,27 @@ class CheckpointDB:
             "by_source_ext": by_ext,
         }
 
+    def upsert_hopt_document(
+        self, abbr, year, num, lang, title,
+        neutral=None, doc_date=None, last_seen_at=None,
+    ) -> None:
+        raise NotImplementedError
+
+    def claim_pending_hopt(self):
+        raise NotImplementedError
+
+    def mark_hopt_downloaded(self, abbr, year, num, lang, formats) -> None:
+        raise NotImplementedError
+
+    def mark_hopt_failed(self, abbr, year, num, lang, error) -> None:
+        raise NotImplementedError
+
+    def hopt_stats(self) -> dict:
+        raise NotImplementedError
+
+    def hopt_stats_by_abbr(self) -> dict:
+        raise NotImplementedError
+
     def upsert_legis_version(
         self, abbr: str, num: str, lang: str, vid: int,
         version_date: str, last_seen_at: int | None = None,
