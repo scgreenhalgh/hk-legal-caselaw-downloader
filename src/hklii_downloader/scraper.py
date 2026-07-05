@@ -39,7 +39,10 @@ _BODY_PREVIEW_LEN = 200
 # content_shape._looks_like_challenge_page (API branch, enrichment).
 _DOC_MAGIC_SIGNATURES = (
     b"PK\x03\x04",          # .docx / OOXML — ZIP archive
-    b"\xd0\xcf\x11\xe0",    # legacy .doc — OLE compound document
+    b"\xd0\xcf\x11\xe0",    # legacy .doc — OLE compound document (Word 97+)
+    b"\xdb\xa5\x2d\x00",    # pre-OLE Word 6.0 / Word for Windows 95 — Judiciary
+                            # serves these for many 1990s judgments (~11 rows
+                            # in the 2026-07-04 run before this widening).
 )
 
 
