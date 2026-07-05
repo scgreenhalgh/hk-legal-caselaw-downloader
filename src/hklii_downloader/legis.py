@@ -22,18 +22,29 @@ Stem: {abbr}_{num}_{lang}, e.g. `ord_1_en`. On disk:
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable
 from urllib.parse import urlencode
 
 import httpx
 
 from .atomic_write import atomic_write_text
 
+_log = logging.getLogger("hklii_downloader.legis")
 
 _BASE_URL = "https://www.hklii.hk"
+_DEFAULT_PAGE_SIZE = 500
+
+# Non-empty capTypes per the metadata probe (2026-07-05). The three
+# with real content — bacpg/bahkg/hktml/hkts/hktmc are HOPT and use
+# gethoptfiles, not getlegisfiles; those live in a follow-up.
+LEGIS_CAP_TYPES = ("ord", "reg", "instrument")
+LEGIS_LANGS = ("en", "tc")
 
 
 class LegisFetchError(RuntimeError):
@@ -183,3 +194,155 @@ async def fetch_legis_document(
         latest_vid=vid, latest_version_date=version_date,
         versions=versions, content=content,
     )
+
+
+async def enumerate_legis_pages(
+    get: Callable, cap_type: str, lang: str,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+) -> Iterable[LegisEntry]:
+    """Yield every LegisEntry for (cap_type, lang) by paging through
+    getlegisfiles until we've seen `totalfiles` entries."""
+    page = 1
+    seen = 0
+    total: int | None = None
+    while True:
+        url = getlegisfiles_url(
+            cap_type=cap_type, lang=lang, page=page,
+            items_per_page=page_size,
+        )
+        resp = await get(url)
+        if resp.status_code != 200:
+            raise LegisFetchError(
+                f"getlegisfiles HTTP {resp.status_code} "
+                f"for capType={cap_type} lang={lang} page={page}"
+            )
+        parsed = parse_files_response(resp.json())
+        if total is None:
+            total = parsed.total
+        for entry in parsed.entries:
+            yield entry
+            seen += 1
+        if not parsed.entries or seen >= total:
+            return
+        page += 1
+
+
+@dataclass
+class LegisRunResult:
+    downloaded: int
+    failed: int
+
+
+class LegisRunner:
+    """Enumerate + fetch + persist for one or more capType/lang scopes.
+
+    Enumeration phase upserts every discovered chapter into
+    legis_documents (status=pending). Fetch phase drains
+    claim_pending_legis() through N async workers, writing artifacts
+    to disk and flipping rows to downloaded/failed.
+    """
+
+    def __init__(
+        self,
+        get: Callable,
+        checkpoint,
+        output_dir: Path,
+        cap_types: tuple[str, ...] = LEGIS_CAP_TYPES,
+        langs: tuple[str, ...] = LEGIS_LANGS,
+        workers: int = 4,
+        limit: int | None = None,
+    ) -> None:
+        self._get = get
+        self._checkpoint = checkpoint
+        self._output_dir = Path(output_dir)
+        self._cap_types = cap_types
+        self._langs = langs
+        self._workers = max(1, workers)
+        self._limit = limit
+
+    async def enumerate_all(self) -> int:
+        """Upsert every discovered chapter into legis_documents. Returns
+        the number of rows upserted this pass."""
+        upserted = 0
+        now = int(time.time())
+        for cap_type in self._cap_types:
+            for lang in self._langs:
+                _log.info(
+                    "enumerating legis capType=%s lang=%s", cap_type, lang,
+                )
+                async for entry in enumerate_legis_pages(
+                    get=self._get, cap_type=cap_type, lang=lang,
+                ):
+                    self._checkpoint.upsert_legis_document(
+                        abbr=cap_type, num=entry.num, lang=lang,
+                        title=entry.title, last_seen_at=now,
+                    )
+                    upserted += 1
+        return upserted
+
+    async def fetch_pending(
+        self,
+        on_progress: Callable[[LegisRunResult], None] | None = None,
+    ) -> LegisRunResult:
+        result = LegisRunResult(downloaded=0, failed=0)
+        counter_lock = asyncio.Lock()
+        remaining = {"n": self._limit if self._limit is not None else -1}
+
+        async def worker() -> None:
+            while True:
+                async with counter_lock:
+                    if remaining["n"] == 0:
+                        return
+                    rec = self._checkpoint.claim_pending_legis()
+                    if rec is None:
+                        return
+                    if remaining["n"] > 0:
+                        remaining["n"] -= 1
+
+                try:
+                    doc = await fetch_legis_document(
+                        get=self._get,
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                    )
+                    formats = save_legis_local(
+                        output_dir=self._output_dir,
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                        versions=doc.versions, content=doc.content,
+                    )
+                    self._checkpoint.mark_legis_downloaded(
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                        latest_vid=doc.latest_vid,
+                        latest_version_date=doc.latest_version_date,
+                        formats=formats,
+                    )
+                    async with counter_lock:
+                        result.downloaded += 1
+                except LegisFetchError as e:
+                    _log.warning(
+                        "legis fetch failed for %s cap %s (%s): %s",
+                        rec.abbr, rec.num, rec.lang, e,
+                    )
+                    self._checkpoint.mark_legis_failed(
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                        error=str(e),
+                    )
+                    async with counter_lock:
+                        result.failed += 1
+                except (httpx.RequestError, OSError) as e:
+                    _log.warning(
+                        "legis transport failure for %s cap %s (%s): "
+                        "%s: %s", rec.abbr, rec.num, rec.lang,
+                        type(e).__name__, e,
+                    )
+                    self._checkpoint.mark_legis_failed(
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                        error=f"{type(e).__name__}: {e}",
+                    )
+                    async with counter_lock:
+                        result.failed += 1
+
+                if on_progress is not None:
+                    on_progress(result)
+
+        await asyncio.gather(*[worker() for _ in range(self._workers)])
+        return result
