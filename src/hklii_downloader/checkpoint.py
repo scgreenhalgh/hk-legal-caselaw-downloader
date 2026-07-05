@@ -480,6 +480,28 @@ class CheckpointDB:
             result[kind] = counts
         return result
 
+    def mark_html_generated(
+        self, court: str, year: int, number: int, source_ext: str,
+    ) -> None:
+        """Stub — implemented in the feat pair."""
+        raise NotImplementedError("mark_html_generated pending impl")
+
+    def mark_html_generation_failed(
+        self, court: str, year: int, number: int, error: str,
+    ) -> None:
+        """Stub — implemented in the feat pair."""
+        raise NotImplementedError("mark_html_generation_failed pending impl")
+
+    def pending_html_generation(
+        self, limit: int | None = None, include_failed: bool = False,
+    ) -> list[CaseRecord]:
+        """Stub — implemented in the feat pair."""
+        raise NotImplementedError("pending_html_generation pending impl")
+
+    def html_generation_stats(self) -> dict:
+        """Stub — implemented in the feat pair."""
+        raise NotImplementedError("html_generation_stats pending impl")
+
     def close(self) -> None:
         self._conn.close()
         if self._lock_fd is not None:
