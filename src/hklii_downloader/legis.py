@@ -349,10 +349,26 @@ class LegisRunner:
 
 
 class LegisHistoryRunner:
-    """Stub — full impl lands in the paired feat commit (task #87)."""
+    """Historical-version backfill for legislation.
+
+    Two phases:
+      1. enumerate_pending() reads each downloaded row's on-disk
+         {stem}.versions.json, upserts every non-latest vid into
+         legis_versions. Idempotent — skips vids whose
+         {stem}.v{vid}.content.json already exists on disk (prior
+         partial run).
+      2. fetch_pending() drains claim_pending_legis_version() through
+         N async workers, calling getcapversiontoc?id=<vid>, writing
+         the JSON to disk, and marking downloaded/failed.
+
+    Reuses the same on-wire error-classification pattern as
+    LegisRunner. Errors are per-version — one 500 doesn't taint
+    the rest of a chapter's history.
+    """
 
     def __init__(
-        self, get, checkpoint, output_dir,
+        self, get: Callable | None, checkpoint,
+        output_dir: Path,
         workers: int = 4, limit: int | None = None,
     ) -> None:
         self._get = get
@@ -362,9 +378,121 @@ class LegisHistoryRunner:
         self._limit = limit
 
     def enumerate_pending(self) -> int:
-        raise NotImplementedError
+        """Walk every downloaded row and upsert its non-latest vids
+        into legis_versions. Returns number of rows upserted this pass.
+        Skips vids whose sidecar already exists on disk."""
+        now = int(time.time())
+        rows = self._checkpoint._conn.execute(
+            "SELECT abbr, num, lang, latest_vid FROM legis_documents "
+            "WHERE status='downloaded'"
+        ).fetchall()
+
+        upserted = 0
+        for abbr, num, lang, latest_vid in rows:
+            base = self._output_dir / "legis" / abbr / num
+            stem = f"{abbr}_{num}_{lang}"
+            versions_path = base / f"{stem}.versions.json"
+            if not versions_path.exists():
+                continue
+            try:
+                versions = json.loads(versions_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            for entry in versions:
+                vid = int(entry["id"])
+                if vid == latest_vid:
+                    continue
+                sidecar = base / f"{stem}.v{vid}.content.json"
+                if sidecar.exists():
+                    continue
+                self._checkpoint.upsert_legis_version(
+                    abbr=abbr, num=num, lang=lang, vid=vid,
+                    version_date=entry.get("date", ""),
+                    last_seen_at=now,
+                )
+                upserted += 1
+        return upserted
 
     async def fetch_pending(
-        self, on_progress=None,
+        self,
+        on_progress: Callable[[LegisRunResult], None] | None = None,
     ) -> LegisRunResult:
-        raise NotImplementedError
+        result = LegisRunResult(downloaded=0, failed=0)
+        counter_lock = asyncio.Lock()
+        remaining = {"n": self._limit if self._limit is not None else -1}
+
+        async def worker() -> None:
+            while True:
+                async with counter_lock:
+                    if remaining["n"] == 0:
+                        return
+                    rec = self._checkpoint.claim_pending_legis_version()
+                    if rec is None:
+                        return
+                    if remaining["n"] > 0:
+                        remaining["n"] -= 1
+
+                try:
+                    await self._fetch_one(rec)
+                    self._checkpoint.mark_legis_version_downloaded(
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                        vid=rec.vid,
+                    )
+                    async with counter_lock:
+                        result.downloaded += 1
+                except LegisFetchError as e:
+                    _log.warning(
+                        "legis-history fetch failed for %s cap %s (%s) "
+                        "vid=%s: %s",
+                        rec.abbr, rec.num, rec.lang, rec.vid, e,
+                    )
+                    self._checkpoint.mark_legis_version_failed(
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                        vid=rec.vid, error=str(e),
+                    )
+                    async with counter_lock:
+                        result.failed += 1
+                except (httpx.RequestError, OSError) as e:
+                    _log.warning(
+                        "legis-history transport failure %s cap %s "
+                        "(%s) vid=%s: %s: %s",
+                        rec.abbr, rec.num, rec.lang, rec.vid,
+                        type(e).__name__, e,
+                    )
+                    self._checkpoint.mark_legis_version_failed(
+                        abbr=rec.abbr, num=rec.num, lang=rec.lang,
+                        vid=rec.vid,
+                        error=f"{type(e).__name__}: {e}",
+                    )
+                    async with counter_lock:
+                        result.failed += 1
+
+                if on_progress is not None:
+                    on_progress(result)
+
+        await asyncio.gather(*[worker() for _ in range(self._workers)])
+        return result
+
+    async def _fetch_one(self, rec) -> None:
+        url = getcapversiontoc_url(vid=rec.vid)
+        resp = await self._get(url)
+        if resp.status_code != 200:
+            raise LegisFetchError(
+                f"getcapversiontoc HTTP {resp.status_code} "
+                f"for {rec.abbr} cap {rec.num} ({rec.lang}) vid={rec.vid}"
+            )
+        try:
+            content = resp.json()
+        except Exception as e:
+            raise LegisFetchError(
+                f"getcapversiontoc non-JSON body for {rec.abbr} cap "
+                f"{rec.num} ({rec.lang}) vid={rec.vid}: "
+                f"{type(e).__name__}: {e}"
+            ) from e
+        base = self._output_dir / "legis" / rec.abbr / rec.num
+        base.mkdir(parents=True, exist_ok=True)
+        stem = f"{rec.abbr}_{rec.num}_{rec.lang}"
+        atomic_write_text(
+            base / f"{stem}.v{rec.vid}.content.json",
+            json.dumps(content, ensure_ascii=False, indent=2),
+        )
