@@ -249,6 +249,16 @@ class ProxyPool:
 
         if direct:
             self._direct_client = self._make_client(None)
+            # Task #61 / W5: post-W2's default_headers=False regime,
+            # curl_cffi no longer supplies UA/Accept-*/sec-ch-ua-*, so
+            # a direct request without HeaderRotator ships bare
+            # {Referer, Host, accept-encoding} — a much stronger bot
+            # signal than the proxy branch. Seed a dedicated rotator
+            # instance so direct requests match the shape proxy
+            # requests already carry.
+            self._direct_headers = HeaderRotator(
+                rng=random.Random("direct-headers"),
+            )
 
     def _emit(self, kind: str, **fields) -> None:
         if self._events is not None:
@@ -363,8 +373,12 @@ class ProxyPool:
             raise RuntimeError("Must call preflight() before making requests")
 
         if self.direct:
-            direct_headers = dict(kwargs.pop("headers", None) or {})
-            direct_headers.setdefault("Referer", _referer_for(url))
+            # Start from the rotator's URL-aware baseline (UA, Accept-*,
+            # sec-ch-ua-*, sec-fetch-*), stamp URL-derived Referer, and
+            # let caller kwargs["headers"] override any of the above.
+            direct_headers = self._direct_headers.generate(url)
+            direct_headers["Referer"] = self._direct_headers.referer_for(url)
+            direct_headers.update(kwargs.pop("headers", None) or {})
             t0 = _monotonic()
             resp = await self._direct_client.get(url, headers=direct_headers, **kwargs)
             self._emit_request_event(resp, "direct", url, t0)
