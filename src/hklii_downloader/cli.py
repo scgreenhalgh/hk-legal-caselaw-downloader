@@ -300,6 +300,157 @@ def verify(output: Path) -> None:
 @click.option(
     "-o", "--output",
     type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory containing existing downloads + .checkpoint.db.",
+)
+@click.option(
+    "--sample",
+    type=int,
+    default=None,
+    help="Validate a random sample of N downloaded rows (default: all).",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=None,
+    help="RNG seed for reproducible --sample selection.",
+)
+@click.option(
+    "--checks",
+    "checks_str",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated subset of checks to run — "
+        "presence,magic,challenge_html,stem_coords,neutral_in_body,"
+        "enrichment,orphans,html_pending. Default: all."
+    ),
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit JSON to stdout. Default when stdout is not a TTY.",
+)
+@click.option(
+    "--text",
+    "as_text",
+    is_flag=True,
+    default=False,
+    help="Emit human-readable text to stdout. Default when stdout is a TTY.",
+)
+@click.option(
+    "--report",
+    "report_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the JSON report to FILE (regardless of --json/--text).",
+)
+@click.option(
+    "--fix",
+    is_flag=True,
+    default=False,
+    help="Apply remediations for fatal check-1/2/3 discrepancies.",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --fix.",
+)
+def validate(
+    output: Path,
+    sample: int | None,
+    seed: int | None,
+    checks_str: str | None,
+    as_json: bool,
+    as_text: bool,
+    report_path: Path | None,
+    fix: bool,
+    yes: bool,
+) -> None:
+    """Audit DB ↔ on-disk agreement across eight reconciliation checks.
+
+    Read-only by default; --fix applies remediations for fatal check-1
+    (presence), check-2 (magic), and check-3 (challenge_html) — see
+    scratchpad/VALIDATOR_SPEC.md §5 for semantics.
+
+    \b
+    Exit codes:
+      0  clean
+      1  warn-tier discrepancies only (orphans, missing citation)
+      2  any fatal discrepancy
+      3  cannot open the checkpoint DB / IO error
+    """
+    import sys
+
+    if as_json and as_text:
+        raise click.UsageError("--json and --text are mutually exclusive.")
+
+    from .checkpoint import CheckpointDB
+    from .validate import Validator, render_text
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        click.echo(f"No checkpoint DB at {db_path}.", err=True)
+        sys.exit(3)
+
+    try:
+        db = CheckpointDB(str(db_path))
+    except OSError as e:
+        click.echo(f"Failed to open {db_path}: {e}", err=True)
+        sys.exit(3)
+
+    try:
+        check_list = None
+        if checks_str:
+            check_list = [c.strip() for c in checks_str.split(",") if c.strip()]
+
+        try:
+            validator = Validator(
+                db, output,
+                checks=check_list, sample=sample, seed=seed,
+            )
+        except ValueError as e:
+            raise click.UsageError(str(e))
+
+        report = validator.run()
+
+        if fix and report.counts["discrepancies_by_severity"]["fatal"] > 0:
+            fatal_n = report.counts["discrepancies_by_severity"]["fatal"]
+            if not yes:
+                click.confirm(
+                    f"Apply --fix remediations for {fatal_n} fatal "
+                    "discrepancy(ies)?",
+                    abort=True,
+                )
+            applied = validator.apply_fixes(report)
+            click.echo(f"Applied {applied} remediation(s).", err=True)
+            report = validator.run()
+
+        if report_path:
+            report_path.write_text(report.to_json())
+
+        stdout = click.get_text_stream("stdout")
+        emit_json = as_json or (not as_text and not stdout.isatty())
+        click.echo(report.to_json() if emit_json else render_text(report))
+
+        counts = report.counts["discrepancies_by_severity"]
+        if counts["fatal"] > 0:
+            sys.exit(2)
+        if counts["warn"] > 0:
+            sys.exit(1)
+        sys.exit(0)
+    finally:
+        db.close()
+
+
+@main.command()
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
     required=True,
     help="Scrape output directory (containing .checkpoint.db).",
 )

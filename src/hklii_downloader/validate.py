@@ -390,6 +390,14 @@ class Validator:
             rows = rows[: self._sample]
         return rows
 
+    def apply_fixes(self, report: ValidationReport) -> int:
+        """Remediation stub. Real implementation lands in the --fix pair
+        (task #72). Kept here so the CLI can import cleanly and the
+        --fix flag exists in --help output; call raises rather than
+        silently no-op-ing so early callers don't miss the incomplete
+        state."""
+        raise NotImplementedError("--fix remediation not implemented yet")
+
     def _walk_output(self) -> Iterable[Path]:
         """Yield judgment/sidecar files under recognised court/year dirs.
 
@@ -410,3 +418,51 @@ class Validator:
                 for f in year_dir.iterdir():
                     if f.is_file():
                         yield f
+
+
+def render_text(report: ValidationReport, *, max_per_check: int = 20) -> str:
+    """Human-readable rendering — section per firing check, ellipsis tail
+    over max_per_check items, then a totals table. Section order matches
+    CHECK_KEYS (spec §2's evaluation order)."""
+    lines: list[str] = []
+    counts = report.counts
+    lines.append(f"Validated {report.output_dir} @ {report.generated_at}")
+    lines.append(
+        f"Rows examined: {counts['rows_examined']:>7} "
+        f"| Files examined: {counts['files_examined']:>7}"
+    )
+    lines.append(
+        f"Sampled: {counts['sampled']} "
+        f"| Checks: {','.join(counts['checks_run'])}"
+    )
+    lines.append("")
+
+    by_check: dict[str, list[Discrepancy]] = {}
+    for d in report.discrepancies:
+        by_check.setdefault(d.check, []).append(d)
+
+    for check in CHECK_KEYS:
+        items = by_check.get(check, [])
+        if not items:
+            continue
+        sev = items[0].severity
+        lines.append(f"=== {check} [{sev}] : {len(items)} ===")
+        for d in items[:max_per_check]:
+            loc = ""
+            if d.court is not None:
+                loc = f"{d.court}/{d.year}/{d.number} "
+            path = f" ({d.path})" if d.path else ""
+            lines.append(f"  {loc}{d.detail}{path}")
+        if len(items) > max_per_check:
+            lines.append(f"  ... {len(items) - max_per_check} more")
+        lines.append("")
+
+    sev = counts["discrepancies_by_severity"]
+    lines.append("=== summary ===")
+    lines.append(f"  fatal: {sev.get('fatal', 0)}")
+    lines.append(f"  warn:  {sev.get('warn', 0)}")
+    lines.append(f"  info:  {sev.get('info', 0)}")
+    hp = counts.get("html_pending_at_hklii")
+    if hp is not None:
+        lines.append(f"  html_pending_at_hklii backlog: {hp}")
+    return "\n".join(lines)
