@@ -2794,13 +2794,35 @@ def _run_update_generate_html(runner, step) -> None:
 
 
 async def _run_coverage_canary(runner, step, no_events: bool) -> None:
-    """13×2 `getmetacase` probe to detect silent drift, then AUTO-ESCALATE.
+    """13-bucket `getmetacase` probe to detect silent drift, then AUTO-ESCALATE.
+
+    Canaries EN buckets only (not EN × TC). Bilingual cases are collapsed
+    to lang='en' by CheckpointDB.upsert_case's UPSERT rule, so a
+    per-lang tc count from HKLII would exceed the local
+    `WHERE lang='tc'` count by N_bilingual on every court that has any
+    bilingual case — 3 permanent false-positive escalations per run on
+    the current corpus. TC-only databases (hksct/tc, hkts/tc) lose
+    canary coverage in exchange; full_reconcile catches them quarterly.
 
     For every bucket whose live vs local row-count divergence is
     ≥ threshold, run a targeted `_run_scrape` for THAT (court, lang)
     inline (no date window → full backfill of anything missing).
     Capped at max_escalations to bound wire cost on a catastrophic
     divergence day. Only-DB reads if nothing diverged.
+
+    Failure honesty:
+    - coverage_canary itself raises CoverageCanaryBlindError if every
+      probe failed; the wrapper lets it propagate so the dispatch marks
+      the step FAIL. Silent-continue would print 'all N within
+      tolerance' on a blind sweep.
+    - Escalation failures are counted; if any escalation raised, the
+      wrapper raises RuntimeError so the dispatch marks the step FAIL
+      per the module's non-zero-exit contract.
+
+    Pool lifecycle:
+    - `pool = None` before the try; the outer finally closes it
+      unconditionally so a raise from `pool.preflight()` doesn't leak
+      the 20 curl_cffi clients created in ProxyPool.__init__.
     """
     from .checkpoint import CheckpointDB
     from .proxy_pool import ProxyPool
@@ -2810,7 +2832,10 @@ async def _run_coverage_canary(runner, step, no_events: bool) -> None:
     if not db_path.exists():
         click.echo("  coverage_canary: no checkpoint db — skipping")
         return
+
     db = CheckpointDB(str(db_path))
+    pool = None
+    divergent: list[dict] = []
     try:
         if runner.direct:
             pool = ProxyPool(proxy_urls=[], direct=True)
@@ -2818,19 +2843,17 @@ async def _run_coverage_canary(runner, step, no_events: bool) -> None:
             pool = ProxyPool(proxy_urls=runner.proxies)
             await pool.preflight()
 
-        try:
-            divergent = await coverage_canary(
-                get=pool.get,
-                checkpoint=db,
-                courts=ALL_COURTS,
-                langs=list(ALL_LANGS),
-                threshold=step.kwargs.get("threshold", 5),
-                max_escalations=step.kwargs.get("max_escalations", 3),
-            )
-        finally:
-            await pool.close()
+        canary_langs = ["en"]  # See docstring — bilingual UPSERT rule.
+        divergent = await coverage_canary(
+            get=pool.get,
+            checkpoint=db,
+            courts=ALL_COURTS,
+            langs=canary_langs,
+            threshold=step.kwargs.get("threshold", 5),
+            max_escalations=step.kwargs.get("max_escalations", 3),
+        )
 
-        total_buckets = len(ALL_COURTS) * len(ALL_LANGS)
+        total_buckets = len(ALL_COURTS) * len(canary_langs)
         if not divergent:
             click.echo(
                 f"  coverage_canary: all {total_buckets} buckets within "
@@ -2850,17 +2873,16 @@ async def _run_coverage_canary(runner, step, no_events: bool) -> None:
                 f"delta={sign}{b['diff']}"
             )
     finally:
-        # Close the DB before handing off to _run_scrape — the target
-        # command opens its own CheckpointDB and takes the shared advisory
-        # lock (once G lands); overlapping handles risk contention.
+        # Close pool AND db regardless of what raised — a preflight
+        # failure previously leaked all 20 curl_cffi clients.
+        if pool is not None:
+            await pool.close()
         db.close()
-
-    if not divergent:
-        return
 
     # Escalation phase — one targeted scrape per divergent bucket.
     # Each runs full-corpus for its single (court, lang) so backdated
     # rows that the 30-day narrow window missed get picked up.
+    escalation_failures = 0
     for b in divergent:
         click.echo(
             f"  ↳ escalating {b['court']}/{b['lang']} → full scrape"
@@ -2879,10 +2901,20 @@ async def _run_coverage_canary(runner, step, no_events: bool) -> None:
                 no_events=no_events,
             ))
         except Exception as exc:  # noqa: BLE001
+            escalation_failures += 1
             click.secho(
                 f"    escalation for {b['court']}/{b['lang']} failed: {exc}",
                 fg="red", err=True,
             )
+
+    if escalation_failures:
+        # Contract per _dispatch_update_plan docstring: non-zero failures
+        # translate to non-zero exit. Silent-swallow would report the
+        # step as ok and mask the operator's need to rerun.
+        raise RuntimeError(
+            f"{escalation_failures} of {len(divergent)} coverage_canary "
+            "escalation(s) failed — see stderr above"
+        )
 
 
 def _reset_relatedcap_fetches_via_checkpoint(output: Path) -> None:

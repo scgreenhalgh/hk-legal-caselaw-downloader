@@ -490,6 +490,17 @@ class UpdateRunner:
 
 # ---------- coverage canary ---------------------------------------------
 
+
+class CoverageCanaryBlindError(Exception):
+    """coverage_canary probed at least one bucket but zero returned a
+    usable live count. Distinct from 'no divergence found' — the
+    tripwire ran blind (proxy pool exhausted, origin 5xx storm, DNS
+    glitch, or every bucket happened to fail simultaneously) and its
+    empty return would otherwise be indistinguishable from a healthy
+    green run. Callers must escalate to step-failure so operators grepping
+    for FAIL see the true state."""
+
+
 async def coverage_canary(
     get: Callable,
     checkpoint,
@@ -506,17 +517,27 @@ async def coverage_canary(
     `getmetacase` returns just {count, timestamp} — leaner than
     `getcasefiles` (no judgments array), same info for canary purposes.
 
-    Error-tolerant: a 5xx / non-JSON response for a single bucket (e.g.
-    ukpc/tc's persistent 500) is treated as "unknown live" and skipped
-    rather than aborting the whole sweep.
+    Error-tolerant PER BUCKET: a 5xx / non-JSON response for a single
+    bucket (e.g. ukpc/tc's persistent 500) is treated as "unknown live"
+    and skipped rather than aborting the whole sweep.
+
+    Error-INTOLERANT when EVERY bucket fails: if zero buckets returned
+    a usable live count (and we did attempt to probe at least one),
+    raise CoverageCanaryBlindError. Silent-continue on total failure
+    was the pre-fix silent-green bug — the wrapper would return [] and
+    print 'all N buckets within tolerance' even though nothing was
+    actually observed.
     """
     from urllib.parse import urlencode
 
     _BASE = "https://www.hklii.hk"
     divergent: list[dict] = []
+    probes_ok = 0
+    probes_total = 0
 
     for court in courts:
         for lang in langs:
+            probes_total += 1
             params = urlencode({"caseDb": court, "lang": lang})
             url = f"{_BASE}/api/getmetacase?{params}"
             try:
@@ -528,6 +549,7 @@ async def coverage_canary(
                 # (or JSON decode error, or hang) mustn't tank the canary.
                 continue
 
+            probes_ok += 1
             local = checkpoint._conn.execute(
                 "SELECT COUNT(*) FROM cases "
                 "WHERE court=? AND lang=? AND status='downloaded'",
@@ -540,6 +562,12 @@ async def coverage_canary(
                     "court": court, "lang": lang,
                     "live": live, "local": local, "diff": diff,
                 })
+
+    if probes_total > 0 and probes_ok == 0:
+        raise CoverageCanaryBlindError(
+            f"coverage_canary probed 0/{probes_total} buckets successfully — "
+            "pool exhausted or origin unreachable; treat as step failure"
+        )
 
     # Rank by absolute divergence, cap for escalation.
     divergent.sort(key=lambda b: abs(b["diff"]), reverse=True)
