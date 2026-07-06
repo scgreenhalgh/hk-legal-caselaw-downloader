@@ -454,10 +454,16 @@ def validate(
         if checks_str:
             check_list = [c.strip() for c in checks_str.split(",") if c.strip()]
 
+        # 0 → full corpus (matches the update dispatcher's semantic
+        # convention). Pre-fix, direct `hklii validate --sample 0`
+        # examined ZERO rows while the update path treated the same
+        # value as unlimited. Aligning at the CLI edge preserves
+        # Validator's `sample=None` "no cap" contract.
+        sample_arg = None if sample == 0 else sample
         try:
             validator = Validator(
                 db, output,
-                checks=check_list, sample=sample, seed=seed,
+                checks=check_list, sample=sample_arg, seed=seed,
             )
         except ValueError as e:
             raise click.UsageError(str(e))
@@ -1789,8 +1795,10 @@ async def _run_scrape_relatedcaps(
         )
         click.echo(
             f"relatedcap_fetches — total={stats['total']} "
-            f"pending={stats['pending']} ok={stats['ok']} "
-            f"error={stats['error']}. target: {target}."
+            f"pending={stats['pending']} "
+            f"in_progress={stats.get('in_progress', 0)} "
+            f"ok={stats['ok']} error={stats['error']}. "
+            f"target: {target}."
         )
         if target == 0:
             click.echo("Nothing to fetch.")
@@ -1982,8 +1990,10 @@ async def _run_scrape_noteup(
         )
         click.echo(
             f"noteup_fetches — total={stats['total']}, "
-            f"pending={stats['pending']}, ok={stats['ok']}, "
-            f"error={stats['error']}. target this pass: {target}."
+            f"pending={stats['pending']}, "
+            f"in_progress={stats.get('in_progress', 0)}, "
+            f"ok={stats['ok']}, error={stats['error']}. "
+            f"target this pass: {target}."
         )
         if target == 0:
             click.echo("Nothing to fetch.")
