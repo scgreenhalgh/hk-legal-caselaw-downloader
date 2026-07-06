@@ -219,20 +219,32 @@ class MonitorRunner:
 
     @staticmethod
     def _proxy_hotspots(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Proxies whose in-window failed count sits >3σ above the pool mean —
-        the individual-IP-ban signal. The pool is every proxy that served a
-        request in the window (a clean proxy counts as 0 failures), so one IP
-        burning while its peers stay healthy stands out."""
+        """Proxies whose in-window failed+challenge count sits >3σ above
+        the pool mean — the individual-IP-ban signal.
+
+        Counts both `request_failed` (5xx/timeout etc.) AND
+        `challenge_detected` (200 with a WAF interstitial). The
+        challenge-page case is the exact 'WAF flags a specific IP with
+        a 200 challenge page' pattern this analysis exists to catch;
+        omitting it silently suppressed the loudest hotspot signal
+        (memory / doc:review-patterns L2).
+
+        Pool is every proxy that served a request in the window (a
+        clean proxy counts as 0 failures), so one IP burning while
+        its peers stay healthy stands out.
+        """
         pool: dict[str, int] = {}
         for row in rows:
             kind = row.get("kind")
-            if kind not in ("request_success", "request_failed"):
+            if kind not in (
+                "request_success", "request_failed", "challenge_detected",
+            ):
                 continue
             proxy = row.get("proxy_url")
             if proxy is None:
                 continue
             pool.setdefault(proxy, 0)
-            if kind == "request_failed":
+            if kind in ("request_failed", "challenge_detected"):
                 pool[proxy] += 1
 
         if len(pool) < 2:

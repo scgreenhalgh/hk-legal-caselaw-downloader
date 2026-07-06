@@ -1696,6 +1696,17 @@ async def _run_backfill_legis_history(
     default=False,
     help="Skip structured event logging.",
 )
+@click.option(
+    "--fresh-diff",
+    is_flag=True,
+    default=False,
+    help=(
+        "Reset every relatedcap_fetches row to pending before the "
+        "sweep so the scraper re-fetches every combo. Matches the "
+        "`hklii update --profile quarterly` semantic. Default resumes "
+        "from any prior pending/error rows only."
+    ),
+)
 def scrape_relatedcaps(
     output: Path,
     proxies: tuple[str, ...],
@@ -1706,6 +1717,7 @@ def scrape_relatedcaps(
     limit: int | None,
     yes: bool,
     no_events: bool,
+    fresh_diff: bool,
 ) -> None:
     """Scrape HKLII getrelatedcaps for the ord → reg cross-reference graph.
 
@@ -1713,10 +1725,16 @@ def scrape_relatedcaps(
     at enumeration — HKLII returns 500 on them because num_int can't
     parse letter suffixes.
 
+    Default resume behaviour: only rows currently at status='pending' or
+    'error' are re-fetched. Pass --fresh-diff to reset every combo back
+    to pending first — mirrors the update dispatcher's
+    scrape_relatedcaps semantic (see cli.py:_dispatch_update_plan).
+
     \b
     Examples:
       hklii scrape-relatedcaps --proxy http://127.0.0.1:8888
       hklii scrape-relatedcaps --cap-range 1-50 --direct --yes
+      hklii scrape-relatedcaps --fresh-diff -p ...  # quarterly refresh
     """
     if not proxies and not direct:
         raise click.UsageError("Must specify --proxy or --direct.")
@@ -1782,6 +1800,12 @@ async def _run_scrape_relatedcaps(
             cap_range=cap_range, abbrs=abbrs, langs=langs,
             workers=workers, limit=limit,
         )
+        if fresh_diff:
+            n_reset = db.reset_relatedcap_fetches()
+            click.echo(
+                f"Reset {n_reset} relatedcap_fetches row(s) to pending "
+                "(--fresh-diff)."
+            )
         click.echo(
             f"Enumerating cap_range={cap_range} "
             f"abbrs={list(abbrs)} langs={list(langs)}..."
