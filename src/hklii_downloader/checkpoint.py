@@ -332,13 +332,32 @@ class CheckpointDB:
             row[1]
             for row in self._conn.execute("PRAGMA table_info(enum_runs)").fetchall()
         }
+        added_columns = False
         if "min_date_text" not in existing:
             self._conn.execute(
                 "ALTER TABLE enum_runs ADD COLUMN min_date_text TEXT"
             )
+            added_columns = True
         if "max_date_text" not in existing:
             self._conn.execute(
                 "ALTER TABLE enum_runs ADD COLUMN max_date_text TEXT"
+            )
+            added_columns = True
+        if added_columns:
+            # Any pre-existing row was stamped by the pre-fix
+            # start_enum_run(courts, langs) which recorded no window
+            # info — its provenance (narrow vs full-corpus) is
+            # unrecoverable, and the ALTER left both new columns NULL.
+            # latest_completed_enum_run treats NULL windows as
+            # full-corpus, so leaving these rows completed would let
+            # orphan_mark fall back to a possibly-narrow legacy row
+            # and mass-orphan every out-of-window case.
+            # Nuke completed_at → users must run one fresh
+            # full_reconcile before orphan_mark is safe again. Small
+            # cost for silent-damage safety.
+            self._conn.execute(
+                "UPDATE enum_runs SET completed_at = NULL "
+                "WHERE completed_at IS NOT NULL"
             )
 
     def upsert_case(
