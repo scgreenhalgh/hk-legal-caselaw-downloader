@@ -724,6 +724,25 @@ class CheckpointDB:
             "by_source_ext": by_ext,
         }
 
+    def upsert_relatedcap_fetch(self, cap_number, abbr, lang) -> None:
+        raise NotImplementedError
+
+    def mark_relatedcap_ok(self, cap_number, abbr, lang, edge_count,
+                             fetched_at) -> None:
+        raise NotImplementedError
+
+    def mark_relatedcap_failed(self, cap_number, abbr, lang, error) -> None:
+        raise NotImplementedError
+
+    def claim_pending_relatedcap(self):
+        raise NotImplementedError
+
+    def relatedcap_stats(self) -> dict:
+        raise NotImplementedError
+
+    def insert_ord_reg_edges(self, edges, first_seen) -> None:
+        raise NotImplementedError
+
     def upsert_noteup_fetch(
         self, court: str, year: int, number: int,
     ) -> None:
