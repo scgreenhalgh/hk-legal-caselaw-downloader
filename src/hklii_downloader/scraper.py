@@ -188,6 +188,7 @@ class BulkScraper:
             min_date_text=self._min_date_text,
             max_date_text=self._max_date_text,
         )
+        buckets_enumerated = 0
         for court in courts:
             for lang in langs:
                 if self._enum_max_age_hours > 0:
@@ -231,8 +232,14 @@ class BulkScraper:
                         lang=lang, last_seen_at=run_ts,
                     )
                     seen.add((entry.court, entry.year, entry.number))
-        # All (court, lang) pairs succeeded → stamp completion.
-        self._checkpoint.complete_enum_run(generation_id)
+                buckets_enumerated += 1
+        # Only stamp completion if we actually enumerated something.
+        # If every bucket was skipped by the enum_max_age cache, this
+        # was not a full-corpus sweep — leaving completed_at=NULL
+        # prevents orphan_mark from consuming the row as authoritative
+        # and mass-orphaning every out-of-cache downloaded row.
+        if buckets_enumerated > 0:
+            self._checkpoint.complete_enum_run(generation_id)
         return len(seen)
 
     def _get_path_label(self) -> str:
