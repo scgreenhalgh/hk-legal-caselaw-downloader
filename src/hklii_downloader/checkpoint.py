@@ -460,6 +460,9 @@ class CheckpointDB:
 
         `max_age_days` bounds the queue by CASE DATE (not by stamp — the
         stamp bumps forward on every re-poll). None or 0 = unlimited.
+        `limit` caps the returned row count. None or 0 = unlimited
+        (aligned with max_age_days so 'no cap' carries through
+        consistently across both parameters).
         `_today_iso` is a test hook; production callers omit it and the
         method reads today's date in Asia/Hong_Kong.
         """
@@ -490,7 +493,11 @@ class CheckpointDB:
             f"FROM cases WHERE {' AND '.join(where)} "
             "ORDER BY html_pending_at_hklii ASC"
         )
-        if limit is not None:
+        # Align `limit=0` with `max_age_days=0` — both mean 'no cap'.
+        # Pre-fix, `LIMIT 0` returned zero rows while `max_age_days=0`
+        # returned the full queue. A caller carrying "no cap" through
+        # both parameters would accidentally suppress every row.
+        if limit is not None and limit > 0:
             q += f" LIMIT {int(limit)}"
         rows = self._conn.execute(q, params).fetchall()
         return [

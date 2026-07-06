@@ -149,14 +149,14 @@ class RelatedCapsRunner:
 
     def enumerate_pending(self) -> int:
         """Upsert one relatedcap_fetches row per (cap, abbr, lang) in the
-        configured product. Skips alpha-suffix cap numbers because the
-        API returns 500 on them."""
+        configured product. `cap` iterates `range(lo, hi + 1)` — pure
+        ints, so the historical alpha-suffix skip (32A, 622J) is
+        unreachable and has been removed. is_alpha_suffix_cap remains
+        exported for parse-side callers that see raw suffix strings."""
         lo, hi = self._cap_range
         upserted = 0
         for cap in range(lo, hi + 1):
             cap_str = str(cap)
-            if is_alpha_suffix_cap(cap_str):
-                continue
             for abbr in self._abbrs:
                 for lang in self._langs:
                     self._checkpoint.upsert_relatedcap_fetch(
