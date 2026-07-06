@@ -188,7 +188,29 @@ class EnrichmentRunner:
                     await self._enrich_one(case)
                     async with counter_lock:
                         stats["processed"] += 1
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
+                    # Mark every still-pending enrichment kind for this
+                    # case as 'failed' so the row isn't re-picked into
+                    # the same crash loop. Without this the row stays
+                    # 'pending' and every subsequent enrich_all pass
+                    # hits the same exception forever with no error
+                    # trail in the DB.
+                    try:
+                        current = self._checkpoint.get_enrichment(
+                            case.court, case.year, case.number,
+                        )
+                        for k in kinds:
+                            if current.get(k) == "pending":
+                                self._checkpoint.mark_enrichment(
+                                    case.court, case.year, case.number,
+                                    k, "failed",
+                                    error=f"worker exception: "
+                                    f"{type(exc).__name__}: {exc}",
+                                )
+                    except Exception:  # noqa: BLE001
+                        # Best-effort — never let the recovery path
+                        # take down the worker.
+                        pass
                     async with counter_lock:
                         stats["failed"] += 1
                 async with counter_lock:
@@ -219,13 +241,15 @@ class EnrichmentRunner:
                             case.court, case.year, case.number, kind, "failed",
                             error="html file missing on disk",
                         )
-                return
-            content_html = html_path.read_text(encoding="utf-8")
-            await enrich_summaries_for_case(
-                self._get, self._checkpoint,
-                case.court, case.year, case.number,
-                stem, court_dir, content_html, events=self._events,
-            )
+                # Do NOT return here — appeal_history below reads .json,
+                # not .html, so summaries failing shouldn't skip it.
+            else:
+                content_html = html_path.read_text(encoding="utf-8")
+                await enrich_summaries_for_case(
+                    self._get, self._checkpoint,
+                    case.court, case.year, case.number,
+                    stem, court_dir, content_html, events=self._events,
+                )
 
         if self._do_appeal_history and enrich["appeal_history"] == "pending":
             json_path = court_dir / f"{stem}.json"
