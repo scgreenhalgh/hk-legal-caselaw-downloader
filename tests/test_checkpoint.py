@@ -205,6 +205,84 @@ class TestEnumRunGeneration:
         assert db.latest_completed_enum_run()["generation_id"] == g3
 
 
+class TestEnumRunFullCorpusFiltering:
+    """`latest_completed_enum_run()` is orphan_mark's ground truth for
+    'a clean full-corpus sweep just finished'. A narrow-window enum
+    (daily/weekly/monthly scrape) that touched every court/lang bucket
+    but ONLY for rows dated in the last 30/90 days looks byte-identical
+    in the pre-fix schema — same courts_json, same langs_json, same
+    completed_at — but its `started_at` bound would mass-orphan every
+    downloaded row older than the window when a subsequent
+    full_reconcile fails and orphan_mark falls back to it.
+
+    Guard: `start_enum_run` records the window boundary strings, and
+    `latest_completed_enum_run` filters out any row whose window is
+    non-NULL. Only true full-corpus sweeps qualify as orphan_mark's
+    reference generation.
+    """
+
+    def test_narrow_window_completed_run_not_returned(self):
+        db = CheckpointDB(":memory:")
+        g = db.start_enum_run(
+            ["hkcfi", "hkca"], ["en", "tc"],
+            min_date_text="06/06/2026",
+            max_date_text="06/07/2026",
+        )
+        db.complete_enum_run(g)
+        # Narrow-window completion must NOT surface as orphan_mark's
+        # reference sweep.
+        assert db.latest_completed_enum_run() is None
+
+    def test_full_corpus_completed_run_still_returned(self):
+        db = CheckpointDB(":memory:")
+        g = db.start_enum_run(
+            ["hkcfi", "hkca"], ["en", "tc"],
+            min_date_text=None, max_date_text=None,
+        )
+        db.complete_enum_run(g)
+        latest = db.latest_completed_enum_run()
+        assert latest is not None
+        assert latest["generation_id"] == g
+
+    def test_full_corpus_preferred_over_more_recent_narrow(self):
+        """A recent narrow scrape must not shadow an older full-corpus
+        sweep — the full-corpus row remains the reference for orphan_mark
+        even if a daily-narrow ran after it."""
+        db = CheckpointDB(":memory:")
+        g_full = db.start_enum_run(
+            ["hkcfi"], ["en"],
+            min_date_text=None, max_date_text=None,
+        )
+        db.complete_enum_run(g_full)
+        # Then a narrow-window sweep completes after it.
+        g_narrow = db.start_enum_run(
+            ["hkcfi"], ["en"],
+            min_date_text="06/06/2026",
+            max_date_text="06/07/2026",
+        )
+        db.complete_enum_run(g_narrow)
+        assert db.latest_completed_enum_run()["generation_id"] == g_full
+
+    def test_partial_window_bounds_still_narrow(self):
+        """Even a one-sided window (only min or only max) counts as
+        narrow — HKLII paginates 'newer than X' or 'older than X' the
+        same way, so orphan_mark can't trust either."""
+        db = CheckpointDB(":memory:")
+        g_min_only = db.start_enum_run(
+            ["hkcfi"], ["en"],
+            min_date_text="06/06/2026", max_date_text=None,
+        )
+        db.complete_enum_run(g_min_only)
+        assert db.latest_completed_enum_run() is None
+
+        g_max_only = db.start_enum_run(
+            ["hkcfi"], ["en"],
+            min_date_text=None, max_date_text="06/07/2026",
+        )
+        db.complete_enum_run(g_max_only)
+        assert db.latest_completed_enum_run() is None
+
+
 class TestResetRelatedcapFetches:
     """`hklii update --profile quarterly` calls this to force a fresh
     getrelatedcaps diff. Must be idempotent w.r.t. edges (INSERT OR
