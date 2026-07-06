@@ -646,7 +646,14 @@ class TestLastEnumerationTs:
         db = CheckpointDB(str(tmp_path / "cp.db"))
         assert db.last_enumeration_ts("hkcfi", "en") is None
 
-    def test_returns_max_last_seen_at_for_court_lang(self, tmp_path):
+    def test_returns_max_last_seen_at_for_court(self, tmp_path):
+        """Spec change (2026-07-07 whole-codebase review): last_enum-
+        eration_ts now returns MAX across every lang for the court,
+        regardless of the `lang` parameter. upsert_case collapses
+        bilingual cases to lang='en'; a strict per-lang filter would
+        return None for tc queries on bilingual-only courts and
+        silently disable the scraper's enum-cache skip for the tc pass.
+        """
         from hklii_downloader.checkpoint import CheckpointDB
         db = CheckpointDB(str(tmp_path / "cp.db"))
         db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
@@ -655,8 +662,9 @@ class TestLastEnumerationTs:
                        lang="en", last_seen_at=2000)
         db.upsert_case("hkcfi", 2023, 3, "N", "T", "2023-01-01",
                        lang="tc", last_seen_at=500)
+        # Both queries return the court-wide MAX now.
         assert db.last_enumeration_ts("hkcfi", "en") == 2000
-        assert db.last_enumeration_ts("hkcfi", "tc") == 500
+        assert db.last_enumeration_ts("hkcfi", "tc") == 2000
 
     def test_returns_none_when_all_rows_null(self, tmp_path):
         from hklii_downloader.checkpoint import CheckpointDB

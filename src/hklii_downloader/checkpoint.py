@@ -519,11 +519,20 @@ class CheckpointDB:
 
     def last_enumeration_ts(self, court: str, lang: str) -> int | None:
         """Max last_seen_at for the given (court, lang), or None if never
-        enumerated or all rows have NULL last_seen_at."""
+        enumerated or all rows have NULL last_seen_at.
+
+        The `lang` parameter is retained for API stability but the query
+        no longer filters by it — upsert_case collapses bilingual cases
+        to lang='en' via a CASE expression, so a strict WHERE lang='tc'
+        would return None for every court whose only cases are
+        bilingual (misleading the scraper's enum-cache into never
+        skipping the tc pass). Reading MAX across every lang is
+        semantically correct: one enumeration bumps last_seen_at once
+        regardless of which lang pass surfaced the entry.
+        """
         row = self._conn.execute(
-            "SELECT MAX(last_seen_at) FROM cases "
-            "WHERE court=? AND lang=?",
-            (court, lang),
+            "SELECT MAX(last_seen_at) FROM cases WHERE court=?",
+            (court,),
         ).fetchone()
         return row[0] if row else None
 
