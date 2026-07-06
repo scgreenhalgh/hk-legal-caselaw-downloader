@@ -263,7 +263,16 @@ class TestProxyPool:
         result = await pool.preflight()
 
         assert not pool.sessions[0].is_healthy
-        assert home_ip in result.leaked_proxies[0]
+        # Message names the proxy and flags a home-IP leak — but
+        # the IP value itself is redacted per B7/B8 (must not
+        # appear in operator-facing artifacts).
+        msg = result.leaked_proxies[0]
+        assert "http://localhost:8888" in msg
+        assert "home IP" in msg
+        assert home_ip not in msg, (
+            f"leaked_proxies message contains home_ip {home_ip!r} — "
+            "B7/B8 redaction contract violated"
+        )
 
     async def test_preflight_marks_healthy(self):
         home_ip = "203.0.113.1"

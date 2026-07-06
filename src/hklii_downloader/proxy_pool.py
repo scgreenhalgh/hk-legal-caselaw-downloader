@@ -176,6 +176,11 @@ class ProxySession:
     def record_failure(self) -> None:
         if self._killed:
             return
+        # Count toward request_count so the periodic runtime IP-leak
+        # check (`session.request_count % ip_check_interval == 0`)
+        # still fires on sessions that fail every request — the case
+        # where leak detection is most valuable.
+        self.request_count += 1
         self._failure_count += 1
         if self._failure_count >= self._max_failures:
             self.kill()
@@ -289,9 +294,26 @@ class ProxyPool:
         )
 
     async def preflight(self) -> PreflightResult:
-        home_ip = await self._fetch_ip(self._make_client(None), via="direct")
+        # Explicitly close the ephemeral direct client — pre-fix it was
+        # created purely for home_ip discovery and then abandoned, held
+        # only by _fetch_ip's argument frame → GC-only cleanup, an httpx
+        # ResourceWarning at interpreter shutdown.
+        direct_client = self._make_client(None)
+        try:
+            home_ip = await self._fetch_ip(direct_client, via="direct")
+        finally:
+            try:
+                await direct_client.aclose()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "preflight: direct probe aclose failed: %s: %s",
+                    type(exc).__name__, exc,
+                )
         self._home_ip = home_ip
         result = PreflightResult(home_ip=home_ip)
+        # Also strip home_ip from the leaked_proxies message below so
+        # B7/B8 redaction holds — the previous phrasing embedded the
+        # raw IP in the returned result.
 
         for session in self.sessions:
             client = self._clients[session.index]
@@ -306,7 +328,7 @@ class ProxyPool:
 
             if proxy_ip == home_ip:
                 result.leaked_proxies.append(
-                    f"{session.proxy_url} returned home IP {home_ip}"
+                    f"{session.proxy_url} returned home IP (redacted per B7/B8)"
                 )
                 session.kill()
             else:
@@ -505,13 +527,39 @@ class ProxyPool:
 
         if verify_ip == self._home_ip:
             session.kill()
+            # B7/B8: emit a structured event so operators grepping
+            # events.jsonl see the leak signal. The 'degraded' path
+            # already emits; the confirmed-leak path was silent.
+            self._emit(
+                "ip_leak_confirmed",
+                proxy_url=session.proxy_url,
+                error_class="ip-leak",
+                error_msg="proxy exit IP matches direct probe (verified twice)",
+            )
+            # Redaction: home_ip must NEVER appear in the exception
+            # message — logged tracebacks would leak it to scrape.log.
             raise IPLeakError(
-                f"Proxy {session.proxy_url} leaking home IP {self._home_ip} "
-                f"(verified twice)"
+                f"Proxy {session.proxy_url} leaking home IP "
+                "(verified twice; IP value redacted per B7/B8)"
             )
 
     async def close(self) -> None:
+        # Continue-on-error over every client so one bad aclose (e.g.
+        # curl_cffi refusing after an aborted transfer) can't leak the
+        # remaining N-1 clients + the direct client.
         for client in self._clients.values():
-            await client.aclose()
+            try:
+                await client.aclose()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "pool.close: aclose failed on client: %s: %s",
+                    type(exc).__name__, exc,
+                )
         if hasattr(self, "_direct_client"):
-            await self._direct_client.aclose()
+            try:
+                await self._direct_client.aclose()
+            except Exception as exc:  # noqa: BLE001
+                _log.warning(
+                    "pool.close: aclose failed on _direct_client: %s: %s",
+                    type(exc).__name__, exc,
+                )
