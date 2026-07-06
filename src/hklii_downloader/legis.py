@@ -407,7 +407,21 @@ class LegisHistoryRunner:
                 )
                 continue
             for entry in versions:
-                vid = int(entry["id"])
+                # Belt-and-braces: a malformed entry (missing 'id',
+                # non-int id, non-dict) shouldn't crash the whole
+                # LegisHistoryRunner and abandon every subsequent
+                # downloaded chapter's versions. Log + continue.
+                try:
+                    if not isinstance(entry, dict):
+                        raise TypeError("entry is not a dict")
+                    vid = int(entry["id"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    _log.warning(
+                        "legis versions entry malformed at %s: %s: %s "
+                        "(entry=%r)",
+                        versions_path, type(exc).__name__, exc, entry,
+                    )
+                    continue
                 if vid == latest_vid:
                     continue
                 sidecar = base / f"{stem}.v{vid}.content.json"

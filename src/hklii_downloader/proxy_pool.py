@@ -486,10 +486,24 @@ class ProxyPool:
                 return idx
 
     def _revive_cooled_down_sessions(self) -> None:
+        # Snapshot current queue contents so we can check membership
+        # WITHOUT racing another consumer. asyncio.Queue's internal deque
+        # is `_queue`; drain-and-repopulate would race the acquirer.
+        # Reading `.qsize()` + `_queue` under the same synchronous tick
+        # is race-free (no await between snapshot and put).
+        currently_available = set(self._available._queue)  # type: ignore[attr-defined]
         for session in self.sessions:
             if session.cooldown_elapsed:
                 session.revive()
-                self._available.put_nowait(session.index)
+                # Guard against re-adding a duplicate: an init-time
+                # queue entry that was never drained before the session
+                # was killed would still be in `_available`. Re-put
+                # would create two live entries → two workers could
+                # concurrently check out the same session index and
+                # share underlying curl_cffi state.
+                if session.index not in currently_available:
+                    self._available.put_nowait(session.index)
+                    currently_available.add(session.index)
 
     async def _runtime_ip_check(
         self, session: ProxySession, client: httpx.AsyncClient,

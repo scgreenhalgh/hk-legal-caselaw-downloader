@@ -87,7 +87,13 @@ def parse_noteup_response(
     """
     parsed = NoteupParsed()
     for position, entry in enumerate(entries):
-        path = entry.get("path", "")
+        # `.get("path", "")` returns None (not "") when path is present
+        # but null — HKLII's contract is stable today but a null-path
+        # entry would raise TypeError inside _PATH_RE.match. Belt-and-
+        # braces coerce to empty string.
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path") or ""
         m = _PATH_RE.match(path)
         if not m:
             continue

@@ -115,4 +115,13 @@ def _convert_via_pandoc(path: Path, input_format: str) -> str:
         raise ConversionError(
             f"pandoc failed on {path}: {result.stderr.strip()}"
         )
+    # Guard against silent empty output — a 0-byte generated.html
+    # sidecar stamped 'downloaded' would poison the corpus with a
+    # phantom conversion (matches the doc-family presence check the
+    # validator does, but a zero-length body defeats the point).
+    if not result.stdout.strip():
+        raise ConversionError(
+            f"pandoc returned rc=0 with empty stdout on {path}; "
+            f"stderr: {result.stderr.strip()!r}"
+        )
     return result.stdout

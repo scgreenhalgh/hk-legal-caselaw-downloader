@@ -331,11 +331,29 @@ class BulkScraper:
                             stats["dispatched"] -= 1
                         await asyncio.sleep(self._pool_exhausted_sleep)
                         continue
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
                     # Belt-and-braces: _download_one catches known errors
                     # already; this guard prevents an unforeseen bug from
                     # cancelling sibling workers via asyncio.gather.
+                    # Also mark the DB row failed with the exception
+                    # text so it doesn't stay 'in_progress' forever
+                    # (release_in_progress recovers stale ones on next
+                    # run, but leaving the trail here surfaces the
+                    # unforeseen bug to the operator immediately).
                     success = False
+                    _log.warning(
+                        "download worker unexpected exception "
+                        "%s/%s/%s: %s: %s",
+                        record.court, record.year, record.number,
+                        type(exc).__name__, exc,
+                    )
+                    try:
+                        self._fail(
+                            record.court, record.year, record.number,
+                            f"worker-unexpected: {type(exc).__name__}: {exc}",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass  # best-effort — never nested-crash
                 async with counter_lock:
                     if success:
                         stats["downloaded"] += 1

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import random
 import re
@@ -12,6 +13,8 @@ from urllib.parse import urlencode
 import httpx
 
 from .atomic_write import atomic_write_text
+
+_log = logging.getLogger("hklii_downloader.enumerator")
 
 _BASE_URL = "https://www.hklii.hk"
 _PATH_RE = re.compile(r"/(?:en|tc)/cases/([a-z]+)/(\d{4})/(\d+)")
@@ -63,11 +66,25 @@ class CaseEntry:
         return f"{_BASE_URL}/api/getjudgment?{params}"
 
 
-def parse_case_entry(data: dict, court: str) -> CaseEntry:
-    path = data.get("path", "")
+def parse_case_entry(data: dict, court: str) -> CaseEntry | None:
+    """Parse one HKLII getcasefiles/getcaseindex entry.
+
+    Returns None if `path` doesn't match the expected shape — pre-fix,
+    year/number silently fell through as 0, so multiple malformed
+    entries in the same court collided on the (court, year, number)
+    primary key and shadowed each other in the DB. Callers must
+    filter None.
+    """
+    path = data.get("path") or ""
     m = _PATH_RE.search(path)
-    year = int(m.group(2)) if m else 0
-    number = int(m.group(3)) if m else 0
+    if m is None:
+        _log.warning(
+            "parse_case_entry: skipping unparseable path %r for court %s",
+            path, court,
+        )
+        return None
+    year = int(m.group(2))
+    number = int(m.group(3))
 
     cases_list = data.get("cases", [])
     title = cases_list[0].get("title", "") if cases_list else ""
@@ -177,14 +194,22 @@ async def enumerate_court(
         return []
 
     total_pages = math.ceil(total / items_per_page)
-    entries = [parse_case_entry(j, court) for j in data.get("judgments", [])]
+    entries = [
+        e for e in
+        (parse_case_entry(j, court) for j in data.get("judgments", []))
+        if e is not None
+    ]
 
     if on_page:
         on_page(1, total_pages, len(entries))
 
     for page in range(2, total_pages + 1):
         page_data = await _fetch_and_maybe_save(page)
-        page_entries = [parse_case_entry(j, court) for j in page_data.get("judgments", [])]
+        page_entries = [
+            e for e in
+            (parse_case_entry(j, court) for j in page_data.get("judgments", []))
+            if e is not None
+        ]
         entries.extend(page_entries)
 
         if on_page:

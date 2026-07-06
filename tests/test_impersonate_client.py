@@ -453,6 +453,51 @@ class TestExceptionTranslation:
         with pytest.raises(httpx.ConnectError):
             await c.get("https://example.com")
 
+    async def test_curl_code_6_becomes_httpx_connect(self):
+        """Whole-codebase review (L4): the `code in (6, 7)` mapping's
+        code-6 arm was untested — only code 7 exercised the arm. A
+        refactor that split the branch would silently pass."""
+        from hklii_downloader.impersonate_client import ImpersonateAsyncClient
+        c = ImpersonateAsyncClient(rng=random.Random(0))
+
+        class FakeCurlError(Exception):
+            def __init__(self, msg, code):
+                super().__init__(msg)
+                self.code = code
+
+        class FakeSession:
+            async def get(self, url, **kw):
+                raise FakeCurlError("host resolve failed", 6)
+            async def close(self):
+                pass
+
+        c._session = FakeSession()
+        with pytest.raises(httpx.ConnectError):
+            await c.get("https://example.com")
+
+    async def test_curl_code_56_becomes_httpx_readerror(self):
+        """Whole-codebase review (L4): code 56 (recv failure) mapping to
+        httpx.ReadError was untested. A regression removing this branch
+        would fall through to the generic RequestError and lose the
+        specific classification."""
+        from hklii_downloader.impersonate_client import ImpersonateAsyncClient
+        c = ImpersonateAsyncClient(rng=random.Random(0))
+
+        class FakeCurlError(Exception):
+            def __init__(self, msg, code):
+                super().__init__(msg)
+                self.code = code
+
+        class FakeSession:
+            async def get(self, url, **kw):
+                raise FakeCurlError("recv failure", 56)
+            async def close(self):
+                pass
+
+        c._session = FakeSession()
+        with pytest.raises(httpx.ReadError):
+            await c.get("https://example.com")
+
     async def test_other_curl_becomes_httpx_requesterror(self):
         from hklii_downloader.impersonate_client import ImpersonateAsyncClient
         c = ImpersonateAsyncClient(rng=random.Random(0))
