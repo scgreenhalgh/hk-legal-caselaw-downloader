@@ -58,6 +58,14 @@ class NoteupRecord:
 
 
 @dataclass
+class RelatedcapRecord:
+    cap_number: str
+    abbr: str
+    lang: str
+    status: str
+
+
+@dataclass
 class HoptRecord:
     abbr: str      # bacpg | bahkg | hktmc | hktml | hkts
     year: int
@@ -116,6 +124,25 @@ CREATE TABLE IF NOT EXISTS legis_versions (
     error   TEXT,
     last_seen_at INTEGER,
     PRIMARY KEY (abbr, num, lang, vid)
+);
+CREATE TABLE IF NOT EXISTS ord_reg_edges (
+    parent_cap TEXT NOT NULL,          -- "32"  (integer cap of the ordinance)
+    child_cap  TEXT NOT NULL,          -- "32A" (subsidiary regulation cap)
+    lang       TEXT NOT NULL,          -- 'en' | 'tc'
+    title      TEXT,                   -- captured for change detection
+    first_seen TEXT NOT NULL,
+    PRIMARY KEY (parent_cap, child_cap, lang)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_ore_child ON ord_reg_edges(child_cap);
+CREATE TABLE IF NOT EXISTS relatedcap_fetches (
+    cap_number TEXT    NOT NULL,       -- "32"
+    abbr       TEXT    NOT NULL,       -- 'ord' | 'reg'
+    lang       TEXT    NOT NULL,       -- 'en' | 'tc'
+    status     TEXT    NOT NULL DEFAULT 'pending',
+    fetched_at TEXT,
+    edge_count INTEGER,
+    error      TEXT,
+    PRIMARY KEY (cap_number, abbr, lang)
 );
 CREATE TABLE IF NOT EXISTS citations (
     from_key   TEXT NOT NULL,          -- "hkcfi/2023/155" (the citer)
@@ -724,24 +751,82 @@ class CheckpointDB:
             "by_source_ext": by_ext,
         }
 
-    def upsert_relatedcap_fetch(self, cap_number, abbr, lang) -> None:
-        raise NotImplementedError
+    def upsert_relatedcap_fetch(
+        self, cap_number: str, abbr: str, lang: str,
+    ) -> None:
+        self._conn.execute(
+            "INSERT OR IGNORE INTO relatedcap_fetches "
+            "(cap_number, abbr, lang) VALUES (?, ?, ?)",
+            (cap_number, abbr, lang),
+        )
+        self._conn.commit()
 
-    def mark_relatedcap_ok(self, cap_number, abbr, lang, edge_count,
-                             fetched_at) -> None:
-        raise NotImplementedError
+    def mark_relatedcap_ok(
+        self, cap_number: str, abbr: str, lang: str,
+        edge_count: int, fetched_at: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE relatedcap_fetches SET status='ok', "
+            "edge_count=?, fetched_at=?, error=NULL "
+            "WHERE cap_number=? AND abbr=? AND lang=?",
+            (edge_count, fetched_at, cap_number, abbr, lang),
+        )
+        self._conn.commit()
 
-    def mark_relatedcap_failed(self, cap_number, abbr, lang, error) -> None:
-        raise NotImplementedError
+    def mark_relatedcap_failed(
+        self, cap_number: str, abbr: str, lang: str, error: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE relatedcap_fetches SET status='error', error=? "
+            "WHERE cap_number=? AND abbr=? AND lang=?",
+            (error, cap_number, abbr, lang),
+        )
+        self._conn.commit()
 
-    def claim_pending_relatedcap(self):
-        raise NotImplementedError
+    def claim_pending_relatedcap(self) -> RelatedcapRecord | None:
+        row = self._conn.execute(
+            "SELECT cap_number, abbr, lang FROM relatedcap_fetches "
+            "WHERE status='pending' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        self._conn.execute(
+            "UPDATE relatedcap_fetches SET status='in_progress' "
+            "WHERE cap_number=? AND abbr=? AND lang=?",
+            (row[0], row[1], row[2]),
+        )
+        self._conn.commit()
+        return RelatedcapRecord(
+            cap_number=row[0], abbr=row[1], lang=row[2],
+            status="in_progress",
+        )
 
     def relatedcap_stats(self) -> dict:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM relatedcap_fetches GROUP BY status"
+        ).fetchall()
+        counts = {r[0]: r[1] for r in rows}
+        return {
+            "total": sum(counts.values()),
+            "pending": counts.get("pending", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "ok": counts.get("ok", 0),
+            "error": counts.get("error", 0),
+        }
 
-    def insert_ord_reg_edges(self, edges, first_seen) -> None:
-        raise NotImplementedError
+    def insert_ord_reg_edges(
+        self, edges: list[tuple[str, str, str, str]], first_seen: str,
+    ) -> None:
+        """Bulk insert (parent_cap, child_cap, lang, title) tuples.
+        Idempotent via INSERT OR IGNORE."""
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO ord_reg_edges "
+            "(parent_cap, child_cap, lang, title, first_seen) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [(p, c, lang, title, first_seen)
+             for p, c, lang, title in edges],
+        )
+        self._conn.commit()
 
     def upsert_noteup_fetch(
         self, court: str, year: int, number: int,
