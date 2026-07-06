@@ -457,12 +457,34 @@ class Validator:
                             target.unlink()
                     except OSError:
                         continue
-                self._db._conn.execute(
-                    "UPDATE cases SET status='pending', formats=NULL, "
-                    "error=NULL "
-                    "WHERE court=? AND year=? AND number=?",
-                    (d.court, d.year, d.number),
-                )
+                # Path-shape branch: enrichment sidecar vs base row.
+                # A challenge/magic hit on `.summary_en.html` /
+                # `.summary_zh.html` means the ENRICHMENT sidecar was
+                # bad — the base judgment is fine. Flipping the case
+                # row would force an unnecessary WAF-risky re-download,
+                # AND (worse) leave summary_*_status='downloaded' so
+                # `hklii enrich` skips the re-fetch and the sidecar
+                # stays gone permanently. Reset the enrichment status
+                # instead, leave the base row alone.
+                enrichment_kind = None
+                if d.path and d.path.endswith(".summary_en.html"):
+                    enrichment_kind = "summary_en"
+                elif d.path and d.path.endswith(".summary_zh.html"):
+                    enrichment_kind = "summary_zh"
+                if enrichment_kind is not None:
+                    self._db._conn.execute(
+                        f"UPDATE cases SET {enrichment_kind}_status='pending', "
+                        f"{enrichment_kind}_error=NULL "
+                        "WHERE court=? AND year=? AND number=?",
+                        (d.court, d.year, d.number),
+                    )
+                else:
+                    self._db._conn.execute(
+                        "UPDATE cases SET status='pending', formats=NULL, "
+                        "error=NULL "
+                        "WHERE court=? AND year=? AND number=?",
+                        (d.court, d.year, d.number),
+                    )
                 applied += 1
             elif d.severity == "warn" and d.check == "orphans":
                 if not d.path:
