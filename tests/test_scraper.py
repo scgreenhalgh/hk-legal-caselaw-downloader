@@ -1230,6 +1230,47 @@ class TestBulkScraperEnumFreshness:
         await scraper.enumerate(["hkcfi"], langs=("en",))
         assert len(call_urls) >= 1, "expected at least one API call"
 
+    async def test_all_skipped_enum_does_not_stamp_completed_run(self, tmp_path):
+        """Whole-codebase review: if enum_max_age_hours>0 skips every
+        (court, lang) bucket, complete_enum_run currently STILL fires —
+        producing a row byte-identical to a clean full-corpus sweep. A
+        subsequent orphan_mark reads it via latest_completed_enum_run
+        and uses started_at as the cutoff, mass-orphaning every
+        downloaded row not touched in that (non-)sweep. Same class as
+        the Cluster B narrow-window hazard from a different path.
+
+        Guard: an enum where zero buckets were actually enumerated is
+        not a full-corpus sweep and must NOT surface as one."""
+        import time
+        call_urls = []
+
+        async def mock_get(url, **kw):
+            call_urls.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []},
+                                  request=httpx.Request("GET", url))
+
+        db = _make_db()
+        recent = int(time.time()) - 3600  # within the 24h window
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01",
+                       lang="en", last_seen_at=recent)
+
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            enum_max_age_hours=24,
+        )
+        # Every bucket skipped — no API calls, no real enumeration.
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert call_urls == [], "cache skip precondition failed"
+
+        # The completed run MUST NOT surface — orphan_mark would use
+        # its started_at as a cutoff and mass-orphan every case not
+        # bumped by this (non-)sweep.
+        assert db.latest_completed_enum_run() is None, (
+            "enumerate() stamped complete_enum_run on a fully-skipped "
+            "sweep — orphan_mark would consume this as full-corpus and "
+            "mass-orphan every out-of-cache row"
+        )
+
     async def test_default_max_age_zero_always_enumerates(self, tmp_path):
         """Default (0) preserves old behavior — always re-enumerate."""
         import time
