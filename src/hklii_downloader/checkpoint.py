@@ -50,6 +50,14 @@ class LegisVersionRecord:
 
 
 @dataclass
+class NoteupRecord:
+    court: str
+    year: int
+    number: int
+    status: str
+
+
+@dataclass
 class HoptRecord:
     abbr: str      # bacpg | bahkg | hktmc | hktml | hkts
     year: int
@@ -109,6 +117,31 @@ CREATE TABLE IF NOT EXISTS legis_versions (
     last_seen_at INTEGER,
     PRIMARY KEY (abbr, num, lang, vid)
 );
+CREATE TABLE IF NOT EXISTS citations (
+    from_key   TEXT NOT NULL,          -- "hkcfi/2023/155" (the citer)
+    to_key     TEXT NOT NULL,          -- "hkcfa/2020/32" (target)
+    citer_lang TEXT NOT NULL,          -- 'en' | 'tc'
+    citer_freq INTEGER,                -- HKLII citation_frequency snapshot
+    position   INTEGER,                -- ordinal in getcasenoteup response
+    first_seen TEXT NOT NULL,
+    PRIMARY KEY (from_key, to_key, citer_lang)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_cit_to ON citations(to_key);
+CREATE TABLE IF NOT EXISTS noteup_fetches (
+    court      TEXT    NOT NULL,
+    year       INTEGER NOT NULL,
+    number     INTEGER NOT NULL,
+    status     TEXT    NOT NULL DEFAULT 'pending',
+    fetched_at TEXT,
+    edge_count INTEGER,
+    error      TEXT,
+    PRIMARY KEY (court, year, number)
+);
+CREATE TABLE IF NOT EXISTS case_parallel_cites (
+    case_key      TEXT NOT NULL,       -- "hkcfa/2020/32"
+    parallel_cite TEXT NOT NULL,       -- "[2020] 6 HKC 46"
+    PRIMARY KEY (case_key, parallel_cite)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS hopt_documents (
     abbr    TEXT NOT NULL,           -- bacpg | bahkg | hktmc | hktml | hkts
     year    INTEGER NOT NULL,
@@ -691,26 +724,98 @@ class CheckpointDB:
             "by_source_ext": by_ext,
         }
 
-    def upsert_noteup_fetch(self, court, year, number) -> None:
-        raise NotImplementedError
+    def upsert_noteup_fetch(
+        self, court: str, year: int, number: int,
+    ) -> None:
+        """Insert a per-source-case row in status='pending'. Idempotent —
+        existing rows retain their state (so a re-enumeration doesn't
+        overwrite already-completed fetches)."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO noteup_fetches (court, year, number) "
+            "VALUES (?, ?, ?)",
+            (court, year, number),
+        )
+        self._conn.commit()
 
-    def mark_noteup_ok(self, court, year, number, edge_count, fetched_at) -> None:
-        raise NotImplementedError
+    def mark_noteup_ok(
+        self, court: str, year: int, number: int,
+        edge_count: int, fetched_at: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE noteup_fetches SET status='ok', edge_count=?, "
+            "fetched_at=?, error=NULL "
+            "WHERE court=? AND year=? AND number=?",
+            (edge_count, fetched_at, court, year, number),
+        )
+        self._conn.commit()
 
-    def mark_noteup_failed(self, court, year, number, error) -> None:
-        raise NotImplementedError
+    def mark_noteup_failed(
+        self, court: str, year: int, number: int, error: str,
+    ) -> None:
+        self._conn.execute(
+            "UPDATE noteup_fetches SET status='error', error=? "
+            "WHERE court=? AND year=? AND number=?",
+            (error, court, year, number),
+        )
+        self._conn.commit()
 
-    def claim_pending_noteup(self):
-        raise NotImplementedError
+    def claim_pending_noteup(self) -> NoteupRecord | None:
+        row = self._conn.execute(
+            "SELECT court, year, number FROM noteup_fetches "
+            "WHERE status='pending' LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        self._conn.execute(
+            "UPDATE noteup_fetches SET status='in_progress' "
+            "WHERE court=? AND year=? AND number=?",
+            (row[0], row[1], row[2]),
+        )
+        self._conn.commit()
+        return NoteupRecord(
+            court=row[0], year=row[1], number=row[2],
+            status="in_progress",
+        )
 
     def noteup_stats(self) -> dict:
-        raise NotImplementedError
+        rows = self._conn.execute(
+            "SELECT status, COUNT(*) FROM noteup_fetches GROUP BY status"
+        ).fetchall()
+        counts = {r[0]: r[1] for r in rows}
+        return {
+            "total": sum(counts.values()),
+            "pending": counts.get("pending", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "ok": counts.get("ok", 0),
+            "error": counts.get("error", 0),
+        }
 
-    def insert_citation_edges(self, edges, first_seen) -> None:
-        raise NotImplementedError
+    def insert_citation_edges(
+        self,
+        edges: list[tuple[str, str, str, int | None, int]],
+        first_seen: str,
+    ) -> None:
+        """Bulk insert (from_key, to_key, citer_lang, citer_freq, position)
+        tuples. Idempotent via INSERT OR IGNORE — a re-run of the same
+        source case won't duplicate rows."""
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO citations "
+            "(from_key, to_key, citer_lang, citer_freq, position, first_seen) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(f, t, lang, freq, pos, first_seen)
+             for f, t, lang, freq, pos in edges],
+        )
+        self._conn.commit()
 
-    def insert_parallel_cites(self, case_key, cites) -> None:
-        raise NotImplementedError
+    def insert_parallel_cites(
+        self, case_key: str, cites: list[str],
+    ) -> None:
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO case_parallel_cites "
+            "(case_key, parallel_cite) VALUES (?, ?)",
+            [(case_key, c) for c in cites],
+        )
+        self._conn.commit()
 
     def upsert_hopt_document(
         self, abbr: str, year: int, num: int, lang: str, title: str,
