@@ -311,18 +311,25 @@ class UpdateRunner:
     def _hkt_today(self):
         return self._now().astimezone(HKT).date()
 
-    def _date_window(self) -> tuple[str | None, str | None]:
+    def _date_window(self, today=None) -> tuple[str | None, str | None]:
+        """Derive HKLII dd/mm/yyyy window from recent_days.
+
+        `today` is threadable so callers (format_plan) can snapshot the
+        HKT date once and reuse it for both the plan and the header —
+        preventing an internal drift across HKT midnight.
+        """
         rd = self.settings.get("recent_days")
         if rd is None or rd <= 0:
             return None, None
-        today = self._hkt_today()
+        if today is None:
+            today = self._hkt_today()
         min_d = (today - timedelta(days=rd)).strftime("%d/%m/%Y")
         max_d = today.strftime("%d/%m/%Y")
         return min_d, max_d
 
-    def plan(self) -> list[Step]:
+    def plan(self, today=None) -> list[Step]:
         s = self.settings
-        min_date, max_date = self._date_window()
+        min_date, max_date = self._date_window(today=today)
         steps: list[Step] = []
 
         if s.get("include_scrape"):
@@ -467,12 +474,14 @@ class UpdateRunner:
     def format_plan(self) -> str:
         # Snapshot the plan + HKT date ONCE — plan() reads self._now()
         # so two calls straddling HKT midnight would compute different
-        # date windows within one dry-run output.
-        steps = self.plan()
+        # date windows within one dry-run output. Thread `today` into
+        # plan() so both use the same read.
+        today = self._hkt_today()
+        steps = self.plan(today=today)
         lines = [
             f"Profile: {self.profile}",
             f"Output:  {self.output}",
-            f"HKT today: {self._hkt_today().isoformat()}",
+            f"HKT today: {today.isoformat()}",
             "",
             "Planned steps:",
         ]
