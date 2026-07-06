@@ -197,6 +197,48 @@ class TestUpdateRunnerProfilePlans:
         assert recheck.kwargs["max_age_days"] == 0
 
 
+class TestFormatPlanClockSnapshot:
+    """format_plan reads the HKT clock ONCE across both the header line
+    and every step kwarg — the block comment at update.py:468 promises
+    this. Pre-fix, plan() and the header did separate reads; a run
+    straddling HKT midnight could show `HKT today: 2026-07-07` beside
+    a `min_date='06/06/2026'` (max_date='06/07/2026') derived from
+    the previous day's snapshot — internally inconsistent."""
+
+    def test_format_plan_reads_clock_once(self, tmp_path):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from hklii_downloader.update import UpdateRunner
+
+        HKT = ZoneInfo("Asia/Hong_Kong")
+        calls = {"n": 0}
+        # Iterator so a second read would give a NEW HKT day.
+        times = iter([
+            datetime(2026, 7, 6, 23, 59, 59, 999_999, tzinfo=HKT),
+            datetime(2026, 7, 7, 0, 0, 0, 0, tzinfo=HKT),
+        ])
+
+        def _fake():
+            calls["n"] += 1
+            return next(times)
+
+        runner = UpdateRunner(
+            profile="daily", output=tmp_path, proxies=["p"], now=_fake,
+        )
+        out = runner.format_plan()
+        # If plan() and the header re-read the clock, calls["n"] > 1
+        # and the header/date parts would drift across the day boundary.
+        assert calls["n"] == 1, (
+            f"format_plan called _now() {calls['n']}× — must snapshot"
+        )
+        # Both places reflect the FIRST read (2026-07-06):
+        assert "2026-07-06" in out, out
+        assert "2026-07-07" not in out, out
+        # Scrape step window derived from HKT today = 2026-07-06:
+        assert "min_date='06/06/2026'" in out, out
+        assert "max_date='06/07/2026'" in out, out
+
+
 class TestUpdateRunnerHKTClock:
     """HKT-anchored date-window boundaries — process TZ must NOT leak."""
 
