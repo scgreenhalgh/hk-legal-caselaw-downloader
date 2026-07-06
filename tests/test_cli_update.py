@@ -544,6 +544,69 @@ class TestCoverageCanaryHonesty:
             "bilingual UPSERT rule means TC bucket local count undercounts"
         )
 
+    async def test_canary_raises_when_majority_of_probes_fail(self, tmp_path):
+        """Meta-review: my Cluster C fix only raised when probes_ok==0.
+        If 12 of 13 buckets fail (proxy pool degraded but 1 endpoint
+        still works, or 12 courts hit persistent 5xx while 1 doesn't),
+        probes_ok=1 → NO raise → wrapper prints 'all N within
+        tolerance'. Canary is 92 % blind but reports healthy.
+
+        Guard: raise if probes_ok < probes_total / 2. Preserves the
+        single-bucket-5xx tolerance the ukpc/tc case needs while
+        catching the majority-blind case."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.update import (
+            coverage_canary, CoverageCanaryBlindError,
+        )
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+
+        import httpx
+        async def _mostly_fail(url, **kw):
+            # 12 courts fail; 1 court succeeds with count matching local
+            # (so no divergence surfaces even from the one probe that
+            # worked).
+            if "hkcfa" in url:
+                return httpx.Response(200, json={"count": 0, "timestamp": "x"})
+            raise RuntimeError("proxy dead")
+
+        courts_13 = [
+            "hkcfa", "hkca", "hkcfi", "hkdc", "hkldt", "hkfc",
+            "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "ukpc",
+        ]
+        with pytest.raises(CoverageCanaryBlindError):
+            await coverage_canary(
+                get=_mostly_fail, checkpoint=db,
+                courts=courts_13, langs=["en"], threshold=5,
+            )
+
+    async def test_canary_tolerates_single_bucket_failure_still(self, tmp_path):
+        """Sibling positive: 12 of 13 buckets return CLEAN, 1 bucket 5xx
+        (the ukpc/tc persistent-500 case). Must NOT raise — that would
+        turn a known-benign scenario into a step failure every run."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.update import coverage_canary
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+
+        import httpx
+        async def _one_fails(url, **kw):
+            if "ukpc" in url:
+                return httpx.Response(500, text="err")
+            return httpx.Response(200, json={"count": 0, "timestamp": "x"})
+
+        courts_13 = [
+            "hkcfa", "hkca", "hkcfi", "hkdc", "hkldt", "hkfc",
+            "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "ukpc",
+        ]
+        # Must return normally — 12 successes is well above the majority
+        # threshold, single 5xx is a known-benign per-bucket skip.
+        result = await coverage_canary(
+            get=_one_fails, checkpoint=db,
+            courts=courts_13, langs=["en"], threshold=5,
+        )
+        assert result == []
+
     async def test_canary_raises_when_every_probe_fails(self, tmp_path):
         """Pool exhausted / origin 500 storm / DNS glitch → every
         `pool.get()` in the canary loop raises. Silent-continue leaves
@@ -603,6 +666,54 @@ class TestCoverageCanaryHonesty:
         # Message must reference the escalation-failure count so operators
         # grepping logs can find it.
         assert "escalat" in str(exc_info.value).lower()
+
+    async def test_db_closed_even_when_pool_close_raises(self, tmp_path):
+        """Meta-review: outer finally does `await pool.close()` then
+        `db.close()`. If pool.close() itself raises (e.g. curl_cffi
+        AsyncSession refuses aclose after an aborted request), the
+        db.close() call is skipped — the CheckpointDB advisory lock fd
+        leaks, and every subsequent step in the same dispatch loop
+        opens a new CheckpointDB that trips CheckpointLockError. One
+        transient close error cascades into a run-wide failure."""
+        from unittest.mock import MagicMock, patch
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_coverage_canary
+
+        db_path = tmp_path / ".checkpoint.db"
+        CheckpointDB(str(db_path)).close()
+
+        db_close_calls = {"n": 0}
+        real_close = CheckpointDB.close
+        def _wrap_close(self):
+            db_close_calls["n"] += 1
+            real_close(self)
+
+        class _PoolThatFailsToClose:
+            def __init__(self, *a, **kw): pass
+            async def preflight(self): pass
+            async def close(self):
+                raise RuntimeError("curl_cffi refused aclose")
+            async def get(self, url, **kw):
+                import httpx
+                return httpx.Response(200, json={"count": 0, "timestamp": "x"})
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        runner.proxies = ["http://127.0.0.1:8888"]
+        runner.direct = False
+        step = MagicMock()
+        step.kwargs = {"threshold": 5, "max_escalations": 3}
+
+        with patch.object(CheckpointDB, "close", _wrap_close), \
+             patch("hklii_downloader.proxy_pool.ProxyPool", _PoolThatFailsToClose):
+            with pytest.raises(RuntimeError):
+                await _run_coverage_canary(runner, step, no_events=True)
+
+        assert db_close_calls["n"] >= 1, (
+            "db.close() skipped when pool.close() raised — CheckpointDB "
+            "lock fd leaked, cascading CheckpointLockError to every "
+            "subsequent step."
+        )
 
     async def test_pool_closed_when_preflight_raises(self, tmp_path):
         """If pool.preflight() raises (e.g. all IP echo services
