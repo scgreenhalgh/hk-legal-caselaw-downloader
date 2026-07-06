@@ -1,55 +1,86 @@
 /effort max
+/ultracode
 
-This session is running with `ultracode`; use it where the spec calls for the multi-agent path. You are resuming the HKLII downloader project after a corpus-complete milestone. The next milestone is a **corpus validator**, not more scraping. Do not launch any scrape, enrich, or recheck runs.
+You are resuming the HKLII downloader project after the citation-graph
+milestone. **No new milestone is queued** — the next session's task is
+whatever the user asks. This prompt boots you cleanly so the first
+message doesn't burn context re-deriving state.
 
-## Load context (in this order)
+## Load context (in this order — do not skim)
 
-1. `/Users/seangreenhalgh/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md` — memory index. Scan entries, then open the supplementary files it points at that touch validation surface (checkpoint DB schema, artifact layout, enrichment status columns).
-2. `memory/session-2026-07-05-bugfix-and-sweep.md` — the just-shipped session retro. Reports the 100% corpus outcome, the five TDD fix pairs (#63–#67), the current test count, manual-grab receipts for the four linkage-stale rows, and the final artifact-size numbers.
-3. `memory/incident-2026-07-05-pool-storm.md` — retro for the pool-death that motivated the shipped #65 re-queue fix. Read this so you understand why the code around `AllProxiesDeadError` and the drain-recovery path looks the way it does before the validator starts asserting invariants over it.
-4. `/Users/seangreenhalgh/Developer/hklii_downloader/scratchpad/VALIDATOR_SPEC.md` — the design doc from the parallel workflow branch. This is the spec you will implement.
+1. Read `/Users/seangreenhalgh/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md` — the auto-memory index. It's small; read every line.
+2. Open, in this order, the memory files that carry the current state:
+   - `memory/backup-coverage-final.md` — pre-graph headline corpus state (162,331 cases + legis + HOPT + translations = ~202k docs, ~29-30 GB).
+   - `memory/citation-graph-shipped.md` — this session's shipped work: 242,488 forward edges, 11,617 parallels, 4,506 ord/reg edges, throttler retuned 3-5×, silent-empty gotcha, top hub cases.
+   - `memory/hklii-api-structure.md` — endpoint reference. All 11 API scrapers we hit.
+   - `memory/hklii-waf-status.md` — origin behaviour + rationale for the throttler defaults.
+   - `memory/retro-2026-07-06.md` — earlier session's lessons about coverage claims, sample extrapolation, and enumerator transparency.
+3. Read `docs/backup-coverage-2026-07-06.md` and `docs/citation-graph-design.md` for the current shipped design.
 
-Do NOT paraphrase these files into working memory; open them.
+DO NOT paraphrase these into working memory — open them.
 
-## Session position
+## Session position (start-of-session ground truth)
 
-Corpus at **162,331 / 162,331 rows (100.000%)**, ~20 GB of artifacts on disk across the 13 API-alive slugs. **481 tests.** Five fix pairs shipped this session cycle (#63 challenge-page false-positive, #64 Word 95 magic bytes, #65 pool-death re-queue, #66/#67 marker cleanup). Working tree should be clean; nothing is scraping; no tmux `hklii` session should exist.
-
-Threat scope is documented in `research/04` § "Threat scope: local artifacts vs. the wire" (commit `959b467`). Five pre-flight review rounds ran earlier in this project cycle. Local-artifact home-IP exposure is OUT OF SCOPE and must not be re-flagged.
-
-## Immediate task
-
-Build the corpus validator per `scratchpad/VALIDATOR_SPEC.md`. TDD as always (failing test → paste literal output → implement → refactor). The spec owns the design; your job is to execute it, not redesign it. If the spec is ambiguous on a specific decision, ask before diverging.
-
-## First actions
-
-a. Verify a clean starting state before touching the spec:
+Verify the following holds before answering any substantive question.
+If any check fails, STOP and surface — do not proceed assuming state:
 
 ```bash
-# working tree + recent history
+# Working tree
 git status
-git log --oneline -8
+git log --oneline -10
 
-# no rogue background work
+# No rogue background work
 tmux ls 2>&1 | grep -i hklii || echo NO_TMUX
+pgrep -f "hklii scrape" | wc -l | xargs -I{} echo "hklii procs: {}"
 docker ps --filter name=hklii-vpn --format 'table {{.Names}}\t{{.Status}}'
+
+# Corpus ground truth
+sqlite3 -readonly output/.checkpoint.db "SELECT status, COUNT(*) FROM cases GROUP BY status;"
+sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM citations;"
+sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM case_parallel_cites;"
+sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM ord_reg_edges;"
+find output -name "*.noteup.json" | wc -l
+du -sh output/
 ```
 
-Nothing should be scraping. If tmux or a container looks off, ask before killing anything.
+Expected on the clean baseline:
+- `cases`: 162,331 downloaded, no other status
+- `citations`: 242,488
+- `case_parallel_cites`: 11,617
+- `ord_reg_edges`: 4,506
+- `.noteup.json` count: 162,331
+- `output/`: ~30 GB
+- 20 `hklii-vpn-*` containers healthy
+- No live `hklii scrape*` processes
+- Working tree clean apart from `scratchpad/`
 
-b. Read the four pointer files above **in order**. Do not skim MEMORY.md and skip straight to the spec — the session and incident retros set the invariants the validator will assert.
-
-c. Confirm ground truth by re-running the corpus fact-gathering commands the spec lists (row counts, per-slug counts, per-format file counts, enrichment status columns). Numbers must match the 162,331 / ~20 GB baseline in the 2026-07-05 session file. If they don't, STOP and surface — don't start writing tests against a moving corpus.
-
-d. Once ground truth matches, follow the TDD plan in the spec. Two commits per fix (`test:` then `feat:`/`fix:`), atomic scope, one logical change per commit.
+Test suite: **669 tests, all green** (last verified this session).
+Unpushed commits ahead of `origin/main`: some — check `git log`.
 
 ## What NOT to do
 
-- Do NOT launch `hklii scrape`, `hklii enrich`, `hklii recheck-html`, or any variant. Corpus is complete; there is nothing to fetch.
-- Do NOT re-litigate the fixes shipped as #63–#67 (challenge-page FP, DOCX/Word-95 magic, `AllProxiesDeadError` re-queue, marker cleanup). They landed with tests; treat them as done.
-- Do NOT drift into a fix-loop on `failed` rows. There are none — the manual grab already cleared the four linkage-stale rows and final status is 100.000%. If the validator flags a row as suspect, report it; do not "just try one more download" as a side-quest.
-- Do NOT relitigate local-artifact home-IP exposure. Documented OOS across five review rounds.
-- Do NOT run a fresh HUNT-VERIFY or full pre-flight review. If a specific concern arises, spawn ONE targeted subagent — not a workflow.
-- Do NOT modify `research/`, memory files, or shipped fix commits as part of this task. The validator is additive.
+- Do NOT paraphrase memory files into a summary — read them.
+- Do NOT re-scrape any HKLII endpoint the user hasn't explicitly asked for. Every backup phase is complete: cases, enrich, legis (current + history), HOPT, translations, doc-to-html, validate, noteup, relatedcaps.
+- Do NOT re-run `scrape-relatedcaps` even for validation — the API adds nothing beyond the numeric-suffix pattern. See `citation-graph-shipped.md` "The critical ord→reg finding" for the SQL derivation.
+- Do NOT tighten the throttler further without evidence of headroom — the current retune already achieves ~35-40 req/sec / 20 workers with zero HKLII pushback observed over ~200k requests. Rolling back is fine; further tightening needs a canary.
+- Do NOT relitigate the "HKLII has a WAF" concern — `hklii-waf-status` is settled, backed by many completed runs.
+- Do NOT touch the local-viewer worktree at `~/Developer/hklii_viewer` unless the user asks. Tasks #79-#83 live there and are reserved for a fresh session in that directory.
+- Do NOT re-derive citation counts from judgment HTML — the API-backed `citations` table is canonical for the corpus we have. Local regex extraction is a fallback we discussed but explicitly deferred.
 
-Ask before touching anything outside the validator's scope.
+## Likely first-question shapes and where to route
+
+- **"What did we ship last session?"** → Read `citation-graph-shipped.md`, answer from that + the corpus ground-truth checks. Don't re-derive.
+- **"Run the RAG pipeline / build the viewer"** → Worktree at `~/Developer/hklii_viewer` is where the viewer scaffold lives. Tasks #79-#83 waiting. Confirm before touching main-repo files.
+- **"Refresh the citation graph"** → Idempotent via `hklii scrape-noteup`. Only ~20-25 min at retuned throughput. Point at `citation-graph-shipped.md` first so the user knows the current state.
+- **"Compare against a fresh scrape / diff over time"** → Raw `.noteup.json` sidecars are the canonical baseline. Diff before touching the DB.
+- **"Anything else worth scraping at HKLII?"** → No, per the exhaustive endpoint audit in `docs/backup-coverage-2026-07-06.md` and this session's confirmed local-derivability for `getrelatedcaps`. Deferred items (AI case-summary service at `ai.hklii.hk`) are noted in that doc.
+
+## Deliberate non-goals (do not re-litigate)
+
+- **AI case summaries at `ai.hklii.hk`** — separate service, endpoint unmapped, deferred by explicit choice.
+- **`getcasenoteup` sample-based diff** — the API-backed count IS the answer; there's no other source of truth on citer inbound-count.
+- **Rebuilding graph tables from disk** — supported (all raw sidecars preserved) but only if the DB is lost. Don't do it proactively.
+
+## Ready
+
+Verify the baseline. If it holds, tell the user "clean baseline confirmed" plus a one-line summary of state, and wait for their request. If any check drifts, stop and surface.
