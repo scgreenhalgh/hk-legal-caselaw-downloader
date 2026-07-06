@@ -691,6 +691,27 @@ class CheckpointDB:
             "by_source_ext": by_ext,
         }
 
+    def upsert_noteup_fetch(self, court, year, number) -> None:
+        raise NotImplementedError
+
+    def mark_noteup_ok(self, court, year, number, edge_count, fetched_at) -> None:
+        raise NotImplementedError
+
+    def mark_noteup_failed(self, court, year, number, error) -> None:
+        raise NotImplementedError
+
+    def claim_pending_noteup(self):
+        raise NotImplementedError
+
+    def noteup_stats(self) -> dict:
+        raise NotImplementedError
+
+    def insert_citation_edges(self, edges, first_seen) -> None:
+        raise NotImplementedError
+
+    def insert_parallel_cites(self, case_key, cites) -> None:
+        raise NotImplementedError
+
     def upsert_hopt_document(
         self, abbr: str, year: int, num: int, lang: str, title: str,
         neutral: str | None = None, doc_date: str | None = None,
