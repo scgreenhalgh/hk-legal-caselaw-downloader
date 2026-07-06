@@ -11,6 +11,7 @@ and TDD plan this implementation follows.
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 import unicodedata
@@ -21,6 +22,8 @@ from typing import Iterable
 
 from .content_shape import _looks_like_challenge_page
 from .scraper import _extension_for_body
+
+_log = logging.getLogger("hklii_downloader.validate")
 
 SCHEMA_VERSION = 1
 
@@ -220,8 +223,20 @@ class Validator:
                     if not path.exists():
                         continue
                     files_examined += 1
-                    with open(path, "rb") as f:
-                        head = f.read(4)
+                    try:
+                        with open(path, "rb") as f:
+                            head = f.read(4)
+                    except OSError as exc:
+                        # A race between path.exists() and the open
+                        # (concurrent scrape write, permission blip,
+                        # EIO) previously killed the entire validate
+                        # run mid-loop. Log + skip so surviving rows
+                        # still get checked.
+                        _log.warning(
+                            "magic check unreadable at %s: %s: %s",
+                            path, type(exc).__name__, exc,
+                        )
+                        continue
                     resolved = _extension_for_body(head)
                     if resolved is None:
                         discrepancies.append(Discrepancy(
@@ -246,7 +261,15 @@ class Validator:
                         ))
 
             if "challenge_html" in self._checks:
-                for suffix in (".html", ".summary_en.html", ".summary_zh.html"):
+                # `.tc.html` is a peer HTML fetched from HKLII by
+                # case_translations.py (task #90 bilingual TC sidecars) —
+                # equally vulnerable to a WAF interstitial slipping
+                # through as the base .html. Pre-fix it was invisible
+                # to this check.
+                for suffix in (
+                    ".html", ".summary_en.html", ".summary_zh.html",
+                    ".tc.html",
+                ):
                     path = case_dir / f"{stem}{suffix}"
                     if not path.exists():
                         continue
