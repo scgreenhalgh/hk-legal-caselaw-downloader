@@ -19,6 +19,30 @@ _PERMANENT_STATUSES = {404, 410}
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 
 
+@dataclass(frozen=True)
+class EnumWindow:
+    """Bundle of narrow-window enumeration params that always travel
+    together. `min_date_text`/`max_date_text` are DD/MM/YYYY strings
+    (matching HKLII's `minDateText` / `maxDateText` param format).
+    `sort` is an opaque string sent verbatim (e.g. `-date`).
+
+    Motivating design (from code-review altitude finding): threading
+    these four scalars as loose kwargs through enumerator → BulkScraper
+    → CLI is a four-layer tunnel where a dropped hop silently reverts
+    to full-corpus wire behavior with no type error. Bundling them as
+    one value object lets callers reason about "the window" as a unit
+    and lets a missed thread show up at construction time.
+    """
+    min_date_text: str | None = None
+    max_date_text: str | None = None
+    sort: str | None = None
+    items_per_page: int = 10_000
+
+    @property
+    def is_narrow(self) -> bool:
+        return bool(self.min_date_text or self.max_date_text)
+
+
 @dataclass
 class CaseEntry:
     court: str
@@ -109,6 +133,9 @@ async def enumerate_court(
     max_retries: int = 3,
     backoff_base: float = 1.0,
     save_response_to=None,
+    min_date_text: str | None = None,
+    max_date_text: str | None = None,
+    sort: str | None = None,
 ) -> list[CaseEntry]:
     from pathlib import Path
     import time
@@ -118,12 +145,19 @@ async def enumerate_court(
         save_dir = Path(save_response_to) / f"{court}_{lang}"
 
     async def _fetch_and_maybe_save(page_num: int) -> dict:
-        params = urlencode({
+        params_dict: dict[str, object] = {
             "caseDb": court,
             "lang": lang,
             "itemsPerPage": items_per_page,
             "page": page_num,
-        })
+        }
+        if min_date_text:
+            params_dict["minDateText"] = min_date_text
+        if max_date_text:
+            params_dict["maxDateText"] = max_date_text
+        if sort:
+            params_dict["sort"] = sort
+        params = urlencode(params_dict)
         data = await _get_json_with_retry(
             get, f"{_BASE_URL}/api/getcasefiles?{params}",
             max_retries, backoff_base,

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 
 _log = logging.getLogger("hklii_downloader.checkpoint")
@@ -183,6 +184,19 @@ CREATE TABLE IF NOT EXISTS hopt_documents (
     last_seen_at INTEGER,
     PRIMARY KEY (abbr, year, num, lang)
 );
+CREATE TABLE IF NOT EXISTS enum_runs (
+    -- A single BulkScraper.enumerate() invocation. Row inserted on start,
+    -- completed_at populated on clean finish. Used by `hklii update`'s
+    -- orphan_mark step to consume the freshest clean full-corpus enum
+    -- without timestamp heuristics over per-bucket last_seen_at.
+    generation_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at     INTEGER NOT NULL,
+    completed_at   INTEGER,
+    courts_json    TEXT    NOT NULL,   -- JSON list of court slugs enumerated
+    langs_json     TEXT    NOT NULL    -- JSON list of lang codes enumerated
+);
+CREATE INDEX IF NOT EXISTS idx_enum_runs_completed
+    ON enum_runs(completed_at);
 """
 
 _ENRICHMENT_KINDS = ("summary_en", "summary_zh", "appeal_history")
@@ -211,6 +225,37 @@ class CheckpointDB:
             raise CheckpointCorruptError(
                 f"integrity_check failed for {path}: {row[0]}"
             )
+
+    @staticmethod
+    def is_locked_by_peer(path: str) -> bool:
+        """Non-blocking peek: is the checkpoint lock currently held by
+        another process?
+
+        Every writer command (scrape, scrape-noteup, enrich, recheck-html,
+        etc.) opens a CheckpointDB which grabs `<path>.lock` via
+        `LOCK_EX | LOCK_NB`. This helper lets a *would-be* writer check
+        BEFORE opening the DB whether another writer is already active,
+        so `hklii update` can fail fast at startup rather than trip a
+        `CheckpointLockError` mid-step.
+
+        Returns True if the lock is held by another process, False if it
+        is free (or if we can't create the lock file at all — matches the
+        best-effort semantics of `_acquire_lock`).
+        """
+        lock_path = str(path) + ".lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            return True
+        # Free — release immediately.
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        return False
 
     def _acquire_lock(self, path: str) -> None:
         lock_path = str(path) + ".lock"
@@ -359,19 +404,51 @@ class CheckpointDB:
             return None
         return json.loads(row[0])
 
-    def pending_html_recheck(self, limit: int | None = None) -> list[CaseRecord]:
+    def pending_html_recheck(
+        self,
+        limit: int | None = None,
+        max_age_days: int | None = None,
+        _today_iso: str | None = None,
+    ) -> list[CaseRecord]:
         """Rows previously captured via doc-fallback whose HTML may now
         be available at HKLII. status must be 'downloaded' — this is a
-        deliberate follow-up pass, not a first-time download."""
+        deliberate follow-up pass, not a first-time download.
+
+        `max_age_days` bounds the queue by CASE DATE (not by stamp — the
+        stamp bumps forward on every re-poll). None or 0 = unlimited.
+        `_today_iso` is a test hook; production callers omit it and the
+        method reads today's date in Asia/Hong_Kong.
+        """
+        params: list = []
+        where = [
+            "status='downloaded'",
+            "html_pending_at_hklii IS NOT NULL",
+        ]
+        if max_age_days is not None and max_age_days > 0:
+            from datetime import date, datetime, timedelta
+            from zoneinfo import ZoneInfo
+            if _today_iso is not None:
+                today = date.fromisoformat(_today_iso)
+            else:
+                today = datetime.now(ZoneInfo("Asia/Hong_Kong")).date()
+            cutoff = (today - timedelta(days=max_age_days)).isoformat()
+            # `date` in the DB is ISO-8601 (YYYY-MM-DD…); lex compare is
+            # correct as long as we anchor on the leading 10 chars.
+            # A missing / non-ISO date bypasses the filter — we'd rather
+            # over-recheck a row we can't age-check than silently drop it
+            # from the queue forever.
+            where.append(
+                "(substr(date, 1, 10) >= ? OR substr(date, 1, 10) < '1000')"
+            )
+            params.append(cutoff)
         q = (
             "SELECT court, year, number, neutral, title, date, lang "
-            "FROM cases WHERE status='downloaded' "
-            "AND html_pending_at_hklii IS NOT NULL "
+            f"FROM cases WHERE {' AND '.join(where)} "
             "ORDER BY html_pending_at_hklii ASC"
         )
         if limit is not None:
             q += f" LIMIT {int(limit)}"
-        rows = self._conn.execute(q).fetchall()
+        rows = self._conn.execute(q, params).fetchall()
         return [
             CaseRecord(
                 court=r[0], year=r[1], number=r[2],
@@ -399,13 +476,25 @@ class CheckpointDB:
         ).fetchone()
         return row[0] if row else None
 
-    def find_orphans(self, as_of_ts: int) -> list[CaseRecord]:
+    def find_orphans(
+        self, as_of_ts: int, only_downloaded: bool = False,
+    ) -> list[CaseRecord]:
         """Rows whose last_seen_at is NULL or < as_of_ts — candidates for
-        removal from HKLII since our last enumeration."""
+        removal from HKLII since our last enumeration.
+
+        `only_downloaded=True` restricts to rows we actually captured
+        (status='downloaded'); useful for `hklii update --profile quarterly`
+        where we only orphan-mark rows that once existed on disk. Pending
+        or failed rows aren't 'orphans' — they just weren't finished.
+        """
+        where = ["(last_seen_at IS NULL OR last_seen_at < ?)"]
+        params: list = [as_of_ts]
+        if only_downloaded:
+            where.append("status='downloaded'")
         rows = self._conn.execute(
             "SELECT court, year, number, neutral, title, date, lang, status "
-            "FROM cases WHERE last_seen_at IS NULL OR last_seen_at < ?",
-            (as_of_ts,),
+            f"FROM cases WHERE {' AND '.join(where)}",
+            tuple(params),
         ).fetchall()
         return [
             CaseRecord(
@@ -415,6 +504,38 @@ class CheckpointDB:
             )
             for r in rows
         ]
+
+    def mark_orphaned(self, court: str, year: int, number: int) -> None:
+        """Flip a row's status to 'orphaned' without touching files or
+        formats. Idempotent — safe to call on an already-orphaned row.
+
+        Reserved for `hklii update --profile quarterly` where we've just
+        done a full-corpus enum and confirmed the row is no longer listed
+        upstream. Local files are preserved as an audit trail; the caller
+        can decide when/whether to delete them.
+        """
+        self._conn.execute(
+            "UPDATE cases SET status='orphaned' "
+            "WHERE court=? AND year=? AND number=?",
+            (court, year, number),
+        )
+        self._conn.commit()
+
+    def mark_orphaned_below_ts(self, cutoff_ts: int) -> int:
+        """Batch-mark every stale downloaded row as 'orphaned' in one
+        UPDATE + one commit. Returns the affected-row count.
+
+        Skips rows already status='orphaned' (idempotent) and rows the
+        caller didn't intend to touch (status != 'downloaded').
+        """
+        cur = self._conn.execute(
+            "UPDATE cases SET status='orphaned' "
+            "WHERE status='downloaded' "
+            "AND (last_seen_at IS NULL OR last_seen_at < ?)",
+            (cutoff_ts,),
+        )
+        self._conn.commit()
+        return cur.rowcount
 
     def verify_downloaded_against_files(self, output_dir) -> int:
         """Scan status='downloaded' rows; flip any whose expected files are
@@ -782,6 +903,81 @@ class CheckpointDB:
             (error, cap_number, abbr, lang),
         )
         self._conn.commit()
+
+    # ---- enum-run generation tracking (see enum_runs table) ---------
+
+    def start_enum_run(
+        self, courts: list[str] | tuple[str, ...],
+        langs: list[str] | tuple[str, ...],
+    ) -> int:
+        """Record the start of a BulkScraper.enumerate() invocation.
+
+        Returns the newly allocated generation_id which the caller passes
+        back to `complete_enum_run` on clean finish. If the caller
+        crashes or aborts before completion, the row's `completed_at`
+        stays NULL and downstream consumers (orphan_mark) treat it as
+        an incomplete run and skip it.
+        """
+        cur = self._conn.execute(
+            "INSERT INTO enum_runs "
+            "(started_at, completed_at, courts_json, langs_json) "
+            "VALUES (?, NULL, ?, ?)",
+            (
+                int(time.time()),
+                json.dumps(list(courts)),
+                json.dumps(list(langs)),
+            ),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def complete_enum_run(self, generation_id: int) -> None:
+        """Mark a previously-started enum run as cleanly completed."""
+        self._conn.execute(
+            "UPDATE enum_runs SET completed_at=? WHERE generation_id=?",
+            (int(time.time()), generation_id),
+        )
+        self._conn.commit()
+
+    def latest_completed_enum_run(self) -> dict | None:
+        """Latest enum_runs row where completed_at IS NOT NULL. Returns
+        {generation_id, started_at, completed_at, courts, langs} or None
+        if no run has ever completed cleanly. Used by orphan_mark.
+        """
+        row = self._conn.execute(
+            "SELECT generation_id, started_at, completed_at, "
+            "courts_json, langs_json FROM enum_runs "
+            "WHERE completed_at IS NOT NULL "
+            "ORDER BY completed_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "generation_id": row[0],
+            "started_at": row[1],
+            "completed_at": row[2],
+            "courts": json.loads(row[3]),
+            "langs": json.loads(row[4]),
+        }
+
+    def reset_relatedcap_fetches(self) -> int:
+        """Reset every relatedcap_fetches row to status='pending' so the
+        next scrape-relatedcaps run does a fresh diff. Returns the
+        affected row count. Idempotent no-op when the table is missing.
+
+        Kept on CheckpointDB so the reset reuses the shared connection —
+        avoids the WAL / busy_timeout pragma-bypass a raw sqlite3.connect
+        would introduce.
+        """
+        try:
+            cur = self._conn.execute(
+                "UPDATE relatedcap_fetches SET status='pending'"
+            )
+            self._conn.commit()
+            return cur.rowcount
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet — first-ever run. Nothing to reset.
+            return 0
 
     def claim_pending_relatedcap(self) -> RelatedcapRecord | None:
         row = self._conn.execute(

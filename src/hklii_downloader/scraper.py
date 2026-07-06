@@ -21,7 +21,7 @@ from .enrichment import (
     enrich_appeal_history_for_case,
     enrich_summaries_for_case,
 )
-from .enumerator import enumerate_court
+from .enumerator import EnumWindow, enumerate_court
 from .events import StructuredEventLogger
 from .parser import HKLIICase
 from .proxy_pool import AllProxiesDeadError, IPLeakError
@@ -134,7 +134,20 @@ class BulkScraper:
         save_enum_responses: bool = False,
         events: StructuredEventLogger | None = None,
         _backoff_base: float = 1.0,
+        items_per_page: int = 10_000,
+        min_date_text: str | None = None,
+        max_date_text: str | None = None,
+        sort: str | None = None,
+        window: "EnumWindow | None" = None,
     ):
+        # EnumWindow, if provided, wins over the individual kwargs.
+        # This lets callers thread ONE object down the CLI stack rather
+        # than four coupled scalars.
+        if window is not None:
+            items_per_page = window.items_per_page
+            min_date_text = window.min_date_text
+            max_date_text = window.max_date_text
+            sort = window.sort
         self._get = get
         self._checkpoint = checkpoint
         self._output_dir = Path(output_dir)
@@ -148,6 +161,10 @@ class BulkScraper:
         self._save_enum_responses = save_enum_responses
         self._events = events
         self._backoff_base = _backoff_base
+        self._items_per_page = items_per_page
+        self._min_date_text = min_date_text
+        self._max_date_text = max_date_text
+        self._sort = sort
 
     def _emit(self, kind: str, **fields) -> None:
         if self._events is not None:
@@ -159,6 +176,11 @@ class BulkScraper:
         import time
         run_ts = int(time.time())
         seen: set[tuple[str, int, int]] = set()
+        # Register this enumeration attempt so orphan_mark (and any future
+        # consumer needing "was there a clean full-corpus sweep") can key
+        # off a concrete generation marker instead of scanning per-bucket
+        # last_seen_at heuristics. completed_at stays NULL if we raise.
+        generation_id = self._checkpoint.start_enum_run(courts, langs)
         for court in courts:
             for lang in langs:
                 if self._enum_max_age_hours > 0:
@@ -185,11 +207,15 @@ class BulkScraper:
                 # returns. Bulk enumeration is inherently scraper-shaped
                 # no matter what page size we pick.
                 entries = await enumerate_court(
-                    court, self._get, lang=lang, items_per_page=10_000,
+                    court, self._get, lang=lang,
+                    items_per_page=self._items_per_page,
                     save_response_to=(
                         self._output_dir / ".enum_cache"
                         if self._save_enum_responses else None
                     ),
+                    min_date_text=self._min_date_text,
+                    max_date_text=self._max_date_text,
+                    sort=self._sort,
                 )
                 for entry in entries:
                     self._checkpoint.upsert_case(
@@ -198,6 +224,8 @@ class BulkScraper:
                         lang=lang, last_seen_at=run_ts,
                     )
                     seen.add((entry.court, entry.year, entry.number))
+        # All (court, lang) pairs succeeded → stamp completion.
+        self._checkpoint.complete_enum_run(generation_id)
         return len(seen)
 
     def _get_path_label(self) -> str:

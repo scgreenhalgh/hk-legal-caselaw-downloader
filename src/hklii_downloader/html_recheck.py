@@ -50,6 +50,7 @@ class HtmlRecheckRunner:
         workers: int = 1,
         limit: int | None = None,
         events=None,
+        max_age_days: int | None = None,
     ):
         self._get = get
         self._checkpoint = checkpoint
@@ -60,6 +61,7 @@ class HtmlRecheckRunner:
         self._formats = (formats & default) if formats else default
         self._workers = max(1, workers)
         self._limit = limit
+        self._max_age_days = max_age_days
         # Post-run analytics hook — scraper.py already emits
         # challenge_detected + case_failed; the recheck sweep must mirror
         # that surface so a WAF-affected recheck pass isn't invisible in
@@ -82,7 +84,9 @@ class HtmlRecheckRunner:
         )
 
     async def recheck_all(self) -> dict[str, int]:
-        pending = self._checkpoint.pending_html_recheck(limit=self._limit)
+        pending = self._checkpoint.pending_html_recheck(
+            limit=self._limit, max_age_days=self._max_age_days,
+        )
         if not pending:
             return {"newly_captured": 0, "still_pending": 0, "failed": 0}
 

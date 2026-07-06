@@ -7,6 +7,7 @@ import click
 import httpx
 
 from .client import fetch_judgment, make_async_client, save_judgment
+from .enumerator import EnumWindow
 from .parser import parse_hklii_url
 
 VALID_FORMATS = {"html", "txt", "json", "doc"}
@@ -93,6 +94,51 @@ def download(
 
 
 DEFAULT_COURTS = ["hkcfi", "hkca", "hkdc", "hkcfa"]
+
+# Every non-empty HKLII case-DB slug + ukpc (dormant-but-listed; API
+# returns cleanly). Canonical list used by the update command's canary,
+# full-corpus reconcile, and orphan_mark guard so those three surfaces
+# stay consistent.
+ALL_COURTS: list[str] = [
+    "hkcfa", "hkca", "hkcfi", "hkdc", "hkldt", "hkfc",
+    "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "ukpc",
+]
+ALL_LANGS: tuple[str, ...] = ("en", "tc")
+
+
+from dataclasses import dataclass, field as _dc_field  # noqa: E402
+
+
+@dataclass
+class ScrapeConfig:
+    """Bundled configuration for a `_run_scrape` invocation.
+
+    Motivating design (review finding E — 'ScrapeConfig dataclass'): the
+    prior signature was 17+ kwargs, and every new toggle risked a silent
+    divergence between the standalone `scrape` command and the update
+    dispatcher (`_run_update_scrape`) if the two happened to pass
+    different defaults. Bundling into a dataclass:
+      * lets callers name their intent as ONE object,
+      * adds new knobs in ONE place (with a default),
+      * keeps callers who don't opt in on the default,
+      * makes it a construction error to omit required fields.
+    """
+    output: Path
+    fmt_set: set[str]
+    proxies: list[str]
+    direct: bool
+    court_list: list[str]
+    langs: tuple[str, ...] = ("en", "tc")
+    limit: int | None = None
+    resume: bool = False
+    with_summaries: bool = False
+    with_appeal_history: bool = False
+    retry_failed: bool = False
+    enum_max_age: int = 0
+    save_enum_responses: bool = False
+    no_events: bool = False
+    # EnumWindow() → full corpus, matches legacy default.
+    window: EnumWindow = _dc_field(default_factory=EnumWindow)
 BULK_FORMATS = {"html", "txt", "json"}
 
 
@@ -244,7 +290,7 @@ def scrape(
     court_list = courts.split(",") if courts else DEFAULT_COURTS
     langs: tuple[str, ...] = ("en", "tc") if lang == "both" else (lang,)
 
-    asyncio.run(_run_scrape(
+    asyncio.run(_run_scrape(ScrapeConfig(
         output=output,
         fmt_set=fmt_set,
         proxies=list(proxies),
@@ -259,7 +305,7 @@ def scrape(
         enum_max_age=enum_max_age,
         save_enum_responses=save_enum_responses,
         no_events=no_events,
-    ))
+    )))
 
 
 @main.command()
@@ -869,22 +915,31 @@ async def _download_with_progress(scraper, target: int):
         return await scraper.download_all(on_progress=on_progress)
 
 
-async def _run_scrape(
-    output: Path,
-    fmt_set: set[str],
-    proxies: list[str],
-    direct: bool,
-    court_list: list[str],
-    limit: int | None,
-    resume: bool,
-    with_summaries: bool = False,
-    with_appeal_history: bool = False,
-    langs: tuple[str, ...] = ("en", "tc"),
-    retry_failed: bool = False,
-    enum_max_age: int = 0,
-    save_enum_responses: bool = False,
-    no_events: bool = False,
-) -> None:
+async def _run_scrape(config: ScrapeConfig) -> None:
+    """Execute a bulk scrape using the fields in `config`.
+
+    Prior signature had 17+ kwargs; every new toggle risked silent
+    divergence between the standalone `scrape` command and
+    `_run_update_scrape`. ScrapeConfig is now the single source of intent.
+    """
+    # Unpack once so the body doesn't have to re-type `config.`; keeps
+    # the diff surface small vs. touching every reference below.
+    output = config.output
+    fmt_set = config.fmt_set
+    proxies = config.proxies
+    direct = config.direct
+    court_list = config.court_list
+    limit = config.limit
+    resume = config.resume
+    with_summaries = config.with_summaries
+    with_appeal_history = config.with_appeal_history
+    langs = config.langs
+    retry_failed = config.retry_failed
+    enum_max_age = config.enum_max_age
+    save_enum_responses = config.save_enum_responses
+    no_events = config.no_events
+    window = config.window
+
     from .logging_setup import setup_logging
     log_path = setup_logging(output, "scrape")
     click.echo(f"Logging to {log_path}")
@@ -937,6 +992,7 @@ async def _run_scrape(
             enum_max_age_hours=enum_max_age,
             save_enum_responses=save_enum_responses,
             events=events,
+            window=window,
         )
 
         if retry_failed:
@@ -1071,6 +1127,15 @@ async def _run(
     help="Cap the number of pending rows rechecked in this pass.",
 )
 @click.option(
+    "--max-age-days",
+    type=int,
+    default=None,
+    help=(
+        "Bound the recheck queue by case date. Cases older than N days "
+        "(by publication date) are skipped. 0 = unlimited. Default: unbounded."
+    ),
+)
+@click.option(
     "--yes", "-y",
     is_flag=True,
     default=False,
@@ -1087,6 +1152,7 @@ def recheck_html(
     proxies: tuple[str, ...],
     direct: bool,
     limit: int | None,
+    max_age_days: int | None,
     yes: bool,
     no_events: bool,
 ) -> None:
@@ -1119,6 +1185,7 @@ def recheck_html(
         proxies=list(proxies),
         direct=direct,
         limit=limit,
+        max_age_days=max_age_days,
         no_events=no_events,
     ))
 
@@ -1128,6 +1195,7 @@ async def _run_recheck_html(
     proxies: list[str],
     direct: bool,
     limit: int | None,
+    max_age_days: int | None = None,
     no_events: bool = False,
 ) -> None:
     from .checkpoint import CheckpointDB
@@ -1142,7 +1210,9 @@ async def _run_recheck_html(
         )
     db = CheckpointDB(str(db_path))
 
-    pending_count = len(db.pending_html_recheck(limit=None))
+    pending_count = len(db.pending_html_recheck(
+        limit=None, max_age_days=max_age_days,
+    ))
     if pending_count == 0:
         click.echo("No rows are flagged html_pending_at_hklii. Nothing to do.")
         db.close()
@@ -1184,6 +1254,7 @@ async def _run_recheck_html(
             workers=workers,
             limit=limit,
             events=events,
+            max_age_days=max_age_days,
         )
         counts = await runner.recheck_all()
         click.echo(
@@ -2333,6 +2404,613 @@ async def _legis_history_with_progress(runner, target: int):
             )
 
         return await runner.fetch_pending(on_progress=on_progress)
+
+
+# -------- hklii update -------------------------------------------------
+
+_UPDATE_PROFILES = ("daily", "weekly", "monthly", "quarterly", "custom")
+
+
+@main.command("update")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding checkpoint + artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable.",
+)
+@click.option(
+    "--direct", is_flag=True, default=False,
+    help="Skip proxy pool (prompts unless --yes).",
+)
+@click.option(
+    "--profile",
+    type=click.Choice(_UPDATE_PROFILES, case_sensitive=False),
+    default="daily",
+    help="Cadence preset: daily | weekly | monthly | quarterly | custom.",
+)
+@click.option("--recent-days", type=int, default=None,
+              help="Override profile's date window (today HKT - N days).")
+@click.option("--items-per-page", type=int, default=None,
+              help="Override profile's page size (default 500).")
+@click.option("--recheck-max-age-days", type=int, default=None,
+              help="Override profile's recheck queue age bound.")
+@click.option("--generate-html-limit", type=int, default=None,
+              help="Cap local doc→HTML per run.")
+@click.option("--enrich-retry-limit", type=int, default=None,
+              help="Cap enrichment retries per run.")
+@click.option("--canary-divergence-threshold", type=int, default=None,
+              help="Row-count divergence per bucket that escalates the canary.")
+@click.option("--validate-sample", type=int, default=None,
+              help="Row count for validate sampling (default 2000; 0 = full corpus).")
+@click.option("--yes-narrow", is_flag=True, default=False,
+              help="Required guard to allow --recent-days < 2.")
+@click.option("--include-scrape/--no-scrape", default=None)
+@click.option("--include-recheck-html/--no-recheck-html", default=None)
+@click.option("--include-generate-html/--no-generate-html", default=None)
+@click.option("--include-noteup/--no-noteup", default=None)
+@click.option("--include-enrich/--no-enrich", default=None)
+@click.option("--include-canary/--no-canary", default=None)
+@click.option("--include-hopt/--no-hopt", default=None)
+@click.option("--include-legis/--no-legis", default=None)
+@click.option("--include-legis-history/--no-legis-history", default=None)
+@click.option("--include-relatedcaps/--no-relatedcaps", default=None)
+@click.option("--include-backfill-translations/--no-backfill-translations",
+              default=None)
+@click.option("--include-validate/--no-validate", default=None)
+@click.option("--include-full-reconcile/--no-full-reconcile", default=None)
+@click.option("--include-orphan-mark/--no-orphan-mark", default=None)
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Print planned steps + estimated call counts. No wire, no DB writes.")
+@click.option("--yes", "-y", is_flag=True, default=False,
+              help="Skip --direct IP-leak confirmation.")
+@click.option("--no-events", is_flag=True, default=False,
+              help="Skip structured event logging to <output>/events.jsonl.")
+def update_command(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    profile: str,
+    recent_days: int | None,
+    items_per_page: int | None,
+    recheck_max_age_days: int | None,
+    generate_html_limit: int | None,
+    enrich_retry_limit: int | None,
+    canary_divergence_threshold: int | None,
+    validate_sample: int | None,
+    yes_narrow: bool,
+    include_scrape: bool | None,
+    include_recheck_html: bool | None,
+    include_generate_html: bool | None,
+    include_noteup: bool | None,
+    include_enrich: bool | None,
+    include_canary: bool | None,
+    include_hopt: bool | None,
+    include_legis: bool | None,
+    include_legis_history: bool | None,
+    include_relatedcaps: bool | None,
+    include_backfill_translations: bool | None,
+    include_validate: bool | None,
+    include_full_reconcile: bool | None,
+    include_orphan_mark: bool | None,
+    dry_run: bool,
+    yes: bool,
+    no_events: bool,
+) -> None:
+    """Profile-driven incremental refresh.
+
+    Composes existing subcommands (scrape / recheck-html / generate-html /
+    scrape-noteup / enrich / …) into a cadence-appropriate plan. Every
+    profile is idempotent — running a heavier profile than needed just
+    burns a few extra enum calls.
+
+    \b
+    Examples:
+      hklii update -p http://127.0.0.1:8888          # daily default
+      hklii update --profile weekly -p http://127.0.0.1:8888
+      hklii update --profile monthly -p http://127.0.0.1:8888
+      hklii update --profile daily --dry-run -p http://127.0.0.1:8888
+    """
+    from .update import UpdateLockHeldError, UpdateRunner, UpdateRunnerError
+
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Running update without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+
+    try:
+        runner = UpdateRunner(
+            profile=profile,
+            output=output,
+            proxies=list(proxies),
+            direct=direct,
+            recent_days=recent_days,
+            items_per_page=items_per_page,
+            recheck_max_age_days=recheck_max_age_days,
+            generate_html_limit=generate_html_limit,
+            enrich_retry_limit=enrich_retry_limit,
+            canary_divergence_threshold=canary_divergence_threshold,
+            validate_sample=validate_sample,
+            include_scrape=include_scrape,
+            include_recheck_html=include_recheck_html,
+            include_generate_html=include_generate_html,
+            include_noteup=include_noteup,
+            include_enrich=include_enrich,
+            include_canary=include_canary,
+            include_hopt=include_hopt,
+            include_legis=include_legis,
+            include_legis_history=include_legis_history,
+            include_relatedcaps=include_relatedcaps,
+            include_backfill_translations=include_backfill_translations,
+            include_validate=include_validate,
+            include_full_reconcile=include_full_reconcile,
+            include_orphan_mark=include_orphan_mark,
+            yes_narrow=yes_narrow,
+        )
+    except UpdateRunnerError as exc:
+        raise click.UsageError(str(exc))
+
+    # Advisory lock: acquire before any wire calls or DB writes.
+    # Dry-run STILL takes the lock so a concurrent live run can't sneak
+    # in while the operator is inspecting a plan.
+    try:
+        lock_fd = runner.acquire_lock()
+    except UpdateLockHeldError as exc:
+        click.secho(f"lock held: {exc}", fg="red", err=True)
+        raise click.exceptions.Exit(code=2)
+
+    # Preflight: peek at the shared CheckpointDB lock so we fail fast
+    # if a standalone writer (`hklii scrape`, `hklii enrich`, etc.) is
+    # already running. Without this, update's steps would each open
+    # CheckpointDB and trip a CheckpointLockError mid-run — noisier and
+    # harder to diagnose than a single "peer writer running" exit at
+    # start. This is a peek only; the actual lock is acquired per-step
+    # by CheckpointDB.__init__ as before.
+    from .checkpoint import CheckpointDB
+    db_path = output / ".checkpoint.db"
+    if db_path.exists() and CheckpointDB.is_locked_by_peer(str(db_path)):
+        click.secho(
+            "checkpoint db lock is held by another writer "
+            f"({db_path}.lock). Wait for the peer scrape/enrich/etc. "
+            "to finish or kill it.",
+            fg="red", err=True,
+        )
+        runner.release_lock(lock_fd)
+        raise click.exceptions.Exit(code=2)
+
+    try:
+        if dry_run:
+            click.echo(runner.format_plan())
+            click.echo("")
+            click.echo("(dry-run — no wire calls or DB writes performed)")
+            return
+
+        # Live-run dispatch — walk the plan and delegate.
+        # NOTE: live execution is deliberately minimal in this initial
+        # ship. Each step is dispatched to its corresponding _run_* helper.
+        # Coverage-canary and orphan-mark are internal to update.py.
+        failures = asyncio.run(
+            _dispatch_update_plan(runner, no_events=no_events)
+        )
+        if failures:
+            click.secho(
+                f"update: {failures} step(s) failed", fg="red", err=True,
+            )
+            raise click.exceptions.Exit(code=1)
+    finally:
+        runner.release_lock(lock_fd)
+
+
+async def _dispatch_update_plan(runner, no_events: bool) -> int:
+    """Execute an UpdateRunner plan against the real subcommand helpers.
+
+    Each step calls the same _run_* helper the standalone subcommand uses;
+    steps that don't map cleanly (coverage_canary, orphan_mark) run inline.
+
+    Returns the count of steps that raised; the CLI turns non-zero into
+    a non-zero exit code so `hklii update && …` chaining works. Also
+    prints an end-of-run summary line grouping per-step ok/failed state.
+    """
+    plan = runner.plan()
+    failures = 0
+    step_states: list[tuple[str, str]] = []  # (name, "ok" | "FAIL: <err>")
+    for step in plan:
+        click.echo(f"→ {step.name}")
+        try:
+            if step.name == "scrape":
+                await _run_update_scrape(runner, step, no_events)
+            elif step.name == "recheck_html":
+                await _run_recheck_html(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    limit=step.kwargs.get("limit"),
+                    max_age_days=step.kwargs.get("max_age_days"),
+                    no_events=no_events,
+                )
+            elif step.name == "generate_html":
+                _run_update_generate_html(runner, step)
+            elif step.name == "scrape_noteup":
+                await _run_scrape_noteup(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    courts=None,
+                    limit=None, no_events=no_events,
+                )
+            elif step.name == "enrich":
+                await _run_enrich(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    do_summaries=True, do_appeal_history=True,
+                    limit=step.kwargs.get("retry_limit"),
+                    no_events=no_events,
+                )
+            elif step.name == "coverage_canary":
+                await _run_coverage_canary(runner, step, no_events)
+            elif step.name == "scrape_hopt":
+                await _run_scrape_hopt(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    abbrs=("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
+                    langs=("en", "tc"),
+                    limit=None, no_events=no_events,
+                )
+            elif step.name == "scrape_legis":
+                await _run_scrape_legis(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    cap_types=("ord", "reg", "instrument"),
+                    langs=("en", "tc"),
+                    limit=None,
+                    no_events=no_events,
+                )
+            elif step.name == "backfill_legis_history":
+                await _run_backfill_legis_history(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    limit=None,
+                    no_events=no_events,
+                )
+            elif step.name == "backfill_case_translations":
+                await _run_backfill_case_translations(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    limit=None,
+                    no_events=no_events,
+                )
+            elif step.name == "scrape_relatedcaps":
+                # Fresh-diff pattern: reset relatedcap_fetches to pending so
+                # the scraper re-fetches every combo and updates ord_reg_edges
+                # via INSERT OR IGNORE. Idempotent w.r.t. edges themselves.
+                _reset_relatedcap_fetches_via_checkpoint(runner.output)
+                await _run_scrape_relatedcaps(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    cap_range=(1, 1200),
+                    abbrs=("ord", "reg"),
+                    langs=("en", "tc"),
+                    limit=None,
+                    no_events=no_events,
+                )
+            elif step.name == "validate":
+                _run_update_validate(runner, step)
+            elif step.name == "full_reconcile":
+                await _run_update_scrape(runner, step, no_events)
+            elif step.name == "orphan_mark":
+                _run_update_orphan_mark(runner)
+            else:
+                click.echo(f"  (unknown step {step.name}, skipping)")
+            step_states.append((step.name, "ok"))
+        except Exception as exc:  # noqa: BLE001
+            failures += 1
+            step_states.append(
+                (step.name, f"FAIL: {type(exc).__name__}"),
+            )
+            click.secho(f"  step {step.name} failed: {exc}", fg="red", err=True)
+
+    # End-of-run summary — one line + a per-step tally so an operator
+    # reading `hklii update` output (or logs of a scheduled run) sees
+    # the aggregate outcome without scanning intermediate step output.
+    ok = len(step_states) - failures
+    total = len(step_states)
+    click.echo("")
+    click.echo(
+        f"Summary: {ok}/{total} step(s) ok"
+        + (f", {failures} failed" if failures else "")
+    )
+    for name, state in step_states:
+        marker = "✓" if state == "ok" else "✗"
+        click.echo(f"  {marker} {name} — {state}")
+    return failures
+
+
+async def _run_update_scrape(runner, step, no_events: bool) -> None:
+    """Delegate to the same helper as `hklii scrape`, threading through
+    the narrow-window kwargs from the plan as a single EnumWindow value
+    object so the four coupled fields can't drift apart at hop layers."""
+    kw = step.kwargs
+    window = EnumWindow(
+        min_date_text=kw.get("min_date"),
+        max_date_text=kw.get("max_date"),
+        sort=kw.get("sort"),
+        items_per_page=kw.get("items_per_page") or 10_000,
+    )
+    await _run_scrape(ScrapeConfig(
+        output=runner.output,
+        fmt_set={"html", "json", "txt", "doc"} if kw.get("allow_doc") else {"html", "json", "txt"},
+        proxies=runner.proxies,
+        direct=runner.direct,
+        court_list=ALL_COURTS,
+        limit=None,
+        resume=False,
+        with_summaries=kw.get("with_summaries", True),
+        with_appeal_history=kw.get("with_appeal_history", True),
+        langs=("en", "tc"),
+        retry_failed=False,
+        enum_max_age=0,
+        save_enum_responses=False,
+        no_events=no_events,
+        window=window,
+    ))
+
+
+def _run_update_generate_html(runner, step) -> None:
+    """Call the generate-html helper synchronously with the plan's limit."""
+    from .checkpoint import CheckpointDB
+    from .html_generator import HtmlGenerator
+    db_path = runner.output / ".checkpoint.db"
+    if not db_path.exists():
+        click.echo("  no checkpoint db — skipping generate-html")
+        return
+    db = CheckpointDB(str(db_path))
+    try:
+        gen = HtmlGenerator(
+            db, runner.output,
+            limit=step.kwargs.get("limit") or None,
+            include_failed=False, dry_run=False,
+        )
+        result = gen.generate_all()
+        click.echo(
+            f"  generate_html: candidates={result.candidates} "
+            f"generated={result.generated} failed={result.failed}"
+        )
+    finally:
+        db.close()
+
+
+async def _run_coverage_canary(runner, step, no_events: bool) -> None:
+    """13×2 `getmetacase` probe to detect silent drift, then AUTO-ESCALATE.
+
+    For every bucket whose live vs local row-count divergence is
+    ≥ threshold, run a targeted `_run_scrape` for THAT (court, lang)
+    inline (no date window → full backfill of anything missing).
+    Capped at max_escalations to bound wire cost on a catastrophic
+    divergence day. Only-DB reads if nothing diverged.
+    """
+    from .checkpoint import CheckpointDB
+    from .proxy_pool import ProxyPool
+    from .update import coverage_canary
+
+    db_path = runner.output / ".checkpoint.db"
+    if not db_path.exists():
+        click.echo("  coverage_canary: no checkpoint db — skipping")
+        return
+    db = CheckpointDB(str(db_path))
+    try:
+        if runner.direct:
+            pool = ProxyPool(proxy_urls=[], direct=True)
+        else:
+            pool = ProxyPool(proxy_urls=runner.proxies)
+            await pool.preflight()
+
+        try:
+            divergent = await coverage_canary(
+                get=pool.get,
+                checkpoint=db,
+                courts=ALL_COURTS,
+                langs=list(ALL_LANGS),
+                threshold=step.kwargs.get("threshold", 5),
+                max_escalations=step.kwargs.get("max_escalations", 3),
+            )
+        finally:
+            await pool.close()
+
+        total_buckets = len(ALL_COURTS) * len(ALL_LANGS)
+        if not divergent:
+            click.echo(
+                f"  coverage_canary: all {total_buckets} buckets within "
+                f"tolerance (threshold={step.kwargs.get('threshold', 5)})"
+            )
+            return
+
+        click.echo(
+            f"  coverage_canary: {len(divergent)} divergent bucket(s), "
+            "escalating each to a targeted scrape:"
+        )
+        for b in divergent:
+            sign = "+" if b["diff"] > 0 else ""
+            click.echo(
+                f"    - {b['court']}/{b['lang']}: "
+                f"live={b['live']} local={b['local']} "
+                f"delta={sign}{b['diff']}"
+            )
+    finally:
+        # Close the DB before handing off to _run_scrape — the target
+        # command opens its own CheckpointDB and takes the shared advisory
+        # lock (once G lands); overlapping handles risk contention.
+        db.close()
+
+    if not divergent:
+        return
+
+    # Escalation phase — one targeted scrape per divergent bucket.
+    # Each runs full-corpus for its single (court, lang) so backdated
+    # rows that the 30-day narrow window missed get picked up.
+    for b in divergent:
+        click.echo(
+            f"  ↳ escalating {b['court']}/{b['lang']} → full scrape"
+        )
+        try:
+            await _run_scrape(ScrapeConfig(
+                output=runner.output,
+                fmt_set={"html", "json", "txt", "doc"},
+                proxies=runner.proxies,
+                direct=runner.direct,
+                court_list=[b["court"]],
+                langs=(b["lang"],),
+                with_summaries=True,
+                with_appeal_history=True,
+                enum_max_age=0,
+                no_events=no_events,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            click.secho(
+                f"    escalation for {b['court']}/{b['lang']} failed: {exc}",
+                fg="red", err=True,
+            )
+
+
+def _reset_relatedcap_fetches_via_checkpoint(output: Path) -> None:
+    """Thin CLI-side wrapper over CheckpointDB.reset_relatedcap_fetches().
+
+    Kept as a helper so the dispatcher doesn't have to open+close the DB
+    inline. All actual SQL lives on the CheckpointDB accessor.
+    """
+    from .checkpoint import CheckpointDB
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        return
+    db = CheckpointDB(str(db_path))
+    try:
+        db.reset_relatedcap_fetches()
+    finally:
+        db.close()
+
+
+def _run_update_orphan_mark(runner) -> None:
+    """Flip stale downloaded rows to status='orphaned'.
+
+    Safety guard (adversarial fork finding): a partial `full_reconcile`
+    (say, VPN degrades after 4/12 courts) leaves the unenumerated
+    buckets with stale `last_seen_at`. Naive orphan_mark would flag
+    every downloaded row in those buckets — silent corpus damage.
+
+    Guard: refuse to run unless EVERY (court, lang) in the canary's
+    court list has `last_enumeration_ts` within the grace window
+    (max_ts - 1 hour). If any bucket is None or stale, abort with a
+    warning so the operator can rerun full_reconcile.
+
+    Files on disk are NEVER touched — status flips only.
+    """
+    from .checkpoint import CheckpointDB
+
+    db_path = runner.output / ".checkpoint.db"
+    if not db_path.exists():
+        click.echo("  orphan_mark: no checkpoint db — skipping")
+        return
+    db = CheckpointDB(str(db_path))
+    try:
+        # Enum-generation marker: full_reconcile's BulkScraper.enumerate()
+        # stamps `enum_runs.completed_at` when the whole (courts × langs)
+        # sweep finishes cleanly. If the run raised mid-way, completed_at
+        # stays NULL and this row is silently skipped by
+        # latest_completed_enum_run() → orphan_mark aborts. Cleaner than
+        # the timestamp-heuristic ('bucket last_seen_at within N hours')
+        # that previously guarded this path.
+        gen = db.latest_completed_enum_run()
+        if gen is None:
+            click.secho(
+                "  orphan_mark: ABORTED — no completed enum run recorded. "
+                "Rerun full_reconcile before orphan-marking.",
+                fg="yellow", err=True,
+            )
+            return
+        # The completed enum must cover every (court, lang) we intend to
+        # orphan-mark. Anything the enum didn't touch could be a live
+        # bucket whose rows would be spuriously flagged.
+        covered_courts = set(gen["courts"])
+        covered_langs = set(gen["langs"])
+        missing_courts = [c for c in ALL_COURTS if c not in covered_courts]
+        missing_langs = [l for l in ALL_LANGS if l not in covered_langs]
+        if missing_courts or missing_langs:
+            click.secho(
+                "  orphan_mark: ABORTED — latest completed enum "
+                f"(generation={gen['generation_id']}) did not cover: "
+                f"courts={missing_courts} langs={missing_langs}. "
+                "Rerun full_reconcile with the full court/lang set.",
+                fg="yellow", err=True,
+            )
+            return
+
+        # Cutoff = when the sweep started. Rows the sweep enumerated will
+        # have last_seen_at >= started_at; anything older wasn't in the
+        # sweep and is therefore not currently listed upstream. A small
+        # grace protects against clock skew between the sweep's per-row
+        # upsert_case timestamps and started_at.
+        cutoff = int(gen["started_at"]) - 60
+        n = db.mark_orphaned_below_ts(cutoff)
+        if n == 0:
+            click.echo(
+                f"  orphan_mark: no orphans found "
+                f"(generation={gen['generation_id']})"
+            )
+            return
+        click.echo(
+            f"  orphan_mark: flagged {n} row(s) as orphaned "
+            f"(generation={gen['generation_id']}, files preserved)"
+        )
+    finally:
+        db.close()
+
+
+def _run_update_validate(runner, step) -> None:
+    """Run the Validator inline; print a one-line summary. Never sys.exit.
+
+    Defaults to sample=2000 (30s vs 4min per fork research) — the
+    critical file-integrity checks (stem_coords, orphans, html_pending)
+    always walk the full tree regardless of sample. Per-row checks
+    (presence, magic, challenge_html, neutral_in_body, enrichment) are
+    the only ones affected by sampling. Pass --validate-sample 0 to run
+    full corpus.
+    """
+    from .checkpoint import CheckpointDB
+    from .validate import Validator
+    db_path = runner.output / ".checkpoint.db"
+    if not db_path.exists():
+        click.echo("  no checkpoint db — skipping validate")
+        return
+    db = CheckpointDB(str(db_path))
+    try:
+        raw_sample = step.kwargs.get("sample")
+        # 0 → full corpus (None in Validator); N > 0 → sample size.
+        sample = None if raw_sample in (None, 0) else int(raw_sample)
+        validator = Validator(db, runner.output, sample=sample)
+        report = validator.run()
+        counts = report.counts["discrepancies_by_severity"]
+        sample_note = "full corpus" if sample is None else f"sample={sample}"
+        click.echo(
+            f"  validate ({sample_note}): "
+            f"fatal={counts.get('fatal', 0)} "
+            f"warn={counts.get('warn', 0)} "
+            f"info={counts.get('info', 0)}"
+        )
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
