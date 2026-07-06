@@ -255,6 +255,27 @@ class NoteupRunner:
                     )
                     async with counter_lock:
                         result.failed += 1
+                except Exception as e:  # noqa: BLE001
+                    # Catches sqlite3.Error / IntegrityError from the
+                    # local DB inserts (insert_citation_edges,
+                    # insert_parallel_cites, mark_noteup_ok) so one bad
+                    # row can't propagate out of asyncio.gather and
+                    # terminate the whole scrape. Every sibling row
+                    # still gets processed.
+                    _log.warning(
+                        "noteup worker failure %s/%s/%s: %s: %s",
+                        rec.court, rec.year, rec.number,
+                        type(e).__name__, e,
+                    )
+                    try:
+                        self._checkpoint.mark_noteup_failed(
+                            court=rec.court, year=rec.year, number=rec.number,
+                            error=f"{type(e).__name__}: {e}",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass  # best-effort — don't nested-crash
+                    async with counter_lock:
+                        result.failed += 1
 
                 if on_progress is not None:
                     on_progress(result)
