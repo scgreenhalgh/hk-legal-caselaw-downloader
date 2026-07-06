@@ -1562,6 +1562,212 @@ async def _run_backfill_legis_history(
         db.close()
 
 
+@main.command("scrape-relatedcaps")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB + legis artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--cap-range",
+    "cap_range_str",
+    type=str,
+    default="1-1200",
+    help="Inclusive integer cap range (default: 1-1200).",
+)
+@click.option(
+    "--abbr",
+    "abbrs_str",
+    type=str,
+    default="ord,reg",
+    help="Comma-separated abbrs (default: ord,reg).",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "tc", "both"]),
+    default="both",
+    help="Language(s) (default: both).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N fetches.",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+def scrape_relatedcaps(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    cap_range_str: str,
+    abbrs_str: str,
+    lang: str,
+    limit: int | None,
+    yes: bool,
+    no_events: bool,
+) -> None:
+    """Scrape HKLII getrelatedcaps for the ord → reg cross-reference graph.
+
+    Populates ord_reg_edges. Alpha-suffix caps (32A, 622J) are excluded
+    at enumeration — HKLII returns 500 on them because num_int can't
+    parse letter suffixes.
+
+    \b
+    Examples:
+      hklii scrape-relatedcaps --proxy http://127.0.0.1:8888
+      hklii scrape-relatedcaps --cap-range 1-50 --direct --yes
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    try:
+        lo, hi = (int(x) for x in cap_range_str.split("-", 1))
+    except Exception:
+        raise click.UsageError(
+            f"Bad --cap-range {cap_range_str!r}; expected LO-HI"
+        )
+    abbrs = tuple(
+        s.strip() for s in abbrs_str.split(",") if s.strip()
+    )
+    langs = ("en", "tc") if lang == "both" else (lang,)
+    asyncio.run(_run_scrape_relatedcaps(
+        output=output, proxies=list(proxies), direct=direct,
+        cap_range=(lo, hi), abbrs=abbrs, langs=langs,
+        limit=limit, no_events=no_events,
+    ))
+
+
+async def _run_scrape_relatedcaps(
+    output: Path, proxies: list[str], direct: bool,
+    cap_range: tuple[int, int],
+    abbrs: tuple[str, ...], langs: tuple[str, ...],
+    limit: int | None, no_events: bool = False,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .events import StructuredEventLogger
+    from .proxy_pool import ProxyPool
+    from .related_caps import RelatedCapsRunner
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        raise click.UsageError(f"No checkpoint DB at {db_path}.")
+    db = CheckpointDB(str(db_path))
+
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError("No healthy proxies.")
+            workers = max(1, len(result.healthy_proxies))
+
+        runner = RelatedCapsRunner(
+            get=pool.get, checkpoint=db, output_dir=output,
+            cap_range=cap_range, abbrs=abbrs, langs=langs,
+            workers=workers, limit=limit,
+        )
+        click.echo(
+            f"Enumerating cap_range={cap_range} "
+            f"abbrs={list(abbrs)} langs={list(langs)}..."
+        )
+        upserted = runner.enumerate_pending()
+        click.echo(f"Upserted {upserted} relatedcaps rows.")
+
+        stats = db.relatedcap_stats()
+        target = stats["pending"] if limit is None else min(
+            limit, stats["pending"],
+        )
+        click.echo(
+            f"relatedcap_fetches — total={stats['total']} "
+            f"pending={stats['pending']} ok={stats['ok']} "
+            f"error={stats['error']}. target: {target}."
+        )
+        if target == 0:
+            click.echo("Nothing to fetch.")
+        else:
+            outcome = await _relatedcaps_with_progress(runner, target)
+            click.echo(
+                f"\nDone. Downloaded: {outcome.downloaded}, "
+                f"Failed: {outcome.failed}."
+            )
+            edge_count = db._conn.execute(
+                "SELECT COUNT(*) FROM ord_reg_edges"
+            ).fetchone()[0]
+            click.echo(f"ord→reg edges in DB: {edge_count:,}")
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+        db.close()
+
+
+async def _relatedcaps_with_progress(runner, target: int):
+    from rich.progress import (
+        Progress, TextColumn, BarColumn,
+        MofNCompleteColumn, TaskProgressColumn,
+        TimeElapsedColumn, TimeRemainingColumn,
+    )
+    with Progress(
+        TextColumn("[bold blue]relatedcaps"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[ok]}"),
+        TextColumn("[red]fail {task.fields[fail]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "caps", total=target, ok=0, fail=0,
+        )
+        def on_progress(stats):
+            progress.update(
+                task_id,
+                completed=stats.downloaded + stats.failed,
+                ok=stats.downloaded, fail=stats.failed,
+            )
+        return await runner.fetch_pending(on_progress=on_progress)
+
+
 @main.command("scrape-noteup")
 @click.option(
     "-o", "--output",
