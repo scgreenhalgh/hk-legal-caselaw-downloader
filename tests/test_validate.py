@@ -664,6 +664,68 @@ class TestValidateFix:
         finally:
             db.close()
 
+    def test_fix_challenge_html_on_summary_sidecar_resets_enrichment_status(
+        self, tmp_path,
+    ):
+        """Whole-codebase review (L2 semantic drift): apply_fixes on a
+        challenge_html discrepancy against .summary_en.html deletes the
+        file and flips the CASE row to pending — but leaves
+        summary_en_status='downloaded'. `hklii enrich` skips already-
+        downloaded enrichment kinds → the summary sidecar is never re-
+        fetched. Permanent state: enrichment status says 'have it', no
+        file on disk, next scrape refetches base HTML unnecessarily.
+
+        Fix must reset summary_*_status to 'pending' when a challenge
+        page discrepancy is applied against the corresponding sidecar,
+        AND must NOT flip the base case row (which is fine)."""
+        from hklii_downloader.cli import main
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_case(
+            db, "hkcfi", 2023, 1, "[2023] HKCFI 1",
+            formats=["html", "txt", "json"],
+            se_status="downloaded",
+        )
+        # Base HTML is fine
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.html", "<p>[2023] HKCFI 1</p>")
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.txt", "[2023] HKCFI 1 body")
+        _write(out, "hkcfi", 2023, "hkcfi_2023_1.json", "{}")
+        # Summary sidecar is a WAF interstitial
+        sidecar_path = _write(
+            out, "hkcfi", 2023, "hkcfi_2023_1.summary_en.html",
+            "<title>Just a moment...</title>",
+        )
+        db.close()
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "validate", "-o", str(out), "--fix", "--yes", "--json",
+        ])
+        assert result.exit_code == 0, result.output
+        assert not sidecar_path.exists(), "sidecar must be deleted"
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            # Base row must stay 'downloaded' — the base HTML is fine
+            row = db._conn.execute(
+                "SELECT status, summary_en_status FROM cases "
+                "WHERE court='hkcfi' AND year=2023 AND number=1"
+            ).fetchone()
+            assert row[0] == "downloaded", (
+                f"base case row status should stay 'downloaded'; "
+                f"got {row[0]!r}. Flipping the base row forces an "
+                "unnecessary WAF-risky re-download of the base judgment."
+            )
+            assert row[1] == "pending", (
+                f"summary_en_status should be 'pending' so `hklii enrich` "
+                f"re-fetches; got {row[1]!r} — permanent-stuck state where "
+                "enrichment thinks it has the summary but the file is gone."
+            )
+        finally:
+            db.close()
+
     def test_fix_deletes_magic_mismatch_and_flips_row(self, tmp_path):
         """Magic mismatch fatal → --fix deletes the bad file, flips row."""
         from hklii_downloader.cli import main
