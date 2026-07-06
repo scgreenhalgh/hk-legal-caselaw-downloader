@@ -1026,9 +1026,15 @@ class CheckpointDB:
             )
             self._conn.commit()
             return cur.rowcount
-        except sqlite3.OperationalError:
-            # Table doesn't exist yet — first-ever run. Nothing to reset.
-            return 0
+        except sqlite3.OperationalError as exc:
+            # Narrow the swallow to "table missing" specifically —
+            # otherwise a real op error (disk full, lock contention,
+            # corrupt image) would silently return 0 and the caller
+            # would launch scrape-relatedcaps thinking the DB is
+            # already fresh-diff-ready.
+            if "no such table" in str(exc).lower():
+                return 0
+            raise
 
     def claim_pending_relatedcap(self) -> RelatedcapRecord | None:
         row = self._conn.execute(

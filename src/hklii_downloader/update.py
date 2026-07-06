@@ -53,7 +53,7 @@ _STEP_EST: dict[str, str] = {
     "generate_html": "0 (local LibreOffice/pandoc)",
     "scrape_noteup": "~10-30 for new cases (idempotent whitelist)",
     "enrich": "~10-50 (capped at retry_limit)",
-    "coverage_canary": "~26 (13 dbs × 2 langs, page=1)",
+    "coverage_canary": "~13 (13 dbs × EN only, getmetacase)",
     "scrape_hopt": "~10 enum + new-row fetches",
     "scrape_legis": "~6 enum + new-row fetches",
     "backfill_legis_history": "~500 (missing capversions)",

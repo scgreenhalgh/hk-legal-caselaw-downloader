@@ -2714,7 +2714,15 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
             elif step.name == "orphan_mark":
                 _run_update_orphan_mark(runner)
             else:
-                click.echo(f"  (unknown step {step.name}, skipping)")
+                # A step name from plan() with no matching branch here
+                # is a wiring bug — must not pass green in the summary
+                # (adversarial review: else was previously followed by
+                # step_states.append(..., "ok"), so a rename typo would
+                # ship as a successful step).
+                raise RuntimeError(
+                    f"unknown update step {step.name!r} — plan() emitted "
+                    "a name the dispatcher does not handle"
+                )
             step_states.append((step.name, "ok"))
         except Exception as exc:  # noqa: BLE001
             failures += 1
