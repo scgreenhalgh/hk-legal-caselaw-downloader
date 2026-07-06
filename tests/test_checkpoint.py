@@ -897,6 +897,54 @@ class TestReleaseInProgressPerDomain:
         assert again is not None
 
 
+class TestLastEnumerationTsBilingualCollapse:
+    """Whole-codebase review (L2 semantic drift): upsert_case collapses
+    bilingual cases to lang='en' (checkpoint.py:329-332). last_enumer-
+    ation_ts filters WHERE lang=? — so a court whose only cases are
+    bilingual returns None for last_enumeration_ts(court, 'tc') even
+    though those cases WERE enumerated under the tc pass.
+
+    Scraper.py:194's enum-cache skip is driven by that value, so the
+    tc pass never gets its cache hit — every bilingual-only court
+    re-enumerates its tc bucket on every run, wasting one full
+    enumeration per invocation. Same shape as the coverage_canary
+    bilingual-TC finding, hit from the enum-cache side.
+
+    Guard: last_enumeration_ts must consider bilingual cases as having
+    been enumerated under BOTH langs — MAX(last_seen_at) across every
+    lang for the court is the right shape, since one enumeration bumps
+    the same row regardless of which lang pass it came from.
+    """
+
+    def test_bilingual_only_court_returns_ts_for_tc_query(self, tmp_path):
+        import time
+        from hklii_downloader.checkpoint import CheckpointDB
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        ts = int(time.time()) - 3600
+        # Bilingual case: upsert en → then tc. UPSERT keeps lang='en'
+        # but bumps last_seen_at on the tc pass.
+        db.upsert_case("hkcfi", 2026, 1, "N", "T", "2026-01-01",
+                       lang="en", last_seen_at=ts)
+        db.upsert_case("hkcfi", 2026, 1, "N", "T", "2026-01-01",
+                       lang="tc", last_seen_at=ts + 60)
+
+        stored_lang = db._conn.execute(
+            "SELECT lang FROM cases WHERE court='hkcfi' AND year=2026 "
+            "AND number=1"
+        ).fetchone()[0]
+        assert stored_lang == "en"  # UPSERT collapse — precondition
+
+        tc_ts = db.last_enumeration_ts("hkcfi", "tc")
+        assert tc_ts is not None, (
+            "last_enumeration_ts(court, 'tc') returned None even though "
+            "the tc enumeration bumped last_seen_at on the bilingual row. "
+            "Scraper.py's enum-cache skip driven by this value never "
+            "fires for the tc pass on bilingual-only courts."
+        )
+        assert tc_ts >= ts, tc_ts
+
+
 class TestIntegrityCheck:
     def test_healthy_db_opens_fine(self, tmp_path):
         from hklii_downloader.checkpoint import CheckpointDB
