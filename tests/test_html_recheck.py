@@ -274,3 +274,110 @@ class TestRecheckHtmlSubcommand:
         result = runner.invoke(main, ["recheck-html"])
         assert result.exit_code != 0
         assert "proxy" in result.output.lower() or "--direct" in result.output.lower()
+
+
+class TestRecheckHtmlMaxAgeDaysFlag:
+    """`--max-age-days N` bounds the queue by case date so `hklii update`
+    can call recheck-html without wasting API calls on ancient rows.
+    Threading: cli → _run_recheck_html → HtmlRecheckRunner → pending_html_recheck.
+    """
+
+    def test_flag_appears_in_help(self):
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+        runner = CliRunner()
+        result = runner.invoke(main, ["recheck-html", "--help"])
+        assert result.exit_code == 0
+        assert "--max-age-days" in result.output, result.output
+
+    def test_max_age_days_flag_reaches_pending_html_recheck(
+        self, tmp_path, monkeypatch,
+    ):
+        """The flag value must arrive at CheckpointDB.pending_html_recheck."""
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+        from hklii_downloader.checkpoint import CheckpointDB
+        # Prime a checkpoint DB so cli doesn't UsageError-out
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2026, 1, "[2026] HKCFI 1", "T", "2026-07-01")
+        db.mark_downloaded("hkcfi", 2026, 1, ["doc"], html_pending_ts=1)
+        db.close()
+
+        calls = []
+        orig = CheckpointDB.pending_html_recheck
+
+        def spy(self, limit=None, max_age_days=None, _today_iso=None):
+            calls.append({
+                "limit": limit,
+                "max_age_days": max_age_days,
+                "_today_iso": _today_iso,
+            })
+            return orig(
+                self, limit=limit, max_age_days=max_age_days,
+                _today_iso=_today_iso,
+            )
+
+        monkeypatch.setattr(
+            "hklii_downloader.checkpoint.CheckpointDB.pending_html_recheck",
+            spy,
+        )
+        # Stub out ProxyPool.preflight + recheck_all so we don't need a real pool
+        async def fake_preflight(self):
+            from hklii_downloader.proxy_pool import PreflightResult
+            return PreflightResult(home_ip="1.2.3.4", healthy_proxies=[], leaked=[])
+        monkeypatch.setattr(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", fake_preflight,
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "recheck-html", "-o", str(tmp_path),
+            "--direct", "--yes",
+            "--max-age-days", "30",
+            "--limit", "5",
+        ])
+        # Filter to calls that came through the CLI path — HtmlRecheckRunner
+        # calls pending_html_recheck internally too.
+        relevant = [c for c in calls if c["max_age_days"] == 30]
+        assert relevant, (
+            f"expected pending_html_recheck called with max_age_days=30; "
+            f"got calls={calls}, output={result.output}"
+        )
+
+    def test_absent_flag_passes_none(self, tmp_path, monkeypatch):
+        """Back-compat: absent flag → max_age_days=None (unlimited)."""
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2026, 1, "[2026] HKCFI 1", "T", "2026-07-01")
+        db.mark_downloaded("hkcfi", 2026, 1, ["doc"], html_pending_ts=1)
+        db.close()
+
+        calls = []
+        orig = CheckpointDB.pending_html_recheck
+
+        def spy(self, limit=None, max_age_days=None, _today_iso=None):
+            calls.append(max_age_days)
+            return orig(
+                self, limit=limit, max_age_days=max_age_days,
+                _today_iso=_today_iso,
+            )
+
+        monkeypatch.setattr(
+            "hklii_downloader.checkpoint.CheckpointDB.pending_html_recheck",
+            spy,
+        )
+        async def fake_preflight(self):
+            from hklii_downloader.proxy_pool import PreflightResult
+            return PreflightResult(home_ip="1.2.3.4", healthy_proxies=[], leaked=[])
+        monkeypatch.setattr(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", fake_preflight,
+        )
+
+        runner = CliRunner()
+        runner.invoke(main, [
+            "recheck-html", "-o", str(tmp_path), "--direct", "--yes",
+        ])
+        # None means "unbounded" — that must be one of the observed calls
+        assert None in calls, f"expected None among calls; got {calls}"

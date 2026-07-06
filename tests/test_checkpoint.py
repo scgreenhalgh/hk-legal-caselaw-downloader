@@ -86,6 +86,221 @@ class TestHtmlPendingTracker:
         assert len(rows) == 3
 
 
+class TestOrphanDetectionAndMarking:
+    """`hklii update --profile quarterly` marks rows upstream no longer
+    lists as status='orphaned' (never deletes files).
+
+    Detection: after a full-corpus enum bumps last_seen_at on every
+    currently-listed row, anything with an older last_seen_at is stale
+    and treated as orphaned.
+    """
+
+    def test_find_orphans_only_downloaded_returns_stale_downloaded_rows(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2020, 1, "[2020] X 1", "T", "2020-01-01",
+                       last_seen_at=100)
+        db.mark_downloaded("hkcfi", 2020, 1, ["html"])
+        db.upsert_case("hkcfi", 2026, 1, "[2026] X 1", "T", "2026-07-01",
+                       last_seen_at=1_000_000)
+        db.mark_downloaded("hkcfi", 2026, 1, ["html"])
+        orphans = db.find_orphans(as_of_ts=999_999, only_downloaded=True)
+        assert len(orphans) == 1
+        assert orphans[0].year == 2020
+
+    def test_find_orphans_only_downloaded_excludes_pending(self):
+        """Pending / failed rows aren't orphans under the strict filter —
+        they just weren't finished. Only downloaded → orphaned."""
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2020, 1, "[2020] X 1", "T", "2020-01-01",
+                       last_seen_at=100)
+        # No mark_downloaded — stays pending
+        orphans = db.find_orphans(as_of_ts=999_999, only_downloaded=True)
+        assert orphans == []
+
+    def test_mark_orphaned_excludes_row_from_downloaded_orphan_scan(self):
+        """Observable behavior: after mark_orphaned, find_orphans(
+        only_downloaded=True) no longer surfaces the row (it's no longer
+        status='downloaded')."""
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2020, 1, "[2020] X 1", "T", "2020-01-01",
+                       last_seen_at=100)
+        db.mark_downloaded("hkcfi", 2020, 1, ["html"])
+        # Before: findable as a downloaded orphan
+        assert db.find_orphans(as_of_ts=999_999, only_downloaded=True)
+        db.mark_orphaned("hkcfi", 2020, 1)
+        # After: no longer downloaded → not surfaced
+        assert db.find_orphans(as_of_ts=999_999, only_downloaded=True) == []
+
+    def test_orphaned_rows_excluded_from_pending_html_recheck(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_case("hkcfi", 2020, 1, "[2020] X 1", "T", "2020-01-01",
+                       last_seen_at=100)
+        db.mark_downloaded("hkcfi", 2020, 1, ["doc"], html_pending_ts=1)
+        db.mark_orphaned("hkcfi", 2020, 1)
+        # Even though html_pending_at_hklii is stamped, orphaned rows
+        # shouldn't appear in the recheck queue.
+        assert db.pending_html_recheck() == []
+
+    def test_mark_orphaned_below_ts_batch_flip(self):
+        """Single-UPDATE batch variant used by hklii update — avoids the
+        N-fsync problem of the per-row loop."""
+        db = CheckpointDB(":memory:")
+        # Stale downloaded row → orphan candidate
+        db.upsert_case("hkcfi", 2020, 1, "[2020] X 1", "T", "2020-01-01",
+                       last_seen_at=100)
+        db.mark_downloaded("hkcfi", 2020, 1, ["html"])
+        # Fresh downloaded row → keep
+        db.upsert_case("hkcfi", 2026, 1, "[2026] X 1", "T", "2026-07-01",
+                       last_seen_at=1_000_000)
+        db.mark_downloaded("hkcfi", 2026, 1, ["html"])
+        # Pending row → don't touch
+        db.upsert_case("hkcfi", 2020, 2, "[2020] X 2", "T", "2020-01-01",
+                       last_seen_at=100)
+        n = db.mark_orphaned_below_ts(cutoff_ts=999_999)
+        assert n == 1
+        assert db.find_orphans(as_of_ts=999_999, only_downloaded=True) == []
+        # Idempotent: re-running finds 0 more
+        assert db.mark_orphaned_below_ts(cutoff_ts=999_999) == 0
+
+
+class TestEnumRunGeneration:
+    """`enum_runs` table anchors orphan_mark on an explicit 'this enum
+    completed cleanly and covered N buckets' marker instead of scanning
+    per-bucket last_seen_at timestamps."""
+
+    def test_start_enum_run_returns_monotonic_id(self):
+        db = CheckpointDB(":memory:")
+        g1 = db.start_enum_run(["hkcfi"], ["en"])
+        g2 = db.start_enum_run(["hkca"], ["en"])
+        assert g2 > g1
+
+    def test_incomplete_run_hidden_from_latest_completed(self):
+        db = CheckpointDB(":memory:")
+        db.start_enum_run(["hkcfi", "hkca"], ["en", "tc"])
+        # NOT completed
+        assert db.latest_completed_enum_run() is None
+
+    def test_completed_run_surfaces_with_courts_and_langs(self):
+        db = CheckpointDB(":memory:")
+        g = db.start_enum_run(["hkcfi", "hkca"], ["en", "tc"])
+        db.complete_enum_run(g)
+        latest = db.latest_completed_enum_run()
+        assert latest is not None
+        assert latest["generation_id"] == g
+        assert latest["courts"] == ["hkcfi", "hkca"]
+        assert latest["langs"] == ["en", "tc"]
+        assert latest["completed_at"] is not None
+
+    def test_latest_returns_most_recent_completed(self):
+        db = CheckpointDB(":memory:")
+        g1 = db.start_enum_run(["hkcfi"], ["en"])
+        db.complete_enum_run(g1)
+        # Second sweep starts but doesn't finish → latest is still g1
+        db.start_enum_run(["hkca"], ["en"])
+        latest = db.latest_completed_enum_run()
+        assert latest["generation_id"] == g1
+        # Third sweep completes → new latest
+        g3 = db.start_enum_run(["hkdc"], ["en"])
+        db.complete_enum_run(g3)
+        assert db.latest_completed_enum_run()["generation_id"] == g3
+
+
+class TestResetRelatedcapFetches:
+    """`hklii update --profile quarterly` calls this to force a fresh
+    getrelatedcaps diff. Must be idempotent w.r.t. edges (INSERT OR
+    IGNORE elsewhere) and safe when the table doesn't exist yet."""
+
+    def test_resets_ok_rows_to_pending(self):
+        db = CheckpointDB(":memory:")
+        db.upsert_relatedcap_fetch("32", "ord", "en")
+        db.mark_relatedcap_ok("32", "ord", "en", edge_count=4, fetched_at="x")
+        db.upsert_relatedcap_fetch("32", "reg", "en")
+        db.mark_relatedcap_ok("32", "reg", "en", edge_count=0, fetched_at="x")
+        n = db.reset_relatedcap_fetches()
+        assert n == 2
+        stats = db.relatedcap_stats()
+        assert stats["pending"] == 2
+        assert stats["ok"] == 0
+
+    def test_no_op_when_table_missing(self, tmp_path):
+        """A fresh DB with no relatedcap_fetches table yet must not raise."""
+        import sqlite3
+        db_path = tmp_path / "cp.db"
+        # Build a bare cases-only schema without relatedcap_fetches
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE cases (court TEXT, year INT, number INT, "
+            "neutral TEXT, title TEXT, date TEXT, status TEXT DEFAULT 'pending', "
+            "formats TEXT, error TEXT, lang TEXT DEFAULT 'en', "
+            "PRIMARY KEY (court, year, number))"
+        )
+        conn.commit()
+        conn.close()
+        # Drop the table CheckpointDB would create on open, to simulate
+        # 'never scraped relatedcaps'.
+        db = CheckpointDB(str(db_path))
+        db._conn.execute("DROP TABLE IF EXISTS relatedcap_fetches")
+        db._conn.commit()
+        # Must not raise
+        assert db.reset_relatedcap_fetches() == 0
+
+
+class TestPendingHtmlRecheckMaxAge:
+    """`hklii update daily` bounds recheck-html by CASE DATE (not stamp) so we
+    don't waste calls on ancient rows where HKLII has permanently declined to
+    render HTML. The stamp (`html_pending_at_hklii`) itself bumps forward on
+    every re-poll, so it's not a stable 'give up trying this row' signal —
+    the case's own `date` column is."""
+
+    _TODAY = "2026-07-06"
+
+    def _seed(self, db, court, year, num, case_date, pending_ts):
+        db.upsert_case(court, year, num, f"[{year}] X {num}", "T v T", case_date)
+        db.mark_downloaded(court, year, num, ["doc"], html_pending_ts=pending_ts)
+
+    def test_max_age_none_returns_all(self):
+        """Back-compat: default kwarg absent → identical to today's behaviour."""
+        db = CheckpointDB(":memory:")
+        self._seed(db, "hkcfi", 2026, 1, "2026-07-01", 1)
+        self._seed(db, "hkcfi", 2020, 1, "2020-01-01", 2)
+        rows = db.pending_html_recheck()
+        assert len(rows) == 2
+
+    def test_max_age_zero_returns_all(self):
+        """0 = unlimited (used by quarterly profile)."""
+        db = CheckpointDB(":memory:")
+        self._seed(db, "hkcfi", 2026, 1, "2026-07-01", 1)
+        self._seed(db, "hkcfi", 2020, 1, "2020-01-01", 2)
+        rows = db.pending_html_recheck(max_age_days=0, _today_iso=self._TODAY)
+        assert len(rows) == 2
+
+    def test_max_age_30_excludes_older_case_dates(self):
+        db = CheckpointDB(":memory:")
+        self._seed(db, "hkcfi", 2026, 1, "2026-07-01", 1)   # 5 days ago — include
+        self._seed(db, "hkcfi", 2026, 2, "2026-05-01", 2)   # ~66 days ago — exclude
+        self._seed(db, "hkcfi", 2020, 1, "2020-01-01", 3)   # ancient — exclude
+        rows = db.pending_html_recheck(max_age_days=30, _today_iso=self._TODAY)
+        assert len(rows) == 1
+        assert rows[0].year == 2026 and rows[0].number == 1
+
+    def test_max_age_30_boundary_includes_exact_cutoff(self):
+        """Cases dated exactly (today - N days) should be included."""
+        db = CheckpointDB(":memory:")
+        self._seed(db, "hkcfi", 2026, 1, "2026-06-06", 1)   # exactly 30 days
+        self._seed(db, "hkcfi", 2026, 2, "2026-06-05", 2)   # 31 days — exclude
+        rows = db.pending_html_recheck(max_age_days=30, _today_iso=self._TODAY)
+        assert {r.number for r in rows} == {1}
+
+    def test_order_by_pending_ts_ascending_within_age_window(self):
+        """Age filter narrows the queue; order-by remains oldest-stamp-first."""
+        db = CheckpointDB(":memory:")
+        self._seed(db, "hkcfi", 2026, 10, "2026-07-01", pending_ts=200)
+        self._seed(db, "hkcfi", 2026, 11, "2026-07-02", pending_ts=100)  # older stamp
+        self._seed(db, "hkcfi", 2026, 12, "2026-05-01", pending_ts=50)   # out of window
+        rows = db.pending_html_recheck(max_age_days=30, _today_iso=self._TODAY)
+        assert [r.number for r in rows] == [11, 10]
+
+
 class TestLockFallbackWarning:
     """S-4: silently swallowing an OSError when creating the .lock file
     means two concurrent scrape processes race with no warning. If the

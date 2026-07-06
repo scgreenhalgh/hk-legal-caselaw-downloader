@@ -326,3 +326,122 @@ class TestEnumerateCourt:
             f"expected HTTPStatusError on 404, got {type(raised).__name__}"
         )
         assert calls == 1, f"404 must not be retried, got calls={calls}"
+
+
+class TestEnumerateCourtDateWindow:
+    """New date-window + sort kwargs for lean incremental enumeration.
+
+    Rationale: `hklii update` needs to enumerate only recent cases via
+    HKLII's minDateText/maxDateText filters (DD/MM/YYYY) with sort=-date,
+    while preserving byte-identical wire behaviour when kwargs are absent.
+    """
+
+    def _empty_response(self):
+        return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+    async def test_min_date_text_appears_in_url(self):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return self._empty_response()
+
+        await enumerate_court(
+            "hkcfi", mock_get, min_date_text="01/07/2026",
+        )
+        assert len(seen) == 1
+        assert "minDateText=01%2F07%2F2026" in seen[0], (
+            f"minDateText missing or not urlencoded: {seen[0]}"
+        )
+
+    async def test_max_date_text_appears_in_url(self):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return self._empty_response()
+
+        await enumerate_court(
+            "hkcfi", mock_get, max_date_text="06/07/2026",
+        )
+        assert "maxDateText=06%2F07%2F2026" in seen[0], seen[0]
+
+    async def test_sort_appears_in_url(self):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return self._empty_response()
+
+        await enumerate_court("hkcfi", mock_get, sort="-date")
+        assert "sort=-date" in seen[0], seen[0]
+
+    async def test_all_three_absent_when_kwargs_none(self):
+        """Byte-stability: no new params leak into legacy full-corpus enum."""
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return self._empty_response()
+
+        await enumerate_court("hkcfi", mock_get)
+        url = seen[0]
+        assert "minDateText" not in url, f"leaked minDateText: {url}"
+        assert "maxDateText" not in url, f"leaked maxDateText: {url}"
+        assert "sort=" not in url, f"leaked sort: {url}"
+
+    async def test_items_per_page_500_appears_in_url(self):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return self._empty_response()
+
+        await enumerate_court("hkcfi", mock_get, items_per_page=500)
+        assert "itemsPerPage=500" in seen[0], seen[0]
+
+    async def test_paginates_across_two_pages_with_narrow_window(self):
+        """Date/sort kwargs must be threaded onto every page request,
+        not just page 1."""
+        seen = []
+        pages = [
+            {
+                "totalfiles": 576,
+                "judgments": [
+                    {**SAMPLE_ENTRY, "path": f"/en/cases/hkcfi/2026/{i}"}
+                    for i in range(1, 501)
+                ],
+            },
+            {
+                "totalfiles": 576,
+                "judgments": [
+                    {**SAMPLE_ENTRY, "path": f"/en/cases/hkcfi/2026/{i}"}
+                    for i in range(501, 577)
+                ],
+            },
+        ]
+        idx = 0
+
+        async def mock_get(url, **kw):
+            nonlocal idx
+            seen.append(url)
+            data = pages[idx]
+            idx += 1
+            return httpx.Response(200, json=data)
+
+        cases = await enumerate_court(
+            "hkcfi", mock_get,
+            items_per_page=500,
+            min_date_text="06/06/2026",
+            max_date_text="06/07/2026",
+            sort="-date",
+        )
+        assert len(cases) == 576
+        assert len(seen) == 2
+        for url in seen:
+            assert "minDateText=06%2F06%2F2026" in url, url
+            assert "maxDateText=06%2F07%2F2026" in url, url
+            assert "sort=-date" in url, url
+            assert "itemsPerPage=500" in url, url
+        assert "page=1" in seen[0]
+        assert "page=2" in seen[1]

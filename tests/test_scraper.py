@@ -1429,6 +1429,93 @@ class TestBulkScraperEnumerate:
         assert db.stats()["pending"] == 2
 
 
+class TestBulkScraperNarrowWindowEnumerate:
+    """`hklii update` needs BulkScraper to forward date-window + items_per_page
+    + sort kwargs into enumerate_court. Byte-stable wire when kwargs default."""
+
+    async def test_items_per_page_reaches_enumerator(self, tmp_path):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        db = _make_db()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            items_per_page=500,
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert any("itemsPerPage=500" in u for u in seen), seen
+
+    async def test_min_date_text_reaches_enumerator(self, tmp_path):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        db = _make_db()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            min_date_text="06/06/2026",
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert any("minDateText=06%2F06%2F2026" in u for u in seen), seen
+
+    async def test_max_date_text_reaches_enumerator(self, tmp_path):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        db = _make_db()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            max_date_text="06/07/2026",
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert any("maxDateText=06%2F07%2F2026" in u for u in seen), seen
+
+    async def test_sort_reaches_enumerator(self, tmp_path):
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        db = _make_db()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            sort="-date",
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        assert any("sort=-date" in u for u in seen), seen
+
+    async def test_absent_kwargs_are_byte_stable(self, tmp_path):
+        """When BulkScraper is constructed without any of the four new kwargs,
+        the URL sent must NOT contain minDateText/maxDateText/sort — legacy
+        wire behaviour preserved."""
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        db = _make_db()
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+        for url in seen:
+            assert "minDateText" not in url, url
+            assert "maxDateText" not in url, url
+            assert "sort=" not in url, url
+            # itemsPerPage defaults to 10_000 for back-compat
+            assert "itemsPerPage=10000" in url, url
+
+
 class TestBulkScraperDownload:
     async def test_downloads_pending_cases(self, tmp_path):
         async def mock_get(url, **kw):
