@@ -1,86 +1,122 @@
 /effort max
 /ultracode
 
-You are resuming the HKLII downloader project after the citation-graph
-milestone. **No new milestone is queued** — the next session's task is
-whatever the user asks. This prompt boots you cleanly so the first
-message doesn't burn context re-deriving state.
+You are resuming the HKLII downloader project after the `hklii update`
+milestone shipped. **Immediate task (this session): run ONE ultracode
+review of the shipped diff, apply anything that survives verification,
+then wait for the user's next request.**
 
-## Load context (in this order — do not skim)
+## Load context (do not skim)
 
-1. Read `/Users/seangreenhalgh/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md` — the auto-memory index. It's small; read every line.
-2. Open, in this order, the memory files that carry the current state:
-   - `memory/backup-coverage-final.md` — pre-graph headline corpus state (162,331 cases + legis + HOPT + translations = ~202k docs, ~29-30 GB).
-   - `memory/citation-graph-shipped.md` — this session's shipped work: 242,488 forward edges, 11,617 parallels, 4,506 ord/reg edges, throttler retuned 3-5×, silent-empty gotcha, top hub cases.
-   - `memory/hklii-api-structure.md` — endpoint reference. All 11 API scrapers we hit.
-   - `memory/hklii-waf-status.md` — origin behaviour + rationale for the throttler defaults.
-   - `memory/retro-2026-07-06.md` — earlier session's lessons about coverage claims, sample extrapolation, and enumerator transparency.
-3. Read `docs/backup-coverage-2026-07-06.md` and `docs/citation-graph-design.md` for the current shipped design.
+Open, in this order, the memory files that carry current state. Do NOT
+paraphrase them into working memory — open them:
 
-DO NOT paraphrase these into working memory — open them.
+1. `/Users/seangreenhalgh/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md`
+   — the auto-memory index. Small; read every line.
+2. `memory/update-command-shipped.md` — the milestone that just shipped.
+   Profile matrix, dispatch scope, post-ship refinements (11 review
+   findings applied), follow-up round A-H (8 items applied), altitude
+   gaps addressed. **This is the file to know cold before the review.**
+3. `memory/citation-graph-shipped.md` — prior milestone (forward edges,
+   parallels, ord/reg). Still relevant: monthly profile deliberately
+   excludes scrape-relatedcaps because ord/reg is 100 % locally derivable.
+4. `memory/backup-coverage-final.md` — pre-graph headline corpus state
+   (162,331 cases + legis + HOPT + translations = ~202k docs, ~30 GB).
+5. `memory/hklii-waf-status.md` — origin behaviour + throttler rationale.
+6. `memory/retro-2026-07-06.md` — lessons about coverage claims and
+   enumerator transparency.
 
-## Session position (start-of-session ground truth)
-
-Verify the following holds before answering any substantive question.
-If any check fails, STOP and surface — do not proceed assuming state:
+## Session position (verify before starting the review)
 
 ```bash
-# Working tree
+# Working tree + recent history
 git status
 git log --oneline -10
+
+# The shipped milestone: two atomic commits
+#   feat: hklii update — profile-driven incremental refresh
+#   test: failing tests for hklii update stack
+# plus this docs commit refreshing RESUME_PROMPT.
+
+# Corpus + DB ground truth
+sqlite3 -readonly output/.checkpoint.db "SELECT status, COUNT(*) FROM cases GROUP BY status;"
+sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM citations;"
+sqlite3 -readonly output/.checkpoint.db "SELECT name FROM sqlite_master WHERE type='table';" | sort
+sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM enum_runs;"
 
 # No rogue background work
 tmux ls 2>&1 | grep -i hklii || echo NO_TMUX
 pgrep -f "hklii scrape" | wc -l | xargs -I{} echo "hklii procs: {}"
 docker ps --filter name=hklii-vpn --format 'table {{.Names}}\t{{.Status}}'
 
-# Corpus ground truth
-sqlite3 -readonly output/.checkpoint.db "SELECT status, COUNT(*) FROM cases GROUP BY status;"
-sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM citations;"
-sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM case_parallel_cites;"
-sqlite3 -readonly output/.checkpoint.db "SELECT COUNT(*) FROM ord_reg_edges;"
-find output -name "*.noteup.json" | wc -l
-du -sh output/
+# Tests + smoke of the new command
+timeout 300 uv run pytest -q -x 2>&1 | tail -3
+uv run hklii update --profile daily -p http://127.0.0.1:8888 --dry-run 2>&1 | tail -15
 ```
 
-Expected on the clean baseline:
-- `cases`: 162,331 downloaded, no other status
-- `citations`: 242,488
-- `case_parallel_cites`: 11,617
-- `ord_reg_edges`: 4,506
-- `.noteup.json` count: 162,331
-- `output/`: ~30 GB
-- 20 `hklii-vpn-*` containers healthy
-- No live `hklii scrape*` processes
+**Expected baseline:**
+- 734 tests pass
 - Working tree clean apart from `scratchpad/`
+- git log shows the three commits above ahead of `origin/main`
+- 20 `hklii-vpn-*` containers healthy
+- Corpus: 162,337 downloaded, 11 failed (empty-content-at-HKLII pending)
+- Citations: 242,488 · Parallel cites: 11,617 · Ord/reg: 4,506
+- `enum_runs` table exists (empty until first `hklii update` live run)
 
-Test suite: **669 tests, all green** (last verified this session).
-Unpushed commits ahead of `origin/main`: some — check `git log`.
+## What shipped (skim then move on)
 
-## What NOT to do
+- `hklii update` command with profile-driven cadence (daily/weekly/monthly/quarterly/custom)
+- `EnumWindow` value object (enumerator.py) bundling min/max_date + sort + items_per_page
+- `ScrapeConfig` dataclass (cli.py) replacing 17-kwarg `_run_scrape` signature
+- `enum_runs` generation-marker table + accessors on CheckpointDB
+- `CheckpointDB.reset_relatedcap_fetches`, `mark_orphaned_below_ts`,
+  `is_locked_by_peer`, `latest_completed_enum_run`
+- Canary auto-escalation, orphan_mark gated on enum_runs coverage
+- Advisory lock at both update-level + CheckpointDB-level (documented)
+- 734 tests total (+65 since baseline)
 
-- Do NOT paraphrase memory files into a summary — read them.
-- Do NOT re-scrape any HKLII endpoint the user hasn't explicitly asked for. Every backup phase is complete: cases, enrich, legis (current + history), HOPT, translations, doc-to-html, validate, noteup, relatedcaps.
-- Do NOT re-run `scrape-relatedcaps` even for validation — the API adds nothing beyond the numeric-suffix pattern. See `citation-graph-shipped.md` "The critical ord→reg finding" for the SQL derivation.
-- Do NOT tighten the throttler further without evidence of headroom — the current retune already achieves ~35-40 req/sec / 20 workers with zero HKLII pushback observed over ~200k requests. Rolling back is fine; further tightening needs a canary.
-- Do NOT relitigate the "HKLII has a WAF" concern — `hklii-waf-status` is settled, backed by many completed runs.
-- Do NOT touch the local-viewer worktree at `~/Developer/hklii_viewer` unless the user asks. Tasks #79-#83 live there and are reserved for a fresh session in that directory.
-- Do NOT re-derive citation counts from judgment HTML — the API-backed `citations` table is canonical for the corpus we have. Local regex extraction is a fallback we discussed but explicitly deferred.
+## Immediate task: ONE ultracode code review
 
-## Likely first-question shapes and where to route
+Purpose: fresh-eyes review with the whole implementation now settled. The
+in-session review already caught + fixed 11 findings from a high-effort
+pass; a fresh multi-agent pass may surface things the in-session review
+missed because it was reviewing a moving target.
 
-- **"What did we ship last session?"** → Read `citation-graph-shipped.md`, answer from that + the corpus ground-truth checks. Don't re-derive.
-- **"Run the RAG pipeline / build the viewer"** → Worktree at `~/Developer/hklii_viewer` is where the viewer scaffold lives. Tasks #79-#83 waiting. Confirm before touching main-repo files.
-- **"Refresh the citation graph"** → Idempotent via `hklii scrape-noteup`. Only ~20-25 min at retuned throughput. Point at `citation-graph-shipped.md` first so the user knows the current state.
-- **"Compare against a fresh scrape / diff over time"** → Raw `.noteup.json` sidecars are the canonical baseline. Diff before touching the DB.
-- **"Anything else worth scraping at HKLII?"** → No, per the exhaustive endpoint audit in `docs/backup-coverage-2026-07-06.md` and this session's confirmed local-derivability for `getrelatedcaps`. Deferred items (AI case-summary service at `ai.hklii.hk`) are noted in that doc.
+**Do this:**
+1. Confirm baseline (checks above pass).
+2. Run `/code-review ultra` on the diff for the last two commits
+   (`542ed5a feat` + `1ccb5f4 test`). If the cloud review isn't
+   available in this environment, fall back to `/code-review max` on
+   `main...HEAD~3`.
+3. Verify each finding inline (don't rely solely on the reviewer's
+   confidence). Apply what survives.
+4. Add regression tests for anything you fix.
+5. Commit each fix atomically (test then feat pair per global CLAUDE.md).
 
-## Deliberate non-goals (do not re-litigate)
+**Do NOT:**
+- Reimplement anything already shipped — memory has the intent.
+- Reopen decided design questions (profile matrix, cadence, HKT clock,
+  two-lock design, canary uses getmetacase, monthly excludes relatedcaps).
+- Re-derive the plan from cli.py — read `memory/update-command-shipped.md`.
+- Skim memory files.
 
-- **AI case summaries at `ai.hklii.hk`** — separate service, endpoint unmapped, deferred by explicit choice.
-- **`getcasenoteup` sample-based diff** — the API-backed count IS the answer; there's no other source of truth on citer inbound-count.
-- **Rebuilding graph tables from disk** — supported (all raw sidecars preserved) but only if the DB is lost. Don't do it proactively.
+## After the review
+
+Wait for the user's next request. There is **no new milestone queued**
+after the review — the user is likely to pick the next feature.
+
+Likely follow-up directions the user may ask about (do not preempt):
+- Local viewer at `~/Developer/hklii_viewer` (its own worktree,
+  reserved for a separate session there)
+- AI case-summary service at `ai.hklii.hk` (deferred by explicit
+  choice; endpoint unmapped)
+- Push the current branch to `origin/main` (currently ahead by 3
+  commits)
+- Live smoke of `hklii update --profile daily` against production
+  (requires clean 20-VPN pool + user confirm)
 
 ## Ready
 
-Verify the baseline. If it holds, tell the user "clean baseline confirmed" plus a one-line summary of state, and wait for their request. If any check drifts, stop and surface.
+Run the baseline checks. If they hold, tell the user "clean baseline
+confirmed — starting ultracode review of the hklii update ship" and
+launch the review. If any check drifts, stop and surface.
