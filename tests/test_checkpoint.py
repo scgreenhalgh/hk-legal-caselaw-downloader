@@ -775,6 +775,62 @@ class TestVerifyDownloaded:
         assert broken == 0
         assert db.stats()["downloaded"] == 1
 
+    def test_fmt_doc_accepts_rtf_on_disk(self, tmp_path):
+        """Regression from whole-codebase review (L2 semantic drift):
+        scraper._fetch_doc records fmt='doc' regardless of on-disk
+        extension (Judiciary serves RTF at .doc URLs — task #67),
+        and validate.py already probes .doc/.docx/.rtf via
+        _DOC_FAMILY_EXTS. verify_downloaded_against_files was checking
+        only .docx (with .doc fallback), so 19+ production rows
+        (hkcfi/1998/78, hkca/2002/232, ...) with .rtf on disk would
+        be falsely flipped to pending on `hklii verify`."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        d = out / "hkcfi" / "1998"
+        d.mkdir(parents=True)
+        (d / "hkcfi_1998_78.rtf").write_bytes(
+            b"{\\rtf1\\ansi some judgment body}"
+        )
+        (d / "hkcfi_1998_78.html").write_text("body")
+        (d / "hkcfi_1998_78.txt").write_text("body")
+        (d / "hkcfi_1998_78.json").write_text("{}")
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 1998, 78, "N", "T", "1998-01-01")
+        db.claim_pending()
+        db.mark_downloaded("hkcfi", 1998, 78, ["html", "txt", "json", "doc"])
+
+        broken = db.verify_downloaded_against_files(out)
+        assert broken == 0, (
+            "fmt='doc' with .rtf on disk was falsely flipped to pending "
+            "— verify must recognize .doc/.docx/.rtf as valid doc-family "
+            "presence signals (matches _DOC_FAMILY_EXTS used by validate.py "
+            "and html_generator.py)"
+        )
+        assert db.stats()["downloaded"] == 1
+
+    def test_fmt_doc_missing_all_three_variants_still_flips(self, tmp_path):
+        """Sibling positive test: if none of .doc/.docx/.rtf exist, the
+        row IS broken and should flip. Otherwise the fix would silently
+        skip every fmt='doc' row regardless of on-disk state."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        out = tmp_path / "out"
+        d = out / "hkcfi" / "2020"
+        d.mkdir(parents=True)
+        (d / "hkcfi_2020_1.html").write_text("body")
+        (d / "hkcfi_2020_1.txt").write_text("body")
+        (d / "hkcfi_2020_1.json").write_text("{}")
+        # No .doc / .docx / .rtf
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2020, 1, "N", "T", "2020-01-01")
+        db.claim_pending()
+        db.mark_downloaded("hkcfi", 2020, 1, ["html", "txt", "json", "doc"])
+
+        broken = db.verify_downloaded_against_files(out)
+        assert broken == 1
+        assert db.stats()["pending"] == 1
+
 
 class TestIntegrityCheck:
     def test_healthy_db_opens_fine(self, tmp_path):
