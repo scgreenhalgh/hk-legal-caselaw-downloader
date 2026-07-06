@@ -190,6 +190,24 @@ class TestProxySession:
         session.record_success()
         assert not session.is_healthy
 
+    def test_record_failure_increments_request_count(self):
+        """Whole-codebase review: `session.request_count % ip_check_interval`
+        drives the periodic runtime IP check. Pre-fix, only record_success
+        incremented the counter — a session that failed EVERY request
+        never triggered an IP check, exactly the case where leak detection
+        is most valuable."""
+        session = ProxySession(
+            proxy_url="http://localhost:8888", index=0, max_failures=999,
+        )
+        assert session.request_count == 0
+        session.record_failure()
+        assert session.request_count == 1, (
+            "record_failure must count toward request_count so the "
+            "periodic IP-leak check fires on failing sessions"
+        )
+        session.record_failure()
+        assert session.request_count == 2
+
 
 def _noop_transport(proxy_url):
     return httpx.MockTransport(lambda r: httpx.Response(200))
@@ -527,6 +545,84 @@ class TestProxyPool:
             await pool.get("https://www.hklii.hk/api/test")
             with pytest.raises(IPLeakError):
                 await pool.get("https://www.hklii.hk/api/test")
+
+    async def test_ip_leak_error_message_omits_home_ip(self):
+        """Whole-codebase review: B7/B8 redaction contract says the
+        operator's home IP must never appear in operator-facing
+        artifacts (scrape.log, events.jsonl). Pre-fix, IPLeakError's
+        message embedded `self._home_ip` — logged tracebacks or
+        exception-message logs would leak it. Message must reference
+        the leak WITHOUT the IP value."""
+        home_ip = "203.0.113.1"
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    return httpx.Response(200, json={"origin": home_ip})
+                return httpx.Response(200, json={"content": "test"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            ip_check_interval=2,
+            _transport_factory=make_transport,
+        )
+        pool._preflight_done = True
+        pool._home_ip = home_ip
+
+        with patch("hklii_downloader.proxy_pool.asyncio.sleep", new_callable=AsyncMock):
+            await pool.get("https://www.hklii.hk/api/test")
+            await pool.get("https://www.hklii.hk/api/test")
+            with pytest.raises(IPLeakError) as exc_info:
+                await pool.get("https://www.hklii.hk/api/test")
+
+        assert home_ip not in str(exc_info.value), (
+            f"IPLeakError.__str__ contains home_ip {home_ip!r} — "
+            "B7/B8 redaction contract violated"
+        )
+
+    async def test_confirmed_leak_emits_ip_leak_event(self):
+        """Whole-codebase review: pre-fix, confirmed IP leaks raised
+        IPLeakError but emitted NO structured event. The 'degraded'
+        (echo-unreachable) path emits — the critical 'confirmed leak'
+        path was silent. Operators grepping events.jsonl for leaks
+        would miss the loudest signal."""
+        home_ip = "203.0.113.1"
+        events_collected = []
+
+        class _CaptureEvents:
+            def emit(self, kind, **fields):
+                events_collected.append({"kind": kind, **fields})
+
+        def make_transport(proxy_url):
+            def handler(request):
+                url = str(request.url)
+                if "httpbin" in url or "ipinfo" in url:
+                    return httpx.Response(200, json={"origin": home_ip})
+                return httpx.Response(200, json={"content": "test"})
+            return httpx.MockTransport(handler)
+
+        pool = ProxyPool(
+            proxy_urls=["http://localhost:8888"],
+            ip_check_interval=2,
+            _transport_factory=make_transport,
+            events=_CaptureEvents(),
+        )
+        pool._preflight_done = True
+        pool._home_ip = home_ip
+
+        with patch("hklii_downloader.proxy_pool.asyncio.sleep", new_callable=AsyncMock):
+            await pool.get("https://www.hklii.hk/api/test")
+            await pool.get("https://www.hklii.hk/api/test")
+            with pytest.raises(IPLeakError):
+                await pool.get("https://www.hklii.hk/api/test")
+
+        leak_events = [e for e in events_collected if "leak" in e["kind"].lower()]
+        assert leak_events, (
+            f"no leak event emitted — confirmed leak was silent to "
+            f"events.jsonl. events: {events_collected!r}"
+        )
 
     async def test_runtime_ip_check_logs_when_echoes_unreachable(self, caplog):
         """B3: when both IP echo services blip mid-run, the runtime leak
