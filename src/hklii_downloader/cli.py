@@ -2883,9 +2883,15 @@ async def _run_coverage_canary(runner, step, no_events: bool) -> None:
     finally:
         # Close pool AND db regardless of what raised — a preflight
         # failure previously leaked all 20 curl_cffi clients.
-        if pool is not None:
-            await pool.close()
-        db.close()
+        # Nested try/finally so a raise from pool.close() (e.g.
+        # curl_cffi refusing aclose after an aborted transfer) can't
+        # skip db.close() — leaking the CheckpointDB fcntl lock would
+        # cascade CheckpointLockError across every subsequent step.
+        try:
+            if pool is not None:
+                await pool.close()
+        finally:
+            db.close()
 
     # Escalation phase — one targeted scrape per divergent bucket.
     # Each runs full-corpus for its single (court, lang) so backdated

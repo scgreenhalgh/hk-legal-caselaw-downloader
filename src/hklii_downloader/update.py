@@ -571,10 +571,17 @@ async def coverage_canary(
                     "live": live, "local": local, "diff": diff,
                 })
 
-    if probes_total > 0 and probes_ok == 0:
+    # Majority-blind check: raise if fewer than half the probes returned
+    # a usable live count. 0-of-N is the obvious "pool exhausted / origin
+    # unreachable" case, but 1-of-13 (or 4-of-13) is just as blind — the
+    # canary can't confidently report tolerance on the buckets it never
+    # observed. Keeps single-bucket per-probe failures (ukpc/tc's
+    # persistent 500) below the raise threshold.
+    if probes_total > 0 and probes_ok < probes_total // 2:
         raise CoverageCanaryBlindError(
-            f"coverage_canary probed 0/{probes_total} buckets successfully — "
-            "pool exhausted or origin unreachable; treat as step failure"
+            f"coverage_canary probed {probes_ok}/{probes_total} buckets "
+            "successfully — majority blind, pool exhausted or origin "
+            "unreachable; treat as step failure"
         )
 
     # Rank by absolute divergence, cap for escalation.
