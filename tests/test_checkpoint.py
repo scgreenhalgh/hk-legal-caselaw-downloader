@@ -283,6 +283,128 @@ class TestEnumRunFullCorpusFiltering:
         assert db.latest_completed_enum_run() is None
 
 
+class TestEnumRunLegacyMigration:
+    """Pre-fix DBs may have enum_runs rows whose provenance can't be
+    recovered — the pre-fix `start_enum_run` recorded only (courts,
+    langs) and any completed row could have been either a full-corpus
+    sweep OR a narrow-window daily/weekly/monthly scrape. When
+    `_migrate_enum_runs_window_columns` ALTERs in the new columns,
+    SQLite fills them with NULL — indistinguishable from a fresh
+    post-fix full-corpus row.
+
+    Guard: on the ADD COLUMN migration, invalidate `completed_at` on
+    every pre-existing row so `latest_completed_enum_run()` can't use
+    them as orphan_mark's reference. Users on legacy DBs must run one
+    fresh full_reconcile before orphan_mark is safe again — a small
+    cost for silent-corpus-damage safety.
+    """
+
+    def test_legacy_completed_row_invalidated_after_migration(self, tmp_path):
+        import json, sqlite3
+        db_path = tmp_path / ".checkpoint.db"
+
+        # Materialize the pre-fix enum_runs schema (5 columns, no window).
+        raw = sqlite3.connect(str(db_path))
+        raw.executescript(
+            "CREATE TABLE cases (court TEXT NOT NULL, year INTEGER NOT NULL, "
+            "number INTEGER NOT NULL, neutral TEXT, title TEXT, date TEXT, "
+            "status TEXT DEFAULT 'pending', formats TEXT, error TEXT, "
+            "PRIMARY KEY (court, year, number));\n"
+            "CREATE TABLE enum_runs ("
+            "generation_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "started_at INTEGER NOT NULL, completed_at INTEGER, "
+            "courts_json TEXT NOT NULL, langs_json TEXT NOT NULL);"
+        )
+        # Pre-fix ship's `_run_update_scrape` stamped completed rows with
+        # courts=ALL_COURTS, langs=("en","tc") for BOTH narrow (daily)
+        # and full-corpus (full_reconcile) sweeps — indistinguishable
+        # here without a window field.
+        raw.execute(
+            "INSERT INTO enum_runs "
+            "(started_at, completed_at, courts_json, langs_json) "
+            "VALUES (?, ?, ?, ?)",
+            (1000, 1300, json.dumps(["hkcfi", "hkca"]), json.dumps(["en", "tc"])),
+        )
+        raw.commit()
+        raw.close()
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(db_path))
+        try:
+            # Legacy row's completed_at MUST be nuked so orphan_mark
+            # can't consume it — its provenance is ambiguous.
+            assert db.latest_completed_enum_run() is None, (
+                "legacy enum_run surfaced as full-corpus reference — "
+                "orphan_mark would mass-orphan on partial full_reconcile"
+            )
+        finally:
+            db.close()
+
+    def test_post_migration_full_corpus_row_still_returned(self, tmp_path):
+        """After the migration, a fresh post-fix full-corpus sweep is
+        still consumable — the migration must invalidate ONLY legacy
+        rows, not block genuine post-fix references."""
+        import json, sqlite3
+        db_path = tmp_path / ".checkpoint.db"
+        raw = sqlite3.connect(str(db_path))
+        raw.executescript(
+            "CREATE TABLE enum_runs ("
+            "generation_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "started_at INTEGER NOT NULL, completed_at INTEGER, "
+            "courts_json TEXT NOT NULL, langs_json TEXT NOT NULL);"
+        )
+        raw.execute(
+            "INSERT INTO enum_runs "
+            "(started_at, completed_at, courts_json, langs_json) "
+            "VALUES (?, ?, ?, ?)",
+            (1000, 1300, json.dumps(["hkcfi"]), json.dumps(["en"])),
+        )
+        raw.commit()
+        raw.close()
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(db_path))
+        try:
+            # Legacy row invalidated (completed_at now NULL).
+            assert db.latest_completed_enum_run() is None
+            # Fresh post-fix full-corpus enum → surfaces normally.
+            g = db.start_enum_run(
+                ["hkcfi"], ["en"],
+                min_date_text=None, max_date_text=None,
+            )
+            db.complete_enum_run(g)
+            latest = db.latest_completed_enum_run()
+            assert latest is not None
+            assert latest["generation_id"] == g
+        finally:
+            db.close()
+
+    def test_migration_idempotent_on_reopen(self, tmp_path):
+        """Reopening a DB that already went through the migration must
+        NOT invalidate post-fix rows on every open — the completed_at
+        nuke fires only when the columns are actually being ADDED."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        db_path = tmp_path / ".checkpoint.db"
+        # First open creates the schema WITH window columns present.
+        db = CheckpointDB(str(db_path))
+        try:
+            g = db.start_enum_run(
+                ["hkcfi"], ["en"],
+                min_date_text=None, max_date_text=None,
+            )
+            db.complete_enum_run(g)
+        finally:
+            db.close()
+        # Second open — migration must be a no-op.
+        db2 = CheckpointDB(str(db_path))
+        try:
+            latest = db2.latest_completed_enum_run()
+            assert latest is not None
+            assert latest["generation_id"] == g
+        finally:
+            db2.close()
+
+
 class TestResetRelatedcapFetches:
     """`hklii update --profile quarterly` calls this to force a fresh
     getrelatedcaps diff. Must be idempotent w.r.t. edges (INSERT OR
