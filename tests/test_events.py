@@ -138,6 +138,92 @@ class TestStructuredEventLoggerAppend:
         assert row["proxy_url"] == "http://localhost:8888"
 
 
+class TestStructuredEventLoggerQueueOverflow:
+    """Whole-codebase review (L4): the queue-full drop path in emit()
+    had zero test coverage. The `dropped` counter, the warning throttle
+    at N=1 and every 1000, and the sync-fallback after aclose were all
+    unverified. Pin the observable behaviour so regressions can't
+    silently break the drop signal."""
+
+    async def test_queue_full_increments_dropped_counter(self, tmp_path):
+        from hklii_downloader.events import StructuredEventLogger
+
+        # maxsize=1 with the writer NOT running: the writer would drain,
+        # so directly manipulate queue state to guarantee overflow.
+        logger = StructuredEventLogger(tmp_path / "e.jsonl", max_queue=1)
+        await logger.start()
+        # Stop the writer's drain so our next put_nowait overflows.
+        # Fill the queue past capacity with sentinel objects.
+        logger._queue.put_nowait("preload-blocker")
+        # The writer will pop this; wait a moment to let it happen.
+        # Actually, easier: patch the queue to full.
+        import asyncio as _asyncio
+
+        # Save the writer task, stop it cleanly, then force overflow.
+        writer = logger._writer_task
+        # Emit while queue is full. First, fill queue to maxsize.
+        # Since maxsize=1 and writer is active, one emit fills, next drains.
+        # Reliably fill: pause the writer by grabbing all its capacity.
+        # Simpler approach: monkeypatch put_nowait to raise QueueFull.
+
+        raised = {"n": 0}
+        original_put_nowait = logger._queue.put_nowait
+
+        def always_full(item):
+            raised["n"] += 1
+            raise _asyncio.QueueFull()
+
+        logger._queue.put_nowait = always_full  # type: ignore[method-assign]
+
+        logger.emit("request_success", proxy_url="x", url="y")
+        logger.emit("request_success", proxy_url="x", url="y")
+        logger.emit("request_success", proxy_url="x", url="y")
+
+        assert logger._dropped == 3, (
+            f"expected dropped=3, got {logger._dropped}"
+        )
+
+        # Restore + close cleanly
+        logger._queue.put_nowait = original_put_nowait  # type: ignore[method-assign]
+        await logger.aclose()
+
+    async def test_queue_full_warning_throttled(self, tmp_path, caplog):
+        """First drop + every 1000th drop must WARN — pre-fix, unverified."""
+        import asyncio as _asyncio
+        import logging
+        from hklii_downloader.events import StructuredEventLogger
+
+        logger = StructuredEventLogger(tmp_path / "e.jsonl", max_queue=1)
+        await logger.start()
+        original_put_nowait = logger._queue.put_nowait
+        logger._queue.put_nowait = lambda x: (_ for _ in ()).throw(
+            _asyncio.QueueFull()
+        )  # type: ignore[method-assign]
+
+        try:
+            with caplog.at_level(
+                logging.WARNING, logger="hklii_downloader.events"
+            ):
+                logger.emit("k", proxy_url="x", url="y")  # #1 → warn
+                for _ in range(998):
+                    logger.emit("k", proxy_url="x", url="y")  # #2..999 → silent
+                logger.emit("k", proxy_url="x", url="y")  # #1000 → warn
+
+            warn_messages = [
+                r.message for r in caplog.records
+                if r.levelname == "WARNING"
+                and "queue full" in r.message
+            ]
+            assert len(warn_messages) == 2, (
+                f"expected 2 warnings (drop #1 + drop #1000), got "
+                f"{len(warn_messages)}: {warn_messages}"
+            )
+        finally:
+            # Restore before aclose so the stop sentinel can enqueue.
+            logger._queue.put_nowait = original_put_nowait  # type: ignore[method-assign]
+            await logger.aclose()
+
+
 class TestFailureSampleDumper:
     """The dumper saves the raw body + headers of challenge-page / failure
     responses to <output>/failure_samples/ for post-run WAF signature

@@ -93,6 +93,36 @@ class TestHtmlRecheckRunner:
         assert "doc" in formats, "doc format from prior capture should be preserved"
         assert "html" in formats, "newly captured html should be added"
 
+    async def test_html_available_now_writes_files_to_disk(self, tmp_path):
+        """Whole-codebase review (L4): the sibling test above asserts DB
+        state (formats union, flag cleared) but never checks that the
+        {stem}.html / {stem}.txt / {stem}.json files hit disk. A future
+        regression that removes save_judgment_local from _recheck_one
+        would leave the DB claiming the row is captured while nothing
+        exists on disk — silent corpus damage. Pin the observable
+        side-effect."""
+        from hklii_downloader.html_recheck import HtmlRecheckRunner
+
+        db = _make_db_with_pending_row()
+
+        async def mock_get(url, **kw):
+            resp = {**SAMPLE_RESP, "content": "<html><body>Full text now.</body></html>"}
+            return httpx.Response(200, json=resp,
+                                  request=httpx.Request("GET", url))
+
+        runner = HtmlRecheckRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html", "txt", "json"},
+        )
+        await runner.recheck_all()
+
+        stem = "hkcfi_2026_3816"
+        d = tmp_path / "hkcfi" / "2026"
+        for ext in ("html", "txt", "json"):
+            path = d / f"{stem}.{ext}"
+            assert path.exists(), f"expected {path} on disk after recheck"
+            assert path.stat().st_size > 0, f"{path} is 0-byte"
+
     async def test_still_empty_bumps_timestamp(self, tmp_path):
         from hklii_downloader.html_recheck import HtmlRecheckRunner
 
@@ -235,6 +265,43 @@ class TestHtmlRecheckRunnerEvents:
         kinds = [e["kind"] for e in events.events]
         assert "case_failed" in kinds, (
             f"expected case_failed emission, got {kinds}"
+        )
+
+    async def test_request_error_emits_case_failed(self, tmp_path):
+        """Whole-codebase review (L4): the httpx.RequestError branch
+        (html_recheck.py:111-117) was untested — test_http_failure_
+        emits_case_failed covers only the 503 non-200 branch. A
+        regression that removed the case_failed emit from the
+        RequestError arm would go undetected."""
+        from hklii_downloader.html_recheck import HtmlRecheckRunner
+
+        db = _make_db_with_pending_row()
+        events = _CapturingEvents()
+
+        async def mock_get(url, **kw):
+            raise httpx.ConnectError("network partition")
+
+        runner = HtmlRecheckRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html"}, events=events,
+        )
+        result = await runner.recheck_all()
+
+        assert result["failed"] == 1
+        kinds = [e["kind"] for e in events.events]
+        assert "case_failed" in kinds, (
+            f"RequestError branch didn't emit case_failed: {kinds}"
+        )
+        # Error class must distinguish from HTTP-status failure so
+        # operators can separately count transport vs upstream errors.
+        request_error_events = [
+            e for e in events.events
+            if e["kind"] == "case_failed"
+            and e.get("error_class") == "request_error"
+        ]
+        assert request_error_events, (
+            "expected case_failed with error_class='request_error', "
+            f"got {events.events}"
         )
 
     async def test_events_none_stays_backwards_compatible(self, tmp_path):

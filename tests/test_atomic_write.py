@@ -114,3 +114,88 @@ class TestParentDirFsync:
             f"expected parent dir {tmp_path} to be fsynced after os.replace; "
             f"actually fsynced: {fsynced}"
         )
+
+    def test_parent_dir_fsync_happens_after_part_fsync_and_after_replace(
+        self, tmp_path,
+    ):
+        """Whole-codebase review (L4): the sibling tests assert the parent
+        dir appears in the fsynced list but not its POSITION. The
+        durability contract requires:
+          1. .part fsync (data reaches disk),
+          2. os.replace (rename lands in inode cache),
+          3. parent dir fsync (rename survives unclean reboot).
+        A refactor that reordered these — say, dir fsync BEFORE replace —
+        would leave the crash window open yet keep the position-agnostic
+        sibling tests green. Pin the order explicitly.
+        """
+        import os as _os
+        from hklii_downloader.atomic_write import atomic_write_text
+
+        events: list = []
+        real_open = _os.open
+        real_fsync = _os.fsync
+        real_replace = _os.replace
+
+        def spy_open(*a, **kw):
+            fd = real_open(*a, **kw)
+            path = a[0] if a else kw.get("path")
+            events.append(("open", str(path), fd))
+            return fd
+
+        def spy_fsync(fd):
+            # Look up which path this fd was opened for. FDs are reused
+            # after close — walk backwards to find the MOST RECENT open
+            # of this fd.
+            path = None
+            for kind, p, opened_fd in reversed(events):
+                if kind == "open" and opened_fd == fd:
+                    path = p
+                    break
+            events.append(("fsync", path, fd))
+            return real_fsync(fd)
+
+        def spy_replace(src, dst):
+            events.append(("replace", str(src), str(dst)))
+            return real_replace(src, dst)
+
+        p = tmp_path / "out.txt"
+        from unittest.mock import patch
+        with patch("os.open", side_effect=spy_open), \
+             patch("os.fsync", side_effect=spy_fsync), \
+             patch("os.replace", side_effect=spy_replace):
+            atomic_write_text(p, "hello")
+
+        # Extract just the meaningful event tuples for assertions.
+        order = [
+            (e[0], e[1]) for e in events
+            if e[0] in ("fsync", "replace")
+        ]
+        # Filter to only .part fsync + replace + parent fsync.
+        part_fsync_idx = next(
+            (i for i, e in enumerate(order)
+             if e[0] == "fsync" and e[1] and e[1].endswith(".part")),
+            None,
+        )
+        replace_idx = next(
+            (i for i, e in enumerate(order) if e[0] == "replace"),
+            None,
+        )
+        parent_fsync_idx = next(
+            (i for i, e in enumerate(order)
+             if e[0] == "fsync" and e[1] == str(tmp_path)),
+            None,
+        )
+        assert part_fsync_idx is not None, (
+            f"no .part fsync in order: {order}"
+        )
+        assert replace_idx is not None, f"no os.replace: {order}"
+        assert parent_fsync_idx is not None, (
+            f"no parent dir fsync: {order}"
+        )
+        assert part_fsync_idx < replace_idx, (
+            f".part fsync must precede replace; order: {order}"
+        )
+        assert replace_idx < parent_fsync_idx, (
+            f"parent dir fsync must FOLLOW replace so the rename "
+            f"survives an unclean reboot; order: {order}"
+        )
