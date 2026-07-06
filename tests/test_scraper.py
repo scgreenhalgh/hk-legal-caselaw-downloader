@@ -153,6 +153,31 @@ class TestBulkScraperWorkerIsolation:
             f"expected >= 4 downloaded despite the crash, "
             f"got downloaded={result.downloaded}, failed={result.failed}"
         )
+        # Whole-codebase review (L4): the crashed row must land in a
+        # terminal DB state (failed with an error trail), not stay
+        # 'in_progress' after the worker crash. Pre-fix, the
+        # belt-and-braces except left the row in_progress and
+        # stats[failed] disagreed with DB status.
+        stats = db.stats()
+        assert stats["in_progress"] == 0, (
+            f"row stuck at in_progress after worker crash: {stats}"
+        )
+        assert stats["failed"] == 1, (
+            f"expected exactly one failed row (the crash victim), "
+            f"got failed={stats['failed']}"
+        )
+        # The failed row must carry an error message referencing the
+        # crash so operators can diagnose without having to correlate
+        # scrape.log.
+        failed_rows = db._conn.execute(
+            "SELECT error FROM cases WHERE status='failed'"
+        ).fetchall()
+        assert failed_rows, "failed row's error column was NULL"
+        error_msg = failed_rows[0][0] or ""
+        assert "worker-unexpected" in error_msg or "RuntimeError" in error_msg, (
+            f"failed row's error text doesn't identify the worker "
+            f"crash: {error_msg!r}"
+        )
 
 
 class TestBulkScraperRobustExcept:
@@ -1556,6 +1581,78 @@ class TestBulkScraperNarrowWindowEnumerate:
         )
         await scraper.enumerate(["hkcfi"], langs=("en",))
         assert any("sort=-date" in u for u in seen), seen
+
+    async def test_window_object_wins_over_individual_kwargs(self, tmp_path):
+        """Whole-codebase review (L4): BulkScraper.__init__ accepts a
+        `window: EnumWindow | None` kwarg (used exclusively by
+        `hklii update` at cli.py:_run_update_scrape). If a caller
+        passes BOTH `window=EnumWindow(...)` AND individual
+        min_date_text/max_date_text/items_per_page/sort kwargs, the
+        window wins — matches scraper.py:143-150 shape. Pre-fix, the
+        `if window is not None:` branch had zero test coverage."""
+        from hklii_downloader.enumerator import EnumWindow
+        seen = []
+
+        async def mock_get(url, **kw):
+            seen.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        db = _make_db()
+        # window wins — the individual kwargs should be ignored.
+        scraper = BulkScraper(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            min_date_text="99/99/1999",  # decoy — window should win
+            max_date_text="99/99/1999",  # decoy
+            items_per_page=1,             # decoy
+            sort="+date",                  # decoy
+            window=EnumWindow(
+                min_date_text="06/06/2026",
+                max_date_text="06/07/2026",
+                items_per_page=500,
+                sort="-date",
+            ),
+        )
+        await scraper.enumerate(["hkcfi"], langs=("en",))
+
+        url = seen[0]
+        assert "minDateText=06%2F06%2F2026" in url, url
+        assert "maxDateText=06%2F07%2F2026" in url, url
+        assert "itemsPerPage=500" in url, url
+        assert "sort=-date" in url, url
+        # And crucially: the decoy values MUST NOT reach the wire.
+        assert "99%2F99%2F1999" not in url
+        assert "sort=%2Bdate" not in url
+
+    async def test_default_window_is_full_corpus(self, tmp_path):
+        """A default-constructed EnumWindow() must produce the same
+        byte-stable URL as no window at all — legacy full-corpus
+        callers must not see behaviour changes."""
+        from hklii_downloader.enumerator import EnumWindow
+        seen_with_window = []
+        seen_no_window = []
+
+        async def mock1(url, **kw):
+            seen_with_window.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        async def mock2(url, **kw):
+            seen_no_window.append(url)
+            return httpx.Response(200, json={"totalfiles": 0, "judgments": []})
+
+        db = _make_db()
+        with_win = BulkScraper(
+            get=mock1, checkpoint=db, output_dir=tmp_path,
+            window=EnumWindow(),
+        )
+        await with_win.enumerate(["hkcfi"], langs=("en",))
+        no_win = BulkScraper(
+            get=mock2, checkpoint=db, output_dir=tmp_path,
+        )
+        await no_win.enumerate(["hkcfi"], langs=("en",))
+        assert seen_with_window == seen_no_window, (
+            f"EnumWindow() default should be byte-stable vs no window; "
+            f"with={seen_with_window}, without={seen_no_window}"
+        )
 
     async def test_absent_kwargs_are_byte_stable(self, tmp_path):
         """When BulkScraper is constructed without any of the four new kwargs,

@@ -162,3 +162,140 @@ class TestFetchLegisDocument:
             await fetch_legis_document(
                 get=mock_get, abbr="ord", num="1", lang="en",
             )
+
+
+class TestLegisRunnerIntegration:
+    """Whole-codebase review (L4): test_legis.py covered only pure
+    helpers — URL construction, response parsing, save_local,
+    fetch_legis_document. LegisRunner.enumerate_all + fetch_pending
+    (the primary current-in-force legis scraper's orchestration) had
+    NO tests. Regressions in the worker orchestration, upsert
+    integration, or error paths would pass all tests. These add
+    end-to-end coverage with mocked HTTP."""
+
+    async def test_enumerate_all_upserts_every_discovered_chapter(
+        self, tmp_path,
+    ):
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.legis import LegisRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            async def mock_get(url, **kw):
+                # getlegisfiles single-page response for ord/en.
+                return httpx.Response(
+                    200,
+                    json={
+                        "totalfiles": 2,
+                        "files": [
+                            {"num": "1", "title": "Cap. 1"},
+                            {"num": "32", "title": "Cap. 32"},
+                        ],
+                    },
+                    request=httpx.Request("GET", url),
+                )
+
+            runner = LegisRunner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                cap_types=("ord",), langs=("en",),
+            )
+            n = await runner.enumerate_all()
+            assert n == 2
+            stats = db.legis_stats()
+            assert stats["pending"] == 2, stats
+
+        finally:
+            db.close()
+
+    async def test_fetch_pending_downloads_and_marks_ok(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.legis import LegisRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            db.upsert_legis_document(
+                abbr="ord", num="1", lang="en", title="Cap. 1",
+            )
+
+            versions = [
+                {"id": 52016, "title": "T",
+                 "date": "2025-12-18T00:00:00+08:00"},
+            ]
+            content = [
+                {"subpath": "longTitle", "title": "Long Title",
+                 "content": "<p>body</p>"},
+            ]
+
+            async def mock_get(url, **kw):
+                if "getcapversions" in url:
+                    return httpx.Response(200, json=versions,
+                                          request=httpx.Request("GET", url))
+                if "getcapversiontoc" in url:
+                    return httpx.Response(200, json=content,
+                                          request=httpx.Request("GET", url))
+                raise AssertionError(f"unexpected url {url}")
+
+            runner = LegisRunner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                cap_types=("ord",), langs=("en",),
+            )
+            result = await runner.fetch_pending()
+            assert result.downloaded == 1
+            assert result.failed == 0
+
+            stats = db.legis_stats()
+            assert stats.get("downloaded", 0) == 1
+
+            # Sidecar files must exist.
+            base = tmp_path / "legis" / "ord" / "1"
+            assert (base / "ord_1_en.versions.json").exists()
+            assert (base / "ord_1_en.content.json").exists()
+        finally:
+            db.close()
+
+    async def test_fetch_pending_marks_row_failed_on_http_error(
+        self, tmp_path,
+    ):
+        """One row's 500 error must not crash the run — must mark the
+        row failed with an error trail, siblings still process."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.legis import LegisRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            db.upsert_legis_document("ord", "1", "en", "Cap. 1")
+            db.upsert_legis_document("ord", "32", "en", "Cap. 32")
+
+            async def mock_get(url, **kw):
+                if "num=32" in url or "num%3D32" in url or "/32/" in url:
+                    return httpx.Response(
+                        500, text="err",
+                        request=httpx.Request("GET", url),
+                    )
+                if "getcapversions" in url:
+                    return httpx.Response(
+                        200,
+                        json=[{"id": 1, "title": "T",
+                               "date": "2025-01-01T00:00:00+08:00"}],
+                        request=httpx.Request("GET", url),
+                    )
+                if "getcapversiontoc" in url:
+                    return httpx.Response(
+                        200,
+                        json=[{"subpath": "x", "title": "X",
+                               "content": "<p>y</p>"}],
+                        request=httpx.Request("GET", url),
+                    )
+                raise AssertionError(f"unexpected url {url}")
+
+            runner = LegisRunner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                cap_types=("ord",), langs=("en",), workers=1,
+            )
+            result = await runner.fetch_pending()
+            # Both rows reach a terminal state.
+            assert result.downloaded + result.failed == 2, (
+                f"one 500 terminated the whole run: {result}"
+            )
+        finally:
+            db.close()

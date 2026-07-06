@@ -253,6 +253,68 @@ class TestRunner:
         finally:
             db.close()
 
+    async def test_fetch_writes_parallel_cites_grouped_by_key(self, tmp_path):
+        """Whole-codebase review (L4): the parallel_cites integration
+        path (grouping by from_key + per-key bulk insert at
+        citations.py:222-228) had NO test — test_fetch_writes_edges_
+        and_marks_ok uses `parallel: []` so the by_key dict-grouping
+        code was dead in tests. A regression removing the group-and-
+        insert step would leave parallel cites permanently unsaved."""
+        from hklii_downloader.citations import NoteupRunner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_case("hkcfa", 2020, 32, "N", "T", "2020-01-01")
+            db.mark_downloaded("hkcfa", 2020, 32, ["html"])
+            db.upsert_noteup_fetch("hkcfa", 2020, 32)
+
+            async def mock_get(url, **kw):
+                # Two entries, one with two parallel cites, one with
+                # one — exercises the by_key grouping + per-key
+                # insert_parallel_cites call.
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"neutral": "[2023] HKCFA 40",
+                         "path": "/en/cases/hkcfa/2023/40",
+                         "db": "CFA", "date": "",
+                         "citation_frequency": 1,
+                         "parallel": ["[2023] 4 HKC 100", "[2023] HKLRD 55"],
+                         "cases": []},
+                        {"neutral": "[2024] HKCFA 5",
+                         "path": "/en/cases/hkcfa/2024/5",
+                         "db": "CFA", "date": "",
+                         "citation_frequency": 1,
+                         "parallel": ["[2024] 2 HKC 200"],
+                         "cases": []},
+                    ],
+                    request=httpx.Request("GET", url),
+                )
+
+            runner = NoteupRunner(get=mock_get, checkpoint=db,
+                                    output_dir=tmp_path)
+            result = await runner.fetch_pending()
+            assert result.downloaded == 1
+            assert result.failed == 0
+
+            # Three parallel cites total, two distinct from_keys.
+            all_pcs = db._conn.execute(
+                "SELECT case_key, parallel_cite FROM case_parallel_cites "
+                "ORDER BY case_key, parallel_cite"
+            ).fetchall()
+            assert len(all_pcs) == 3, all_pcs
+            from_keys = {row[0] for row in all_pcs}
+            assert len(from_keys) == 2, (
+                f"expected two distinct from_keys, got {from_keys}"
+            )
+            # Group-by-from_key check: hkcfa/2023/40 has 2, /2024/5 has 1.
+            counts_per_key: dict = {}
+            for k, _pc in all_pcs:
+                counts_per_key[k] = counts_per_key.get(k, 0) + 1
+            assert set(counts_per_key.values()) == {1, 2}, counts_per_key
+        finally:
+            db.close()
+
     async def test_500_marks_failed(self, tmp_path):
         from hklii_downloader.citations import NoteupRunner
 

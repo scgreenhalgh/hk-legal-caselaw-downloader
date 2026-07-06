@@ -90,6 +90,50 @@ class TestHtmlGenerator:
         finally:
             db.close()
 
+    def test_records_error_on_unexpected_exception(self, tmp_path):
+        """Whole-codebase review (L4): html_generator.py:96-107's
+        catch-all `except Exception` path recorded unexpected
+        failures but had no test. A regression to
+        `except Exception: pass` (or `continue`) would silently
+        skip rows forever with no error trail and the loop would
+        re-pick them every run — an infinite silent-skip cycle.
+
+        Test raises an unexpected exception type inside convert_to_html
+        (not UnsupportedSourceError/ConversionError/OSError) and pins
+        the observable behavior: row marked failed with the exception
+        type + message in html_generated_error."""
+        from hklii_downloader.html_generator import HtmlGenerator
+
+        out = tmp_path / "out"
+        out.mkdir()
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        _make_doc_only(db, "hkcfi", 2026, 1)
+        _write_doc(out, "hkcfi", 2026, "hkcfi_2026_1", ".doc",
+                   b"\xd0\xcf\x11\xe0raw ole body bytes")
+
+        with patch(
+            "hklii_downloader.html_generator.convert_to_html",
+            side_effect=RuntimeError("unexpected boom"),
+        ):
+            result = HtmlGenerator(db, out).generate_all()
+
+        try:
+            assert result.generated == 0
+            assert result.failed == 1
+            row = db._conn.execute(
+                "SELECT html_generated_from, html_generated_error "
+                "FROM cases WHERE court='hkcfi' AND year=2026 AND number=1"
+            ).fetchone()
+            assert row[0] is None, "sidecar path stamped on failure"
+            error_msg = row[1] or ""
+            assert "RuntimeError" in error_msg, (
+                f"unexpected-exception path didn't record the exception "
+                f"type; got {error_msg!r}"
+            )
+            assert "unexpected boom" in error_msg, error_msg
+        finally:
+            db.close()
+
     def test_respects_limit(self, tmp_path):
         from hklii_downloader.html_generator import HtmlGenerator
 
