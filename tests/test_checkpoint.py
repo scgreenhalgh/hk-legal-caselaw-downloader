@@ -832,6 +832,71 @@ class TestVerifyDownloaded:
         assert db.stats()["pending"] == 1
 
 
+class TestReleaseInProgressPerDomain:
+    """Every runner that flips rows to status='in_progress' via a
+    claim_pending_X() atomic transition needs a matching
+    release_in_progress_X() so that a worker crash mid-processing
+    doesn't permanently orphan the row. Without it, the row stays
+    at 'in_progress' forever, no future run picks it up, and the
+    scrape silently under-reports coverage."""
+
+    def test_hopt_release_flips_in_progress_to_pending(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        db.upsert_hopt_document("bacpg", 2020, "1", "en", "Title", "2020-01-01")
+        claimed = db.claim_pending_hopt()
+        assert claimed is not None
+        # Worker crashes → row stays in_progress
+        db.release_in_progress_hopt()
+        again = db.claim_pending_hopt()
+        assert again is not None, (
+            "release_in_progress_hopt didn't recover the crashed row"
+        )
+
+    def test_noteup_release_flips_in_progress_to_pending(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        db.upsert_case("hkcfi", 2023, 1, "N", "T", "2023-01-01")
+        db.mark_downloaded("hkcfi", 2023, 1, ["html"])
+        db.upsert_noteup_fetch("hkcfi", 2023, 1)
+        claimed = db.claim_pending_noteup()
+        assert claimed is not None
+        db.release_in_progress_noteup()
+        again = db.claim_pending_noteup()
+        assert again is not None
+
+    def test_relatedcap_release_flips_in_progress_to_pending(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        db.upsert_relatedcap_fetch("32", "ord", "en")
+        claimed = db.claim_pending_relatedcap()
+        assert claimed is not None
+        db.release_in_progress_relatedcap()
+        again = db.claim_pending_relatedcap()
+        assert again is not None
+
+    def test_legis_release_flips_in_progress_to_pending(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        db.upsert_legis_document("ord", "1", "en", "Cap 1", "2020-01-01")
+        claimed = db.claim_pending_legis()
+        assert claimed is not None
+        db.release_in_progress_legis()
+        again = db.claim_pending_legis()
+        assert again is not None
+
+    def test_legis_version_release_flips_in_progress_to_pending(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        db.upsert_legis_document("ord", "1", "en", "Cap 1", "2020-01-01")
+        db.upsert_legis_version("ord", "1", "en", 1, "2020-01-01")
+        claimed = db.claim_pending_legis_version()
+        assert claimed is not None
+        db.release_in_progress_legis_version()
+        again = db.claim_pending_legis_version()
+        assert again is not None
+
+
 class TestIntegrityCheck:
     def test_healthy_db_opens_fine(self, tmp_path):
         from hklii_downloader.checkpoint import CheckpointDB
