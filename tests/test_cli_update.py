@@ -437,6 +437,170 @@ class TestCoverageCanaryFunction:
         assert len(divergent) == 3
 
 
+class TestCoverageCanaryHonesty:
+    """The canary's whole purpose is to loudly signal drift. Four failure
+    modes previously produced silent-green output — this suite pins the
+    honest behaviour on each.
+
+    A) Bilingual TC undercount — bilingual cases live in lang='en' per
+       the UPSERT rule, so `SELECT COUNT WHERE lang='tc'` reports
+       fewer rows than HKLII's per-lang tc count for every court that
+       has any bilingual case. The wrapper must canary EN only.
+    B) Blind probes — if every getmetacase probe fails (pool exhausted
+       or origin storm), the underlying function must raise, not
+       silently return [].
+    C) Failed escalations — if a divergent bucket's follow-up scrape
+       raises, the wrapper must propagate so the dispatcher marks the
+       step FAIL. Silent-swallow contradicts the module's own
+       'non-zero exit' contract.
+    D) Preflight leak — if pool.preflight() raises, pool.close() must
+       still fire so the 20 curl_cffi clients don't leak.
+    """
+
+    async def test_bilingual_case_does_not_cause_tc_false_positive(self, tmp_path):
+        """Repro: seed a bilingual case (upsert en then tc). The DB row
+        keeps lang='en' by the UPSERT collapse rule. HKLII's per-lang
+        counts (en+bilingual, tc+bilingual) match local IF we count
+        only lang='en'. Wrapper must NOT probe lang='tc' or it'll flag
+        this bucket as +N_bilingual on every run."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_coverage_canary
+
+        db_path = tmp_path / ".checkpoint.db"
+        db = CheckpointDB(str(db_path))
+        # Bilingual case: enumerated first as en, then as tc. UPSERT keeps
+        # lang='en' (see checkpoint.py CASE WHEN cases.lang='en' OR ...).
+        db.upsert_case("hkcfi", 2026, 1, "[2026] HKCFI 1", "T", "2026-07-01", lang="en")
+        db.upsert_case("hkcfi", 2026, 1, "[2026] HKCFI 1", "T", "2026-07-01", lang="tc")
+        db.mark_downloaded("hkcfi", 2026, 1, ["html"])
+        assert db._conn.execute(
+            "SELECT lang FROM cases WHERE court='hkcfi' AND year=2026 AND number=1"
+        ).fetchone()[0] == "en"
+        db.close()
+
+        captured_kwargs = {}
+
+        async def _fake_canary(**kwargs):
+            captured_kwargs.update(kwargs)
+            return []
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        runner.proxies = ["http://127.0.0.1:8888"]
+        runner.direct = True
+        step = MagicMock()
+        step.kwargs = {"threshold": 5, "max_escalations": 3}
+
+        with patch("hklii_downloader.update.coverage_canary", side_effect=_fake_canary):
+            await _run_coverage_canary(runner, step, no_events=True)
+
+        # Wrapper MUST pass langs=['en'] only — TC would false-positive
+        # by N_bilingual per court.
+        assert captured_kwargs.get("langs") == ["en"], (
+            f"expected langs=['en'], got {captured_kwargs.get('langs')!r} — "
+            "bilingual UPSERT rule means TC bucket local count undercounts"
+        )
+
+    async def test_canary_raises_when_every_probe_fails(self, tmp_path):
+        """Pool exhausted / origin 500 storm / DNS glitch → every
+        `pool.get()` in the canary loop raises. Silent-continue leaves
+        `divergent=[]` and reports 'all buckets within tolerance' — the
+        tripwire ran blind. Instead, the function must raise a distinct
+        error so the dispatch marks the step FAIL."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.update import (
+            coverage_canary, CoverageCanaryBlindError,
+        )
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+
+        async def _always_fail(url, **kw):
+            raise RuntimeError("all proxies dead")
+
+        with pytest.raises(CoverageCanaryBlindError):
+            await coverage_canary(
+                get=_always_fail, checkpoint=db,
+                courts=["hkcfi", "hkca"], langs=["en"],
+                threshold=5,
+            )
+
+    async def test_run_coverage_canary_fails_when_all_escalations_raise(self, tmp_path):
+        """Canary detects 2 divergent buckets, both escalations raise.
+        Current code prints red 'escalation failed' lines but returns
+        cleanly — the dispatch loop marks the step 'ok'. Contract per
+        _dispatch_update_plan docstring: non-zero failures translate to
+        non-zero exit. The wrapper must propagate."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_coverage_canary
+
+        db_path = tmp_path / ".checkpoint.db"
+        CheckpointDB(str(db_path)).close()  # create empty DB
+
+        async def _fake_canary(**kwargs):
+            return [
+                {"court": "hkcfi", "lang": "en", "live": 100, "local": 90, "diff": 10},
+                {"court": "hkca", "lang": "en", "live": 50, "local": 40, "diff": 10},
+            ]
+
+        async def _boom(*a, **kw):
+            raise RuntimeError("scrape failed")
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        runner.proxies = ["http://127.0.0.1:8888"]
+        runner.direct = True
+        step = MagicMock()
+        step.kwargs = {"threshold": 5, "max_escalations": 3}
+
+        with patch("hklii_downloader.update.coverage_canary", side_effect=_fake_canary), \
+             patch("hklii_downloader.cli._run_scrape", side_effect=_boom):
+            with pytest.raises(Exception) as exc_info:
+                await _run_coverage_canary(runner, step, no_events=True)
+        # Message must reference the escalation-failure count so operators
+        # grepping logs can find it.
+        assert "escalat" in str(exc_info.value).lower()
+
+    async def test_pool_closed_when_preflight_raises(self, tmp_path):
+        """If pool.preflight() raises (e.g. all IP echo services
+        unreachable), pool.close() must still fire — otherwise every
+        curl_cffi client per proxy leaks."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_coverage_canary
+
+        db_path = tmp_path / ".checkpoint.db"
+        CheckpointDB(str(db_path)).close()
+
+        close_calls = {"n": 0}
+
+        class _FakePool:
+            def __init__(self, *a, **kw): pass
+            async def preflight(self):
+                raise RuntimeError("all echo services unreachable")
+            async def close(self):
+                close_calls["n"] += 1
+            async def get(self, url, **kw):
+                raise RuntimeError("should not be called")
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        runner.proxies = ["http://127.0.0.1:8888"]
+        runner.direct = False
+        step = MagicMock()
+        step.kwargs = {"threshold": 5, "max_escalations": 3}
+
+        with patch("hklii_downloader.proxy_pool.ProxyPool", _FakePool):
+            with pytest.raises(RuntimeError, match="echo services"):
+                await _run_coverage_canary(runner, step, no_events=True)
+
+        assert close_calls["n"] == 1, (
+            "pool.close() must fire when preflight raises — otherwise "
+            "20 curl_cffi clients leak per canary failure"
+        )
+
+
 class TestUpdateCliDryRun:
     def test_dry_run_daily_prints_plan_and_exits_zero(self, tmp_path):
         from hklii_downloader.cli import main
