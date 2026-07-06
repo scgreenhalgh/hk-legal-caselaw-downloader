@@ -1562,6 +1562,199 @@ async def _run_backfill_legis_history(
         db.close()
 
 
+@main.command("scrape-noteup")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB + case artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--court", "courts_str",
+    type=str,
+    default=None,
+    help="Comma-separated court slugs (e.g. hkcfa,hkca). Default: all.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N fetches.",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+def scrape_noteup(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    courts_str: str | None,
+    limit: int | None,
+    yes: bool,
+    no_events: bool,
+) -> None:
+    """Scrape HKLII getcasenoteup for every downloaded case.
+
+    Populates the citations edges table (from_key → to_key), the
+    case_parallel_cites de-dup table, and the noteup_fetches per-source
+    tracker. Idempotent — resumes cleanly from partial runs.
+
+    \b
+    Examples:
+      hklii scrape-noteup --proxy http://127.0.0.1:8888
+      hklii scrape-noteup --court hkcfa --limit 100 --direct --yes
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    courts = None
+    if courts_str:
+        courts = tuple(c.strip() for c in courts_str.split(",") if c.strip())
+    asyncio.run(_run_scrape_noteup(
+        output=output, proxies=list(proxies), direct=direct,
+        courts=courts, limit=limit, no_events=no_events,
+    ))
+
+
+async def _run_scrape_noteup(
+    output: Path, proxies: list[str], direct: bool,
+    courts: tuple[str, ...] | None,
+    limit: int | None, no_events: bool = False,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .citations import NoteupRunner
+    from .events import StructuredEventLogger
+    from .proxy_pool import ProxyPool
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        raise click.UsageError(f"No checkpoint DB at {db_path}.")
+    db = CheckpointDB(str(db_path))
+
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError("No healthy proxies after preflight.")
+            workers = max(1, len(result.healthy_proxies))
+
+        # Court filter enumerates only via a scope-limited SELECT — build
+        # a small runner override.
+        runner = NoteupRunner(
+            get=pool.get, checkpoint=db, output_dir=output,
+            workers=workers, limit=limit,
+        )
+        if courts:
+            # Enumerate manually for court subset
+            click.echo(
+                f"Enumerating noteup targets for courts={list(courts)}..."
+            )
+            for court in courts:
+                rows = db._conn.execute(
+                    "SELECT court, year, number FROM cases "
+                    "WHERE status='downloaded' AND court=?",
+                    (court,),
+                ).fetchall()
+                for c, y, n in rows:
+                    db.upsert_noteup_fetch(c, y, n)
+        else:
+            click.echo("Enumerating noteup targets across all courts...")
+            runner.enumerate_pending()
+
+        stats = db.noteup_stats()
+        target = stats["pending"] if limit is None else min(
+            limit, stats["pending"],
+        )
+        click.echo(
+            f"noteup_fetches — total={stats['total']}, "
+            f"pending={stats['pending']}, ok={stats['ok']}, "
+            f"error={stats['error']}. target this pass: {target}."
+        )
+        if target == 0:
+            click.echo("Nothing to fetch.")
+        else:
+            outcome = await _noteup_with_progress(runner, target)
+            click.echo(
+                f"\nDone. Downloaded: {outcome.downloaded}, "
+                f"Failed: {outcome.failed}."
+            )
+            edge_count = db._conn.execute(
+                "SELECT COUNT(*) FROM citations"
+            ).fetchone()[0]
+            click.echo(f"Citation edges in DB: {edge_count:,}")
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+        db.close()
+
+
+async def _noteup_with_progress(runner, target: int):
+    from rich.progress import (
+        Progress, TextColumn, BarColumn,
+        MofNCompleteColumn, TaskProgressColumn,
+        TimeElapsedColumn, TimeRemainingColumn,
+    )
+    with Progress(
+        TextColumn("[bold blue]noteup"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[ok]}"),
+        TextColumn("[red]fail {task.fields[fail]}"),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "cases", total=target, ok=0, fail=0,
+        )
+        def on_progress(stats):
+            progress.update(
+                task_id,
+                completed=stats.downloaded + stats.failed,
+                ok=stats.downloaded, fail=stats.failed,
+            )
+        return await runner.fetch_pending(on_progress=on_progress)
+
+
 @main.command("backfill-case-translations")
 @click.option(
     "-o", "--output",
