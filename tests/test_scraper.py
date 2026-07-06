@@ -956,6 +956,29 @@ class TestChallengePageDetection:
         assert _looks_like_challenge_page(html)
 
 
+    def test_judgment_mentioning_cloudflare_as_party_does_not_false_positive(self):
+        """Whole-codebase review (L2): the bare 'cloudflare' substring
+        false-positives on any HK judgment that literally mentions
+        Cloudflare Inc. as a party, intermediary, or subject. The row
+        would be dropped as a WAF challenge and permanently marked
+        failed with no distinguishable signal from a real WAF intercept.
+
+        Marker should be more specific — either 'cloudflare.com' (used
+        in interstitial asset URLs) or 'cf-ray' (used in the CF error
+        pages) — so ordinary legal English doesn't trip it."""
+        html = (
+            "<html><body><p>The defendant, Cloudflare, Inc., a Delaware "
+            "corporation, provides content-delivery services. In this "
+            "action the plaintiff alleges that Cloudflare hosted "
+            "infringing material through its network...</p></body></html>"
+        )
+        from hklii_downloader.scraper import _looks_like_challenge_page
+        assert not _looks_like_challenge_page(html), (
+            "judgment naming Cloudflare Inc. was flagged as a WAF "
+            "challenge — the bare substring marker is too broad"
+        )
+
+
 class TestBulkScraperChallengePage:
     """A challenge page returned as content_html must mark the row failed with
     a distinctive reason so it can be identified in the checkpoint DB and

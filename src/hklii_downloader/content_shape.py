@@ -23,7 +23,13 @@ _CHALLENGE_MARKERS = (
     # WAF that greets us with only these bare phrases.
     "just a moment...",
     "cf-challenge",
-    "cloudflare",
+    # "cloudflare.com" (asset URL in CF interstitial) + "cloudflare ray"
+    # (branded ID in CF error pages) are specific to interstitials.
+    # The bare "cloudflare" substring false-positives on any judgment
+    # naming Cloudflare, Inc. as a party — real cases exist in the
+    # corpus (task #67-era whole-codebase review).
+    "cloudflare.com",
+    "cloudflare ray",
     "please enable javascript",
     "verify you are human",
     # Traditional Chinese — HKLII serves bilingual content, any localized
