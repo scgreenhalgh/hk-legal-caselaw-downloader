@@ -584,7 +584,11 @@ class BulkScraper:
                 await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                 continue
             if resp.status_code != 200:
-                if attempt < self._max_retries and resp.status_code >= 500:
+                # 5xx and 429 (rate limited) are transient — retry within
+                # budget. Other 4xx (401/403/404) are terminal at the
+                # doc URL layer and shouldn't waste retries.
+                retryable = resp.status_code >= 500 or resp.status_code == 429
+                if attempt < self._max_retries and retryable:
                     await asyncio.sleep(_jittered_backoff(self._backoff_base, attempt))
                     continue
                 return False, None
@@ -605,8 +609,15 @@ class BulkScraper:
             try:
                 atomic_write_bytes(path, resp.content)
                 return True, None
-            except OSError:
-                return False, None
+            except OSError as exc:
+                # Disk-write failure is HARD, not transient — reporting
+                # as (False, None) let the caller silently drop the doc
+                # when content_ok=True. Route through _fail with a
+                # distinct error class so the operator sees disk-write
+                # failures rather than a phantom "downloaded" row.
+                return False, (
+                    f"doc-write-failed: {type(exc).__name__}: {exc}"
+                )
         return False, None
 
     async def _enrich_summaries(
