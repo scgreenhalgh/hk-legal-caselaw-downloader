@@ -76,7 +76,15 @@ def find_translation_targets(
                 court, year, num = m.group(1), int(m.group(2)), int(m.group(3))
                 try:
                     doc = json.loads(f.read_text())
-                except (json.JSONDecodeError, OSError):
+                except (json.JSONDecodeError, OSError) as exc:
+                    # Silent-continue previously hid corrupt / unreadable
+                    # sidecars — the operator saw no signal that N
+                    # translation targets were skipped. Log a warning so
+                    # the drop is observable in scrape.log.
+                    _log.warning(
+                        "case translation target unreadable at %s: %s: %s",
+                        f, type(exc).__name__, exc,
+                    )
                     continue
                 if not doc.get("has_translation"):
                     continue

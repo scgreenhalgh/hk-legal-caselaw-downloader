@@ -398,7 +398,13 @@ class LegisHistoryRunner:
                 continue
             try:
                 versions = json.loads(versions_path.read_text())
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                # Silent-continue previously hid corrupt / unreadable
+                # sidecars. Log a warning so operators can see the drop.
+                _log.warning(
+                    "legis versions.json unreadable at %s: %s: %s",
+                    versions_path, type(exc).__name__, exc,
+                )
                 continue
             for entry in versions:
                 vid = int(entry["id"])
