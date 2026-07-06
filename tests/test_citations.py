@@ -281,6 +281,69 @@ class TestRunner:
         finally:
             db.close()
 
+    async def test_sqlite_error_in_worker_does_not_terminate_run(self, tmp_path):
+        """Whole-codebase review (L1 silent skip): pre-fix, a SQLite
+        error inside the fetch worker's try block (from
+        insert_citation_edges / insert_parallel_cites / mark_noteup_ok)
+        wasn't caught by the two except clauses (NoteupFetchError,
+        RequestError/OSError). It propagated out of asyncio.gather and
+        terminated the whole run — one bad row killed every subsequent
+        one.
+
+        Guard: the worker must catch broader errors, mark_noteup_failed
+        with the error, and continue processing sibling rows."""
+        import sqlite3
+        from unittest.mock import patch
+        from hklii_downloader.citations import NoteupRunner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            for n in (32, 33, 34):
+                db.upsert_case("hkcfa", 2020, n, f"N{n}", "T", "2020-01-01")
+                db.mark_downloaded("hkcfa", 2020, n, ["html"])
+                db.upsert_noteup_fetch("hkcfa", 2020, n)
+
+            async def mock_get(url, **kw):
+                return httpx.Response(
+                    200, json=[
+                        {"neutral": "[2023] HKCFA 40",
+                         "path": "/en/cases/hkcfa/2023/40",
+                         "db": "CFA", "date": "", "citation_frequency": 1,
+                         "parallel": [], "cases": []},
+                    ],
+                    request=httpx.Request("GET", url),
+                )
+
+            call_count = {"n": 0}
+            real_insert = db.insert_citation_edges
+            def fail_first(edges, first_seen):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    raise sqlite3.OperationalError("simulated DB failure")
+                return real_insert(edges, first_seen)
+
+            runner = NoteupRunner(get=mock_get, checkpoint=db,
+                                    output_dir=tmp_path)
+            with patch.object(db, "insert_citation_edges", side_effect=fail_first):
+                result = await runner.fetch_pending()
+
+            # Must NOT terminate — the remaining 2 rows still process
+            # (order is non-deterministic across workers, but total
+            # processed + failed should account for all 3).
+            assert result.downloaded + result.failed == 3, (
+                f"one SQLite failure terminated the run — "
+                f"only {result.downloaded + result.failed} of 3 rows "
+                "reached a terminal state"
+            )
+            # The row that hit the sqlite error must be marked failed.
+            rows = db._conn.execute(
+                "SELECT status, error FROM noteup_fetches WHERE status='error'"
+            ).fetchall()
+            assert len(rows) == 1
+            assert "simulated DB failure" in rows[0][1]
+        finally:
+            db.close()
+
     async def test_limit_caps_fetches(self, tmp_path):
         from hklii_downloader.citations import NoteupRunner
 
