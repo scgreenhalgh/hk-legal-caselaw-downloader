@@ -18,26 +18,29 @@ from hklii_downloader.proxy_pool import (
 
 
 class TestRequestThrottler:
+    # Bounds updated 2026-07-06 alongside the throttler retuning — see
+    # proxy_pool.py:RequestThrottler for the rationale.
+
     def test_normal_delay_in_range(self):
         rng = random.Random(42)
         throttler = RequestThrottler(rng=rng)
         delays = [throttler.next_delay() for _ in range(100)]
         for d in delays:
-            assert d >= 0.5
-            assert d <= 10.0
+            assert d >= 0.1
+            assert d <= 3.0
 
     def test_most_delays_are_short(self):
         rng = random.Random(42)
         throttler = RequestThrottler(rng=rng)
         delays = [throttler.next_delay() for _ in range(1000)]
-        short = [d for d in delays if d <= 2.0]
+        short = [d for d in delays if d <= 0.5]
         assert len(short) / len(delays) > 0.70
 
     def test_some_reading_pauses(self):
         rng = random.Random(42)
         throttler = RequestThrottler(rng=rng)
         delays = [throttler.next_delay() for _ in range(1000)]
-        long = [d for d in delays if d > 2.0]
+        long = [d for d in delays if d > 0.9]
         assert len(long) > 0, "Expected some longer 'reading' pauses"
 
     def test_burst_pause_after_cluster(self):
@@ -46,7 +49,7 @@ class TestRequestThrottler:
         delays = []
         for _ in range(12):
             delays.append(throttler.next_delay())
-        pauses = [d for d in delays if d > 2.0]
+        pauses = [d for d in delays if d > 0.3]
         assert len(pauses) >= 2, "Expected burst pauses after every 3 requests"
 
     def test_seeded_rng_is_deterministic(self):

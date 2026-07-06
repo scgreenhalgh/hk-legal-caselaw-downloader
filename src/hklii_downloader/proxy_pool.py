@@ -37,11 +37,18 @@ class RequestThrottler:
     def __init__(
         self,
         rng: random.Random | None = None,
-        base_range: tuple[float, float] = (0.5, 1.5),
-        pause_range: tuple[float, float] = (3.0, 8.0),
-        pause_chance: float = 0.05,
+        # Defaults tightened 2026-07-06 after hklii-waf-status confirmed
+        # no WAF / rate-limiting on the origin. Original values were
+        # calibrated defensively during the anti-detection phase; multiple
+        # completed scrapes (~200k requests) showed no upstream throttling,
+        # so we now scale each envelope down ~3-5×. The overall
+        # "browser-shaped" burst+pause pattern is retained so per-session
+        # traffic still doesn't look pathological.
+        base_range: tuple[float, float] = (0.1, 0.3),
+        pause_range: tuple[float, float] = (1.0, 2.5),
+        pause_chance: float = 0.02,
         burst_size_range: tuple[int, int] = (2, 5),
-        burst_gap_range: tuple[float, float] = (2.0, 4.0),
+        burst_gap_range: tuple[float, float] = (0.3, 0.8),
     ):
         self._rng = rng or random.Random()
         self._base_range = base_range
