@@ -583,28 +583,49 @@ class CheckpointDB:
 
     def verify_downloaded_against_files(self, output_dir) -> int:
         """Scan status='downloaded' rows; flip any whose expected files are
-        missing or 0-byte back to status='pending'. Returns broken count."""
+        missing or 0-byte back to status='pending'. Returns broken count.
+
+        fmt='doc' accepts any of .doc / .docx / .rtf on disk — matches
+        _DOC_FAMILY_EXTS used by validate.py and html_generator.py.
+        scraper._fetch_doc records fmt='doc' regardless of which
+        magic-derived extension it actually saved (Judiciary serves
+        RTF at .doc URLs per task #67), so a strict .doc-only check
+        here would falsely flip 19+ production rows.
+        """
         from pathlib import Path
         output_dir = Path(output_dir)
         rows = self._conn.execute(
             "SELECT court, year, number, formats FROM cases WHERE status='downloaded'"
         ).fetchall()
+        _DOC_FAMILY_EXTS = (".doc", ".docx", ".rtf")
         broken = 0
         for court, year, number, formats_json in rows:
             formats = json.loads(formats_json) if formats_json else []
             stem = f"{court}_{year}_{number}"
             case_dir = output_dir / court / str(year)
+            row_broken = False
             for fmt in formats:
-                ext = "docx" if fmt == "doc" and (case_dir / f"{stem}.docx").exists() else fmt
-                path = case_dir / f"{stem}.{ext}"
-                if not path.exists() or path.stat().st_size == 0:
-                    self._conn.execute(
-                        "UPDATE cases SET status='pending', formats=NULL "
-                        "WHERE court=? AND year=? AND number=?",
-                        (court, year, number),
-                    )
-                    broken += 1
+                if fmt == "doc":
+                    # Any doc-family sibling present + non-empty wins.
+                    if any(
+                        (case_dir / f"{stem}{ext}").exists()
+                        and (case_dir / f"{stem}{ext}").stat().st_size > 0
+                        for ext in _DOC_FAMILY_EXTS
+                    ):
+                        continue
+                    row_broken = True
                     break
+                path = case_dir / f"{stem}.{fmt}"
+                if not path.exists() or path.stat().st_size == 0:
+                    row_broken = True
+                    break
+            if row_broken:
+                self._conn.execute(
+                    "UPDATE cases SET status='pending', formats=NULL "
+                    "WHERE court=? AND year=? AND number=?",
+                    (court, year, number),
+                )
+                broken += 1
         self._conn.commit()
         return broken
 
