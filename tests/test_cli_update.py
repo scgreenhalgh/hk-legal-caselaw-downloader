@@ -680,27 +680,247 @@ class TestUpdateDispatchArgContract:
     _run_enrich(summaries=..., appeal_history=...) and
     _run_scrape_noteup(langs=...) — both are TypeErrors that were
     silently swallowed by the broad `except Exception` in the dispatch
-    loop. Verify the kwargs we ship match the helper signatures.
+    loop. The prior tests here inspected only the CALLEE's signature —
+    a caller-side regression (dispatch flipped back to `summaries=`)
+    would leave the callee's signature intact and pass green.
+
+    These tests inspect the DISPATCHER'S source and assert on the
+    kwargs it actually names at the call site.
     """
 
-    def test_dispatch_enrich_uses_correct_kwarg_names(self):
-        """`_run_enrich` takes do_summaries/do_appeal_history — not
-        summaries/appeal_history."""
+    def test_dispatch_source_uses_do_prefix_for_enrich_kwargs(self):
+        """_dispatch_update_plan must name `do_summaries=` /
+        `do_appeal_history=` at the _run_enrich call site — the bare
+        `summaries=`/`appeal_history=` shape is the exact regression
+        we already fixed once."""
         import inspect
-        from hklii_downloader.cli import _run_enrich
-        sig = inspect.signature(_run_enrich)
-        params = set(sig.parameters)
-        assert "do_summaries" in params
-        assert "do_appeal_history" in params
-        assert "summaries" not in params
-        assert "appeal_history" not in params
+        from hklii_downloader.cli import _dispatch_update_plan
+        src = inspect.getsource(_dispatch_update_plan)
+        assert "do_summaries=" in src
+        assert "do_appeal_history=" in src
+        # Any bare form is a regression. Match on ' summaries=' /
+        # ' appeal_history=' to avoid hitting the do_ prefix versions.
+        assert " summaries=" not in src, (
+            "_dispatch_update_plan appears to call _run_enrich with "
+            "bare `summaries=` — this is the shape that TypeError'd "
+            "under the previously-swallowed except-clause."
+        )
+        assert " appeal_history=" not in src, (
+            "_dispatch_update_plan appears to call _run_enrich with "
+            "bare `appeal_history=` — same regression shape."
+        )
 
-    def test_dispatch_scrape_noteup_does_not_pass_langs(self):
-        """`_run_scrape_noteup` has no `langs` param — passing one is a
-        TypeError."""
+    def test_dispatch_source_does_not_pass_langs_to_run_scrape_noteup(self):
+        """_dispatch_update_plan must NOT pass `langs=` to
+        _run_scrape_noteup (which lacks that kwarg). We look for the
+        specific call site by locating `_run_scrape_noteup(` in the
+        dispatcher source and searching only its argument list."""
         import inspect
-        from hklii_downloader.cli import _run_scrape_noteup
-        assert "langs" not in inspect.signature(_run_scrape_noteup).parameters
+        from hklii_downloader.cli import _dispatch_update_plan
+        src = inspect.getsource(_dispatch_update_plan)
+        idx = src.find("_run_scrape_noteup(")
+        assert idx != -1, "_run_scrape_noteup not called by dispatcher"
+        # Consume until the matching `)`. Naive but sufficient — no
+        # nested parens are expected inside the kwarg list here.
+        depth = 0
+        end = idx
+        for i, ch in enumerate(src[idx:], start=idx):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        call_args = src[idx:end]
+        assert "langs=" not in call_args, (
+            f"_run_scrape_noteup call site contains langs= — regression "
+            f"of the previously-fixed TypeError. Call fragment:\n{call_args}"
+        )
+
+
+class TestOrphanMarkHandler:
+    """`_run_update_orphan_mark` guards against silent corpus damage.
+    Prior tests exercised only the UpdateRunner __init__ guard (a
+    plan-composition check); the actual handler that reads enum_runs,
+    validates coverage, and calls mark_orphaned_below_ts had no
+    behavioural coverage."""
+
+    def _capture_orphan_flips(self, monkeypatch):
+        """Wrap CheckpointDB.mark_orphaned_below_ts so we can assert on
+        whether the guard let the flip happen."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        real = CheckpointDB.mark_orphaned_below_ts
+        calls = {"n": 0, "cutoffs": []}
+        def _wrap(self, cutoff_ts):
+            calls["n"] += 1
+            calls["cutoffs"].append(cutoff_ts)
+            return real(self, cutoff_ts)
+        monkeypatch.setattr(CheckpointDB, "mark_orphaned_below_ts", _wrap)
+        return calls
+
+    def test_partial_coverage_enum_aborts_without_orphaning(
+        self, tmp_path, monkeypatch,
+    ):
+        """A completed enum_run covering only ['hkcfi']×['en'] is not
+        authoritative for orphan_mark; the guard must abort and
+        mark_orphaned_below_ts must NOT run."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_update_orphan_mark
+        from unittest.mock import MagicMock
+        calls = self._capture_orphan_flips(monkeypatch)
+
+        db_path = tmp_path / ".checkpoint.db"
+        db = CheckpointDB(str(db_path))
+        # Seed a stale downloaded row in a court the enum didn't cover.
+        db.upsert_case("hkca", 2020, 1, "[2020] HKCA 1", "T", "2020-01-01", lang="en", last_seen_at=100)
+        db.mark_downloaded("hkca", 2020, 1, ["html"])
+        # Narrow enum covering only hkcfi/en → completes cleanly.
+        g = db.start_enum_run(["hkcfi"], ["en"])
+        db.complete_enum_run(g)
+        db.close()
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        _run_update_orphan_mark(runner)
+
+        assert calls["n"] == 0, (
+            "mark_orphaned_below_ts was called despite partial coverage — "
+            "hkca/en (not in the completed enum) would have been mass-"
+            "orphaned."
+        )
+
+    def test_no_completed_enum_aborts_without_orphaning(
+        self, tmp_path, monkeypatch,
+    ):
+        """A fresh DB with no enum_runs row must not orphan anything."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_update_orphan_mark
+        from unittest.mock import MagicMock
+        calls = self._capture_orphan_flips(monkeypatch)
+
+        db_path = tmp_path / ".checkpoint.db"
+        db = CheckpointDB(str(db_path))
+        db.upsert_case("hkcfi", 2020, 1, "[2020] HKCFI 1", "T", "2020-01-01", lang="en", last_seen_at=100)
+        db.mark_downloaded("hkcfi", 2020, 1, ["html"])
+        db.close()
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        _run_update_orphan_mark(runner)
+
+        assert calls["n"] == 0
+
+    def test_narrow_window_enum_aborts_without_orphaning(
+        self, tmp_path, monkeypatch,
+    ):
+        """End-to-end sibling of the checkpoint-level test: even if a
+        daily-narrow enum's completed row covers ALL_COURTS × ALL_LANGS,
+        `latest_completed_enum_run` filters it out and the handler
+        aborts. This is the mass-orphan scenario Cluster B addresses."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_update_orphan_mark, ALL_COURTS, ALL_LANGS
+        from unittest.mock import MagicMock
+        calls = self._capture_orphan_flips(monkeypatch)
+
+        db_path = tmp_path / ".checkpoint.db"
+        db = CheckpointDB(str(db_path))
+        # Narrow-window sweep of every court/lang → completes cleanly
+        # but its cutoff would mass-orphan out-of-window rows.
+        g = db.start_enum_run(
+            list(ALL_COURTS), list(ALL_LANGS),
+            min_date_text="06/06/2026",
+            max_date_text="06/07/2026",
+        )
+        db.complete_enum_run(g)
+        db.close()
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        _run_update_orphan_mark(runner)
+
+        assert calls["n"] == 0, (
+            "orphan_mark used a narrow-window enum_run as its reference — "
+            "the Cluster-B mass-orphan bug regressed."
+        )
+
+    def test_full_coverage_enum_orphans_stale_rows(
+        self, tmp_path, monkeypatch,
+    ):
+        """Positive path: a full-corpus completed enum_run covering
+        ALL_COURTS × ALL_LANGS DOES allow the orphan flip on rows
+        whose last_seen_at is older than the sweep's started_at."""
+        import time
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_update_orphan_mark, ALL_COURTS, ALL_LANGS
+        from unittest.mock import MagicMock
+        calls = self._capture_orphan_flips(monkeypatch)
+
+        db_path = tmp_path / ".checkpoint.db"
+        db = CheckpointDB(str(db_path))
+        # Row with stale last_seen_at way before now — must flip.
+        stale_ts = int(time.time()) - 100_000
+        db.upsert_case("hkcfi", 2020, 1, "[2020] HKCFI 1", "T", "2020-01-01", lang="en", last_seen_at=stale_ts)
+        db.mark_downloaded("hkcfi", 2020, 1, ["html"])
+        # Fresh full-corpus completed enum.
+        g = db.start_enum_run(list(ALL_COURTS), list(ALL_LANGS))
+        db.complete_enum_run(g)
+        db.close()
+
+        runner = MagicMock()
+        runner.output = tmp_path
+        _run_update_orphan_mark(runner)
+
+        assert calls["n"] == 1, "mark_orphaned_below_ts should have fired"
+
+        # Verify the row actually flipped.
+        db2 = CheckpointDB(str(db_path))
+        try:
+            row = db2._conn.execute(
+                "SELECT status FROM cases WHERE court='hkcfi' AND year=2020 AND number=1"
+            ).fetchone()
+            assert row[0] == "orphaned", f"expected 'orphaned', got {row[0]!r}"
+        finally:
+            db2.close()
+
+
+class TestUpdatePlanDoesNotAdvertiseDeadKwargs:
+    """Regression pins for adversarial-review dead-kwarg findings —
+    plan-level kwargs must not include knobs the dispatcher never
+    reads (or the dry-run output misleads operators about switches
+    that have no effect)."""
+
+    def test_validate_step_kwargs_omit_include_graph(self, tmp_path):
+        """`_run_update_validate` reads only 'sample' from step.kwargs;
+        Validator has no include_graph parameter and CHECK_KEYS has no
+        graph check. Advertising 'include_graph=True' in --dry-run is
+        misleading. (Finding: update.py:413)"""
+        from hklii_downloader.update import UpdateRunner
+        runner = UpdateRunner(
+            profile="monthly", output=tmp_path, proxies=["p"],
+            now=_fake_now("2026-07-06T02:00:00"),
+        )
+        validate = next(s for s in runner.plan() if s.name == "validate")
+        assert "include_graph" not in validate.kwargs, (
+            "validate Step advertises include_graph but the dispatcher "
+            "never reads it — dead kwarg."
+        )
+
+    def test_orphan_mark_step_kwargs_omit_dry_run(self, tmp_path):
+        """`_run_update_orphan_mark(runner)` takes no step arg; the
+        'dry_run' kwarg on the orphan_mark Step is unread and would
+        mislead any operator adding a future --dry-run flag.
+        (Finding: update.py:430)"""
+        from hklii_downloader.update import UpdateRunner
+        runner = UpdateRunner(
+            profile="quarterly", output=tmp_path, proxies=["p"],
+            now=_fake_now("2026-07-06T02:00:00"),
+        )
+        orphan = next(s for s in runner.plan() if s.name == "orphan_mark")
+        assert "dry_run" not in orphan.kwargs, (
+            "orphan_mark Step advertises dry_run but the dispatcher "
+            "never forwards step to _run_update_orphan_mark — dead kwarg."
+        )
 
 
 class TestUpdateAdvisoryLock:
