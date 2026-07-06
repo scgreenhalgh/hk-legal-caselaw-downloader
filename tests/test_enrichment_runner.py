@@ -155,6 +155,93 @@ class TestEnrichmentRunner:
         assert enrich["summary_en"] == "na"
         assert enrich["summary_zh"] == "na"
 
+    async def test_html_missing_still_processes_appeal_history(self, tmp_path):
+        """Whole-codebase review (L1 silent skip): pre-fix, if the base
+        .html was missing AND do_summaries=True, _enrich_one marked the
+        summaries failed and RETURNED — skipping the appeal_history
+        block entirely. But appeal_history reads .json (not .html) and
+        is functionally independent. On the next run, the row is picked
+        up again, hits the same missing-.html early return, and
+        appeal_history stays 'pending' forever."""
+        from pathlib import Path
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.enrichment import EnrichmentRunner
+
+        # Seed a downloaded case with .json present but .html DELETED.
+        db = _seed_downloaded_case(
+            tmp_path, "hkcfi", 2023, 1,
+            content_html=HTML_WITH_PRESS,
+        )
+        html_path = tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.html"
+        html_path.unlink()
+
+        appeal_calls = []
+        async def mock_get(url, **kw):
+            if "getappealhistory" in url:
+                appeal_calls.append(url)
+                return httpx.Response(200, json=APPEAL_HISTORY,
+                                      request=httpx.Request("GET", url))
+            return httpx.Response(200, text="<html>x</html>",
+                                  request=httpx.Request("GET", url))
+
+        runner = EnrichmentRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            do_summaries=True, do_appeal_history=True,
+        )
+        await runner.enrich_all()
+
+        enrich = db.get_enrichment("hkcfi", 2023, 1)
+        # summaries fail because base .html is missing — expected
+        assert enrich["summary_en"] == "failed"
+        assert enrich["summary_zh"] == "failed"
+        # appeal_history reads .json which IS present — must not skip
+        assert enrich["appeal_history"] == "downloaded", (
+            f"appeal_history stuck at {enrich['appeal_history']!r} — "
+            "it reads .json and is independent of .html; the summaries "
+            "early return should not skip it"
+        )
+        assert appeal_calls, "appeal_history endpoint was never called"
+
+    async def test_worker_exception_marks_db_failed_not_just_stats(
+        self, tmp_path,
+    ):
+        """Whole-codebase review (L1 silent skip): pre-fix, the worker's
+        `except Exception:` incremented stats['failed'] but left the DB
+        row's status unchanged (still 'pending'). Next run picks up the
+        same row, hits the same exception, loops forever with no error
+        trail in the DB.
+
+        Guard: on worker exception, mark every pending enrichment kind
+        for the case as 'failed' with the exception text as the error."""
+        from hklii_downloader.enrichment import EnrichmentRunner
+
+        db = _seed_downloaded_case(
+            tmp_path, "hkcfi", 2023, 1,
+            content_html=HTML_WITH_PRESS,
+        )
+
+        # Corrupt the .json so appeal_history's json.loads raises.
+        json_path = tmp_path / "hkcfi" / "2023" / "hkcfi_2023_1.json"
+        json_path.write_text("not valid json")
+
+        async def mock_get(url, **kw):
+            return httpx.Response(200, text="<html>x</html>",
+                                  request=httpx.Request("GET", url))
+
+        runner = EnrichmentRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            do_summaries=False, do_appeal_history=True,
+        )
+        result = await runner.enrich_all()
+        assert result.failed == 1
+
+        enrich = db.get_enrichment("hkcfi", 2023, 1)
+        assert enrich["appeal_history"] == "failed", (
+            f"appeal_history still {enrich['appeal_history']!r} after "
+            "worker crashed; the row will be re-picked and re-crash "
+            "indefinitely with no error trail"
+        )
+
     async def test_limit_stops_after_n(self, tmp_path):
         from hklii_downloader.enrichment import EnrichmentRunner
 
