@@ -248,6 +248,9 @@ class HoptRunner:
         self,
         on_progress: Callable[[HoptRunResult], None] | None = None,
     ) -> HoptRunResult:
+        # Recover any rows stuck at 'in_progress' from a prior worker
+        # crash — otherwise they stay permanently unclaimable.
+        self._checkpoint.release_in_progress_hopt()
         result = HoptRunResult(downloaded=0, failed=0)
         counter_lock = asyncio.Lock()
         remaining = {"n": self._limit if self._limit is not None else -1}

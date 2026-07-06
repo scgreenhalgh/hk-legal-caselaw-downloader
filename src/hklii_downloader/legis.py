@@ -284,6 +284,8 @@ class LegisRunner:
         self,
         on_progress: Callable[[LegisRunResult], None] | None = None,
     ) -> LegisRunResult:
+        # Recover rows stuck at 'in_progress' from a prior worker crash.
+        self._checkpoint.release_in_progress_legis()
         result = LegisRunResult(downloaded=0, failed=0)
         counter_lock = asyncio.Lock()
         remaining = {"n": self._limit if self._limit is not None else -1}
@@ -417,6 +419,8 @@ class LegisHistoryRunner:
         self,
         on_progress: Callable[[LegisRunResult], None] | None = None,
     ) -> LegisRunResult:
+        # Recover rows stuck at 'in_progress' from a prior worker crash.
+        self._checkpoint.release_in_progress_legis_version()
         result = LegisRunResult(downloaded=0, failed=0)
         counter_lock = asyncio.Lock()
         remaining = {"n": self._limit if self._limit is not None else -1}

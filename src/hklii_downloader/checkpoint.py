@@ -669,6 +669,47 @@ class CheckpointDB:
         )
         self._conn.commit()
 
+    def release_in_progress_hopt(self) -> None:
+        """Recover hopt_documents rows stuck at 'in_progress' after a
+        worker crash. Called at HoptRunner startup."""
+        self._conn.execute(
+            "UPDATE hopt_documents SET status='pending' "
+            "WHERE status='in_progress'"
+        )
+        self._conn.commit()
+
+    def release_in_progress_legis(self) -> None:
+        """Recover legis_documents rows stuck at 'in_progress'."""
+        self._conn.execute(
+            "UPDATE legis_documents SET status='pending' "
+            "WHERE status='in_progress'"
+        )
+        self._conn.commit()
+
+    def release_in_progress_legis_version(self) -> None:
+        """Recover legis_versions rows stuck at 'in_progress'."""
+        self._conn.execute(
+            "UPDATE legis_versions SET status='pending' "
+            "WHERE status='in_progress'"
+        )
+        self._conn.commit()
+
+    def release_in_progress_noteup(self) -> None:
+        """Recover noteup_fetches rows stuck at 'in_progress'."""
+        self._conn.execute(
+            "UPDATE noteup_fetches SET status='pending' "
+            "WHERE status='in_progress'"
+        )
+        self._conn.commit()
+
+    def release_in_progress_relatedcap(self) -> None:
+        """Recover relatedcap_fetches rows stuck at 'in_progress'."""
+        self._conn.execute(
+            "UPDATE relatedcap_fetches SET status='pending' "
+            "WHERE status='in_progress'"
+        )
+        self._conn.commit()
+
     def release_row(self, court: str, year: int, number: int) -> None:
         """Flip a specific in_progress row back to pending.
 

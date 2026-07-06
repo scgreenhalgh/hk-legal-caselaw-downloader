@@ -169,6 +169,8 @@ class RelatedCapsRunner:
         self,
         on_progress: Callable[[RelatedcapsRunResult], None] | None = None,
     ) -> RelatedcapsRunResult:
+        # Recover rows stuck at 'in_progress' from a prior worker crash.
+        self._checkpoint.release_in_progress_relatedcap()
         result = RelatedcapsRunResult()
         counter_lock = asyncio.Lock()
         remaining = {"n": self._limit if self._limit is not None else -1}
