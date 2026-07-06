@@ -417,7 +417,6 @@ class UpdateRunner:
             steps.append(Step(
                 name="validate",
                 kwargs={
-                    "include_graph": True,
                     "sample": s.get("validate_sample"),
                 },
             ))
@@ -434,7 +433,7 @@ class UpdateRunner:
         if s.get("include_orphan_mark"):
             steps.append(Step(
                 name="orphan_mark",
-                kwargs={"dry_run": False},
+                kwargs={},
             ))
 
         return steps
