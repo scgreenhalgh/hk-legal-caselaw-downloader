@@ -189,11 +189,19 @@ CREATE TABLE IF NOT EXISTS enum_runs (
     -- completed_at populated on clean finish. Used by `hklii update`'s
     -- orphan_mark step to consume the freshest clean full-corpus enum
     -- without timestamp heuristics over per-bucket last_seen_at.
+    --
+    -- min_date_text / max_date_text record the enumeration window
+    -- (HKLII's dd/mm/yyyy strings). Both NULL → full-corpus sweep.
+    -- Either non-NULL → narrow window; orphan_mark ignores such rows
+    -- because their started_at cutoff would mass-orphan rows outside
+    -- the window.
     generation_id  INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at     INTEGER NOT NULL,
     completed_at   INTEGER,
     courts_json    TEXT    NOT NULL,   -- JSON list of court slugs enumerated
-    langs_json     TEXT    NOT NULL    -- JSON list of lang codes enumerated
+    langs_json     TEXT    NOT NULL,   -- JSON list of lang codes enumerated
+    min_date_text  TEXT,               -- HKLII dd/mm/yyyy, NULL = no lower bound
+    max_date_text  TEXT                -- HKLII dd/mm/yyyy, NULL = no upper bound
 );
 CREATE INDEX IF NOT EXISTS idx_enum_runs_completed
     ON enum_runs(completed_at);
@@ -216,6 +224,7 @@ class CheckpointDB:
         # only handles one at a time, so we use executescript here.
         self._conn.executescript(_SCHEMA)
         self._migrate_enrichment_columns()
+        self._migrate_enum_runs_window_columns()
         self._conn.commit()
 
     def _check_integrity(self, path: str) -> None:
@@ -314,6 +323,22 @@ class CheckpointDB:
         if "html_generated_error" not in existing:
             self._conn.execute(
                 "ALTER TABLE cases ADD COLUMN html_generated_error TEXT"
+            )
+
+    def _migrate_enum_runs_window_columns(self) -> None:
+        # enum_runs.min_date_text/max_date_text were added after the
+        # initial ship; existing DBs may have the table without them.
+        existing = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(enum_runs)").fetchall()
+        }
+        if "min_date_text" not in existing:
+            self._conn.execute(
+                "ALTER TABLE enum_runs ADD COLUMN min_date_text TEXT"
+            )
+        if "max_date_text" not in existing:
+            self._conn.execute(
+                "ALTER TABLE enum_runs ADD COLUMN max_date_text TEXT"
             )
 
     def upsert_case(
@@ -909,6 +934,9 @@ class CheckpointDB:
     def start_enum_run(
         self, courts: list[str] | tuple[str, ...],
         langs: list[str] | tuple[str, ...],
+        *,
+        min_date_text: str | None = None,
+        max_date_text: str | None = None,
     ) -> int:
         """Record the start of a BulkScraper.enumerate() invocation.
 
@@ -917,15 +945,26 @@ class CheckpointDB:
         crashes or aborts before completion, the row's `completed_at`
         stays NULL and downstream consumers (orphan_mark) treat it as
         an incomplete run and skip it.
+
+        `min_date_text` / `max_date_text` record the enumeration window
+        (HKLII dd/mm/yyyy strings). Both None → full-corpus sweep, the
+        only kind orphan_mark will consume as its reference generation.
+        Either non-None → narrow window; the row completes normally and
+        is queryable, but `latest_completed_enum_run` filters it out so
+        a subsequent partial full_reconcile can't fall back to a
+        daily-narrow row and mass-orphan every out-of-window case.
         """
         cur = self._conn.execute(
             "INSERT INTO enum_runs "
-            "(started_at, completed_at, courts_json, langs_json) "
-            "VALUES (?, NULL, ?, ?)",
+            "(started_at, completed_at, courts_json, langs_json, "
+            "min_date_text, max_date_text) "
+            "VALUES (?, NULL, ?, ?, ?, ?)",
             (
                 int(time.time()),
                 json.dumps(list(courts)),
                 json.dumps(list(langs)),
+                min_date_text,
+                max_date_text,
             ),
         )
         self._conn.commit()
@@ -940,14 +979,26 @@ class CheckpointDB:
         self._conn.commit()
 
     def latest_completed_enum_run(self) -> dict | None:
-        """Latest enum_runs row where completed_at IS NOT NULL. Returns
+        """Latest completed FULL-CORPUS enum_runs row. Returns
         {generation_id, started_at, completed_at, courts, langs} or None
-        if no run has ever completed cleanly. Used by orphan_mark.
+        if no full-corpus run has ever completed cleanly. Used by
+        orphan_mark.
+
+        A narrow-window enum (daily/weekly/monthly scrape with a
+        min_date_text or max_date_text) can complete cleanly and touch
+        every court/lang bucket, but only enumerates rows dated inside
+        the window — every downloaded row older than the window keeps
+        its stale last_seen_at. If orphan_mark used a narrow row's
+        started_at as its cutoff, mark_orphaned_below_ts would flip
+        every out-of-window downloaded row to 'orphaned'. Filtering to
+        min_date_text IS NULL AND max_date_text IS NULL prevents that
+        silent-corpus-damage path.
         """
         row = self._conn.execute(
             "SELECT generation_id, started_at, completed_at, "
             "courts_json, langs_json FROM enum_runs "
             "WHERE completed_at IS NOT NULL "
+            "AND min_date_text IS NULL AND max_date_text IS NULL "
             "ORDER BY completed_at DESC LIMIT 1"
         ).fetchone()
         if not row:

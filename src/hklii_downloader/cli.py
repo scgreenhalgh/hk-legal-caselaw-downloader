@@ -2905,15 +2905,21 @@ def _reset_relatedcap_fetches_via_checkpoint(output: Path) -> None:
 def _run_update_orphan_mark(runner) -> None:
     """Flip stale downloaded rows to status='orphaned'.
 
-    Safety guard (adversarial fork finding): a partial `full_reconcile`
-    (say, VPN degrades after 4/12 courts) leaves the unenumerated
-    buckets with stale `last_seen_at`. Naive orphan_mark would flag
-    every downloaded row in those buckets — silent corpus damage.
+    Safety guard: a partial `full_reconcile` (say, VPN degrades after
+    4/12 courts) leaves the unenumerated buckets with stale
+    `last_seen_at`. Naive orphan_mark would flag every downloaded row
+    in those buckets — silent corpus damage.
 
-    Guard: refuse to run unless EVERY (court, lang) in the canary's
-    court list has `last_enumeration_ts` within the grace window
-    (max_ts - 1 hour). If any bucket is None or stale, abort with a
-    warning so the operator can rerun full_reconcile.
+    Guard consumes the `enum_runs` generation marker:
+    - `latest_completed_enum_run()` returns the newest full-corpus
+      sweep whose `completed_at` is populated; narrow-window scrapes
+      (daily/weekly/monthly) are filtered out because their cutoff
+      would mass-orphan out-of-window rows.
+    - `covered_courts`/`covered_langs` must include every entry in
+      ALL_COURTS × ALL_LANGS; anything missing means the reference
+      sweep didn't touch that bucket and orphan_mark aborts.
+    - Cutoff = started_at - 60s (1s grace against the per-row upsert
+      timestamps being slightly ahead of the row-level clock read).
 
     Files on disk are NEVER touched — status flips only.
     """

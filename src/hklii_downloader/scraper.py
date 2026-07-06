@@ -180,7 +180,14 @@ class BulkScraper:
         # consumer needing "was there a clean full-corpus sweep") can key
         # off a concrete generation marker instead of scanning per-bucket
         # last_seen_at heuristics. completed_at stays NULL if we raise.
-        generation_id = self._checkpoint.start_enum_run(courts, langs)
+        # min_date_text / max_date_text are stored on the row so
+        # orphan_mark can filter out narrow-window rows and only fall
+        # back to a genuine full-corpus reference.
+        generation_id = self._checkpoint.start_enum_run(
+            courts, langs,
+            min_date_text=self._min_date_text,
+            max_date_text=self._max_date_text,
+        )
         for court in courts:
             for lang in langs:
                 if self._enum_max_age_hours > 0:
