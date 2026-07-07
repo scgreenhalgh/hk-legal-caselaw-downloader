@@ -3,7 +3,29 @@ from __future__ import annotations
 
 from click.testing import CliRunner
 
-from hklii_downloader.cli import main
+from hklii_downloader.cli import ALL_COURTS, main
+
+
+class TestAllCourts:
+    def test_ukpc_removed_from_all_courts(self):
+        """UKPC (UK Privy Council) is a UK court that heard HK appeals until
+        1997. HKLII's `ukpc` slug is currently EMPTY — `getmetacase(ukpc,en)`
+        returns count=0 and `getmetacase(ukpc,tc)` returns HTTP 500. Local
+        DB has 0 cases + 0 citations referencing it. Fetching it every daily
+        was pure waste (and the tc bucket 500-aborted the scrape step).
+
+        UKPC judgments live at BAILII (https://www.bailii.org/uk/cases/UKPC/)
+        and jcpc.uk — foreign jurisdiction from HK's perspective. Not our
+        corpus.
+
+        If HKLII ever populates ukpc, this test is the reversal point:
+        delete the assertion and re-add the slug.
+        """
+        assert "ukpc" not in ALL_COURTS
+
+    def test_all_courts_length_is_12(self):
+        """Pin the count. Any silent add/remove flips this test."""
+        assert len(ALL_COURTS) == 12
 
 
 class TestCLIGroup:
