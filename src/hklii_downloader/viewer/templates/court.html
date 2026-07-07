@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ court_slug | upper }} — HKLII viewer{% endblock %}
+{% block content %}
+<h2 class="court-heading">{{ court_slug | upper }}</h2>
+
+<section aria-labelledby="years-heading" class="years-section">
+  <h3 id="years-heading">Judgments by year</h3>
+  {% if year_buckets %}
+  <ul class="year-buckets">
+    {% for b in year_buckets %}
+    <li class="year-bucket"
+        data-testid="year-bucket"
+        data-year="{{ b.year }}"
+        data-count="{{ b.count }}">
+      <a href="/court/{{ court_slug }}/{{ b.year }}">
+        <span class="year">{{ b.year }}</span>
+        <span class="count">{{ b.count }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="empty" data-testid="empty-years">
+    No judgments in this court yet.
+  </p>
+  {% endif %}
+</section>
+
+<section aria-labelledby="hubs-heading" class="hub-cases-section">
+  <h3 id="hubs-heading">Top hub cases</h3>
+  {% if hub_cache_missing %}
+  <p class="banner banner-warn" data-testid="hub-cache-missing">
+    Hub cache not yet computed. Run <code>hklii viewer index</code> first.
+  </p>
+  {% elif hub_cases %}
+  <ol class="hub-cases">
+    {% for c in hub_cases %}
+    <li class="hub-case"
+        data-testid="hub-case"
+        data-case-key="{{ c.case_key }}"
+        data-inbound="{{ c.inbound_count }}">
+      <a href="/case/{{ c.case_key }}">
+        <span class="case-key">{{ c.case_key }}</span>
+        <span class="inbound-count">{{ c.inbound_count }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty" data-testid="empty-hubs">
+    No hub cases in this court yet.
+  </p>
+  {% endif %}
+</section>
+{% endblock %}
