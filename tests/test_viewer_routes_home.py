@@ -10,7 +10,6 @@ pinned by real assertions).
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -18,50 +17,8 @@ from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 
 from hklii_downloader.viewer.app import create_app
-from hklii_downloader.viewer.schema import create_schema
 
-
-# Mirror of the shipped cases table's columns that home actually reads.
-# Full DDL is in hklii_downloader.checkpoint._SCHEMA; the trailing NOT NULL
-# columns with DEFAULTs are irrelevant here.
-_CASES_DDL = """
-CREATE TABLE cases (
-    court    TEXT NOT NULL,
-    year     INTEGER NOT NULL,
-    number   INTEGER NOT NULL,
-    neutral  TEXT NOT NULL,
-    title    TEXT NOT NULL,
-    date     TEXT NOT NULL,
-    status   TEXT NOT NULL DEFAULT 'pending',
-    formats  TEXT,
-    error    TEXT,
-    lang     TEXT NOT NULL DEFAULT 'en',
-    last_seen_at INTEGER,
-    PRIMARY KEY (court, year, number)
-);
-"""
-
-
-def _seed_cases(db_path: Path, rows: list[tuple]) -> None:
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executescript(_CASES_DDL)
-        conn.executemany(
-            "INSERT INTO cases (court, year, number, neutral, title, date, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _build_viewer_db(path: Path) -> None:
-    conn = sqlite3.connect(str(path))
-    try:
-        create_schema(conn)
-    finally:
-        conn.close()
+from tests._route_helpers import build_viewer_db, seed_cases
 
 
 @pytest.fixture
@@ -71,7 +28,7 @@ def app_dbs(tmp_path: Path) -> tuple[Path, Path, Path]:
     viewer = tmp_path / "viewer.db"
     output_root = tmp_path / "output"
     output_root.mkdir()
-    _seed_cases(
+    seed_cases(
         checkpoint,
         [
             # (court, year, number, neutral, title, date, status)
@@ -85,7 +42,7 @@ def app_dbs(tmp_path: Path) -> tuple[Path, Path, Path]:
             ("hkdc",  2024, 100, "[2024] HKDC 100",  "LL v MM",         "2024-05-01", "downloaded"),
         ],
     )
-    _build_viewer_db(viewer)
+    build_viewer_db(viewer)
     return checkpoint, viewer, output_root
 
 
@@ -216,8 +173,8 @@ def test_home_empty_corpus_shows_empty_state_not_broken_page(
     viewer = tmp_path / "viewer.db"
     output_root = tmp_path / "output"
     output_root.mkdir()
-    _seed_cases(checkpoint, [])
-    _build_viewer_db(viewer)
+    seed_cases(checkpoint, [])
+    build_viewer_db(viewer)
 
     app = create_app(
         checkpoint_db=checkpoint,

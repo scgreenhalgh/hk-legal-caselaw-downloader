@@ -12,7 +12,6 @@ Fixture strategy: still per-file until Route 3 lands (Rule of Three).
 
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -20,74 +19,13 @@ from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 
 from hklii_downloader.viewer.app import create_app
-from hklii_downloader.viewer.schema import create_schema
 
-
-_CASES_DDL = """
-CREATE TABLE cases (
-    court    TEXT NOT NULL,
-    year     INTEGER NOT NULL,
-    number   INTEGER NOT NULL,
-    neutral  TEXT NOT NULL,
-    title    TEXT NOT NULL,
-    date     TEXT NOT NULL,
-    status   TEXT NOT NULL DEFAULT 'pending',
-    formats  TEXT,
-    error    TEXT,
-    lang     TEXT NOT NULL DEFAULT 'en',
-    last_seen_at INTEGER,
-    PRIMARY KEY (court, year, number)
-);
-"""
-
-
-def _seed_cases(db_path: Path, rows: list[tuple]) -> None:
-    conn = sqlite3.connect(str(db_path))
-    try:
-        conn.executescript(_CASES_DDL)
-        conn.executemany(
-            "INSERT INTO cases (court, year, number, neutral, title, date, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _build_viewer_db(path: Path) -> None:
-    conn = sqlite3.connect(str(path))
-    try:
-        create_schema(conn)
-    finally:
-        conn.close()
-
-
-def _seed_hub_cache(
-    path: Path,
-    rows: list[tuple[str, int, str]],
-) -> None:
-    """rows: (case_key, inbound_count, computed_at)."""
-    conn = sqlite3.connect(str(path))
-    try:
-        conn.executemany(
-            "INSERT INTO viewer_hub_cache "
-            "(case_key, inbound_count, computed_at) VALUES (?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _drop_hub_cache_table(path: Path) -> None:
-    """Drop the viewer_hub_cache table so hub_cases() raises ViewerCacheMissing."""
-    conn = sqlite3.connect(str(path))
-    try:
-        conn.execute("DROP TABLE viewer_hub_cache")
-        conn.commit()
-    finally:
-        conn.close()
+from tests._route_helpers import (
+    build_viewer_db,
+    drop_hub_cache_table,
+    seed_cases,
+    seed_hub_cache,
+)
 
 
 _SEED_CASES = [
@@ -117,11 +55,11 @@ def _build_app(tmp_path: Path, drop_hub_table: bool = False) -> TestClient:
     viewer = tmp_path / "viewer.db"
     output_root = tmp_path / "output"
     output_root.mkdir()
-    _seed_cases(checkpoint, _SEED_CASES)
-    _build_viewer_db(viewer)
-    _seed_hub_cache(viewer, _SEED_HUB)
+    seed_cases(checkpoint, _SEED_CASES)
+    build_viewer_db(viewer)
+    seed_hub_cache(viewer, _SEED_HUB)
     if drop_hub_table:
-        _drop_hub_cache_table(viewer)
+        drop_hub_cache_table(viewer)
     app = create_app(
         checkpoint_db=checkpoint, viewer_db=viewer, output_root=output_root,
     )

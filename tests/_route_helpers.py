@@ -1,0 +1,92 @@
+"""Shared setup helpers for viewer HTTP route tests.
+
+Not a test module (underscore prefix means pytest does not collect it).
+Each route test file imports the seeders it needs; per-file ``client``
+fixtures compose them into a :class:`fastapi.testclient.TestClient`.
+
+Design §10 pins a session-scoped 20-row fixture DB. That has not been
+built yet — this module is the seam through which such a fixture would
+compose. For now, tests continue to build tmp_path-scoped fresh DBs.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from hklii_downloader.viewer.schema import create_schema
+
+
+# Mirror of the columns the route layer actually reads from ``cases``.
+# Full schema is in ``hklii_downloader.checkpoint._SCHEMA``.
+CASES_DDL = """
+CREATE TABLE cases (
+    court    TEXT NOT NULL,
+    year     INTEGER NOT NULL,
+    number   INTEGER NOT NULL,
+    neutral  TEXT NOT NULL,
+    title    TEXT NOT NULL,
+    date     TEXT NOT NULL,
+    status   TEXT NOT NULL DEFAULT 'pending',
+    formats  TEXT,
+    error    TEXT,
+    lang     TEXT NOT NULL DEFAULT 'en',
+    last_seen_at INTEGER,
+    PRIMARY KEY (court, year, number)
+);
+"""
+
+
+def seed_cases(db_path: Path, rows: list[tuple]) -> None:
+    """rows: (court, year, number, neutral, title, date, status)."""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(CASES_DDL)
+        conn.executemany(
+            "INSERT INTO cases "
+            "(court, year, number, neutral, title, date, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def build_viewer_db(path: Path) -> None:
+    """Fresh viewer.db via :func:`viewer.schema.create_schema`."""
+    conn = sqlite3.connect(str(path))
+    try:
+        create_schema(conn)
+    finally:
+        conn.close()
+
+
+def seed_hub_cache(
+    path: Path,
+    rows: list[tuple[str, int, str]],
+) -> None:
+    """rows: (case_key, inbound_count, computed_at)."""
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executemany(
+            "INSERT INTO viewer_hub_cache "
+            "(case_key, inbound_count, computed_at) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def drop_hub_cache_table(path: Path) -> None:
+    """Drop ``viewer_hub_cache`` so :func:`hub_cases` raises
+    :class:`ViewerCacheMissing`. Used by route tests that verify the
+    'run the indexer' banner path.
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("DROP TABLE viewer_hub_cache")
+        conn.commit()
+    finally:
+        conn.close()
