@@ -506,6 +506,30 @@ def test_build_index_second_run_reports_unchanged(tmp_path: Path) -> None:
     vw.close()
 
 
+def test_build_index_empty_courts_list_is_a_noop_not_full_rebuild(
+    tmp_path: Path,
+) -> None:
+    """L5 ambiguous-state: courts=[] and courts=None must not be conflated.
+
+    An empty courts list is a legitimate 'no courts to index' signal
+    (e.g. after intersecting a --courts flag with the shipped court list
+    and finding no overlap). Falling through to a full-corpus rebuild
+    silently kicks off a 20-min rebuild instead of a no-op.
+    """
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/1")
+    _seed_case(cp, "hkca/2020/1")
+
+    result = build_index(vw, cp, tmp_path, courts=[], now_iso=_FIXED_NOW)
+    assert result.processed == 0
+    assert result.indexed == 0
+    # No cases were written
+    assert vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone() == (0,)
+    cp.close()
+    vw.close()
+
+
 def test_build_index_courts_filter_restricts_processing(
     tmp_path: Path,
 ) -> None:
