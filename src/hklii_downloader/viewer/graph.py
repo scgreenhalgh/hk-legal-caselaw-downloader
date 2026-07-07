@@ -30,12 +30,16 @@ class ViewerCacheMissing(Exception):
 
 
 # Curial precedence for ORDER BY on court slugs. Higher courts (lower rank
-# number) come first. ELSE 99 catches any court slug added upstream we
-# haven't ranked yet — the ORDER BY still produces a deterministic result,
-# just with unknown-court rows at the bottom of each result set.
+# number) come first. Covers all 13 shipped-downloader canonical slugs
+# (ALL_COURTS in hklii_downloader/cli.py). ELSE 99 is reserved for
+# schema-drift or genuinely unknown courts — a UKPC citer must not land
+# in that bucket. ukpc is tied with hkca at rank 1: pre-1997 UK Privy
+# Council was the ultimate appellate court for HK; post-1997 CFA
+# replaced it but UKPC precedents are still cited with near-apex weight.
 _COURT_RANK_WHEN_ELSE = """
     WHEN 'hkcfa'  THEN 0
     WHEN 'hkca'   THEN 1
+    WHEN 'ukpc'   THEN 1
     WHEN 'hkcfi'  THEN 2
     WHEN 'hkdc'   THEN 3
     WHEN 'hkmagc' THEN 4
