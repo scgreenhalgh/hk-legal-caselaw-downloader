@@ -20,11 +20,30 @@ from lxml import html as lxml_html
 from lxml.etree import ParserError, _Element
 
 
-#: Tags whose subtree is dropped entirely. Design §5 line 115.
-REJECT_TAGS: frozenset[str] = frozenset({
-    "script", "style", "link", "meta", "iframe",
-    "object", "embed", "form", "input", "button", "base",
+#: Tags whose subtree is DROPPED entirely — content is JS/CSS/binary.
+_DROP_SUBTREE_TAGS: frozenset[str] = frozenset({
+    "script", "style", "iframe", "object", "embed",
 })
+
+#: Void reject tags — self-closing, so no subtree to consider; the tag
+#: itself is removed (link/meta/base are head decoration; input is form UI).
+_VOID_DROP_TAGS: frozenset[str] = frozenset({
+    "link", "meta", "input", "base",
+})
+
+#: Tags that are UNWRAPPED — the tag itself disappears but children survive.
+#: HKLII wraps every judgment body in <form name="search_body">; dropping
+#: the subtree would zero the rendered body. Verified against
+#: hkcfa/2013/hkcfa_2013_11.html (27KB raw → 119 chars with the drop-only
+#: strategy, vs the full body preserved after this split).
+_UNWRAP_TAGS: frozenset[str] = frozenset({"form", "button"})
+
+#: Public constant covering all tag categories treated by the sanitizer.
+#: Design §5 line 115 enumerated these as one set; internally we split by
+#: behavior (drop-subtree vs void-drop vs unwrap).
+REJECT_TAGS: frozenset[str] = (
+    _DROP_SUBTREE_TAGS | _VOID_DROP_TAGS | _UNWRAP_TAGS
+)
 
 
 #: HKLII's non-standard semantic tags — kept as-is so downstream CSS
@@ -68,13 +87,15 @@ def sanitize_body(html_content: str | bytes) -> str:
         raise
 
     _drop_rejected_subtrees(root)
+    _unwrap_form_and_button(root)
     _strip_disallowed_attrs(root)
 
     return lxml_html.tostring(root, encoding="unicode", method="html")
 
 
 def _drop_rejected_subtrees(root: _Element) -> None:
-    """Remove every element whose tag is in REJECT_TAGS.
+    """Remove every element whose tag is in _DROP_SUBTREE_TAGS or
+    _VOID_DROP_TAGS.
 
     The rejected element's tail text (after its closing tag) belongs to
     the parent's text stream — preserved by grafting it onto the previous
@@ -83,10 +104,11 @@ def _drop_rejected_subtrees(root: _Element) -> None:
     Collects victims first, then removes, so no live-iterator invalidation
     over a mutating tree.
     """
+    drop_set = _DROP_SUBTREE_TAGS | _VOID_DROP_TAGS
     victims = [
         e
         for e in root.iter()
-        if isinstance(e.tag, str) and e.tag.lower() in REJECT_TAGS
+        if isinstance(e.tag, str) and e.tag.lower() in drop_set
     ]
     for e in victims:
         parent = e.getparent()
@@ -102,6 +124,29 @@ def _drop_rejected_subtrees(root: _Element) -> None:
             else:
                 parent.text = (parent.text or "") + tail
         parent.remove(e)
+
+
+def _unwrap_form_and_button(root: _Element) -> None:
+    """Unwrap every ``<form>`` / ``<button>`` element — remove the tag
+    itself but promote its children (and text) into the parent.
+
+    HKLII wraps every judgment body in ``<form name="search_body">``;
+    treating <form> as a subtree-drop zero'd the output. Unwrap keeps
+    the content while stripping the meaningless form scaffold.
+
+    Uses lxml.html.HtmlElement.drop_tag() which handles text/tail
+    plumbing correctly (unlike a naive parent.remove + reinsert).
+    """
+    victims = [
+        e
+        for e in root.iter()
+        if isinstance(e.tag, str) and e.tag.lower() in _UNWRAP_TAGS
+    ]
+    for e in victims:
+        # Only HtmlElement has drop_tag; iter() returns _Element in general
+        # but real HTML input yields HtmlElements, which subclass _Element.
+        if hasattr(e, "drop_tag"):
+            e.drop_tag()
 
 
 def _strip_disallowed_attrs(root: _Element) -> None:
