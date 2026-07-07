@@ -103,7 +103,7 @@ def cited_by(
             substr(from_key, 1, instr(from_key, '/') - 1) AS from_court,
             GROUP_CONCAT(DISTINCT citer_lang) AS langs,
             MAX(citer_freq) AS citer_freq,
-            MAX(position) AS position,
+            MIN(position) AS position,
             MAX(first_seen) AS first_seen
         FROM citations
         WHERE to_key = ?
