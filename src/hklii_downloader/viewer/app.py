@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.templating import Jinja2Templates
 
+from hklii_downloader.viewer.routes.case_detail import router as case_detail_router
 from hklii_downloader.viewer.routes.court import router as court_router
 from hklii_downloader.viewer.routes.home import router as home_router
 from hklii_downloader.viewer.routes.year import router as year_router
@@ -42,4 +43,5 @@ def create_app(
     app.include_router(home_router)
     app.include_router(court_router)
     app.include_router(year_router)
+    app.include_router(case_detail_router)
     return app

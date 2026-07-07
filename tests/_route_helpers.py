@@ -32,6 +32,7 @@ CREATE TABLE cases (
     error    TEXT,
     lang     TEXT NOT NULL DEFAULT 'en',
     last_seen_at INTEGER,
+    html_generated_from   TEXT,
     PRIMARY KEY (court, year, number)
 );
 """
