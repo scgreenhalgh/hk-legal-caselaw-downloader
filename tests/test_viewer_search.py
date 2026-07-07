@@ -831,6 +831,122 @@ def test_index_case_replaces_row_when_body_changes(tmp_path: Path) -> None:
     vw.close()
 
 
+class _CommitCounter:
+    """Wrap a sqlite3 connection so commit() calls are countable.
+
+    sqlite3.Connection has ``commit`` as a read-only C method, so we
+    can't monkeypatch it directly. This proxy intercepts commit() and
+    forwards every other attribute to the wrapped connection.
+    """
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+        self.count = 0
+
+    def commit(self) -> None:
+        self.count += 1
+        self._conn.commit()
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._conn, name)
+
+
+class TestBuildIndexCommitBatching:
+    """Tier-3 finding: commit-per-case fsync efficiency.
+
+    Old shape: each ``index_case`` call ended in ``vw_conn.commit()``.
+    Over 162k cases that's 162k WAL fsyncs. Batching commits into
+    groups of ``commit_every`` drops that by two orders of magnitude
+    without changing durability at end-of-build.
+    """
+
+    def _seed_n_cases(
+        self, tmp_path: Path, cp: sqlite3.Connection, n: int
+    ) -> None:
+        for k in range(1, n + 1):
+            _seed_case(cp, f"hkcfa/2020/{k}", lang="en")
+            paths = _mk_paths(tmp_path, f"hkcfa/2020/{k}")
+            _touch(paths["html"], f"<p>Body {k}</p>")
+
+    def test_build_index_batches_commits_at_commit_every_boundary(
+        self, tmp_path: Path
+    ) -> None:
+        """25 cases + ``commit_every=10`` → 3 commits (i=9, i=19, final)."""
+        cp = _mk_cp(tmp_path)
+        vw = _mk_vw(tmp_path)
+        self._seed_n_cases(tmp_path, cp, 25)
+
+        counter = _CommitCounter(vw)
+
+        r = build_index(counter, cp, tmp_path, commit_every=10, now_iso=_FIXED_NOW)
+
+        assert r.processed == 25
+        assert r.indexed == 25
+        assert counter.count == 3, (
+            f"expected 3 commits (i=9, i=19, final), got {counter.count}"
+        )
+        # Sanity: all rows landed despite batching.
+        count = vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone()[0]
+        assert count == 25
+        cp.close()
+        vw.close()
+
+    def test_build_index_writes_persist_after_close_reopen(
+        self, tmp_path: Path
+    ) -> None:
+        """Batched commits must remain durable. Close the DB and reopen —
+        all rows must still be there. Guards against a batching bug that
+        skips the final commit.
+        """
+        cp = _mk_cp(tmp_path)
+        vw = _mk_vw(tmp_path)
+        self._seed_n_cases(tmp_path, cp, 12)
+        r = build_index(vw, cp, tmp_path, commit_every=5, now_iso=_FIXED_NOW)
+        assert r.indexed == 12
+        vw.close()
+        cp.close()
+
+        # Reopen from disk. WAL checkpoint runs implicitly at close;
+        # rows must survive.
+        reopened = sqlite3.connect(str(tmp_path / "viewer.db"))
+        try:
+            count = reopened.execute(
+                "SELECT COUNT(*) FROM fts_cases"
+            ).fetchone()[0]
+            assert count == 12
+        finally:
+            reopened.close()
+
+    def test_build_index_default_commit_every_is_100(
+        self, tmp_path: Path
+    ) -> None:
+        """Design commitment: default batch size is 100. This is the
+        pin — a future performance regression that changes it should
+        surface in test output rather than silently.
+        """
+        import inspect
+
+        sig = inspect.signature(build_index)
+        assert sig.parameters["commit_every"].default == 100
+
+    def test_build_index_commit_every_less_than_processed_still_ok(
+        self, tmp_path: Path
+    ) -> None:
+        """commit_every larger than case count → one final commit only."""
+        cp = _mk_cp(tmp_path)
+        vw = _mk_vw(tmp_path)
+        self._seed_n_cases(tmp_path, cp, 3)
+
+        counter = _CommitCounter(vw)
+
+        r = build_index(vw, cp, tmp_path, commit_every=100, now_iso=_FIXED_NOW)
+
+        assert r.indexed == 3
+        assert calls[0] == 1  # only the final catch-all commit
+        cp.close()
+        vw.close()
+
+
 def test_index_case_updates_body_source_when_kind_changes_same_sha(
     tmp_path: Path,
 ) -> None:
