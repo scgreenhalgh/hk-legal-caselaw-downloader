@@ -23,6 +23,13 @@ def open_readonly(path: str | Path) -> sqlite3.Connection:
     ``PRAGMA query_only`` is set as belt-and-suspenders on top of
     ``mode=ro`` — it also blocks operations that ``mode=ro`` allows but
     the viewer never needs (e.g. temporary schema creation).
+
+    Concurrency contract: under WAL journal_mode (which viewer.db and
+    checkpoint.db both use), a connection returned by this function
+    coexists with a concurrent writer without ``SQLITE_BUSY`` — it sees
+    the snapshot as of when its transaction started, and a fresh call
+    picks up the latest committed state. This is design §4 line 50 and
+    is pinned by ``tests/test_viewer_db_wal_concurrent_reader.py``.
     """
     conn = sqlite3.connect(
         f"file:{path}?mode=ro",
