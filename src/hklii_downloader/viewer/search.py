@@ -10,8 +10,47 @@ See docs/viewer-design.md §4.
 
 from __future__ import annotations
 
+import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from hklii_downloader.viewer.body_render.text import iter_text_nodes
+
+
+#: Any run of whitespace (including newlines) collapses to a single space
+#: in the extracted plaintext. Matches source-format churn that would
+#: otherwise perturb body_sha256.
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def extract_plaintext(html_content: str | bytes) -> str:
+    """Extract normalized plaintext for FTS indexing.
+
+    Uses iter_text_nodes with DEFAULT_SKIP_TAGS (a/code/pre) plus the
+    always-skip infrastructure set (script/style/head/…). Concatenates
+    yielded text nodes with a single space, then collapses whitespace
+    runs and strips the ends.
+
+    Empty body → empty string. Callers may skip writing an FTS row for
+    an empty body, or write a row whose body_sha256 is the empty-string
+    sentinel — either is valid; the point is that the two states are
+    distinguishable.
+    """
+    nodes = list(iter_text_nodes(html_content))
+    if not nodes:
+        return ""
+    joined = " ".join(nodes)
+    return _WHITESPACE_RUN.sub(" ", joined).strip()
+
+
+def body_sha256(plaintext: str) -> str:
+    """Return the SHA-256 hex digest of ``plaintext`` (utf-8 encoded).
+
+    Basis of the incremental-index diff: a case's body_sha256 unchanged
+    since the last index run means we can skip the reindex.
+    """
+    return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
