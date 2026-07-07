@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator
 
 from lxml import html as lxml_html
-from lxml.etree import _Element
+from lxml.etree import ParserError, _Element
 
 
 #: Default subtrees whose text is excluded from iteration. Callers may
@@ -65,7 +65,18 @@ def iter_text_nodes(
     # docstring promises empty-body → empty string; honor that here.
     if not html_content.strip():
         return
-    root = lxml_html.fromstring(html_content)
+    # Comment-only, DOCTYPE-only, PI-only content passes the strip check
+    # but still parses to nothing → same ParserError. Rare corpus edge
+    # cases (pandoc emitting bare DOCTYPE, sidecar retracted-content
+    # placeholder). Narrow catch: treat 'Document is empty' as an empty
+    # body, but let any other ParserError propagate — malformed real
+    # HTML with mid-parse errors should still surface.
+    try:
+        root = lxml_html.fromstring(html_content)
+    except ParserError as e:
+        if "Document is empty" in str(e):
+            return
+        raise
     skip = frozenset(t.lower() for t in skip_tags) | _ALWAYS_SKIP_TAGS
     for text in _walk(root, skip):
         if text.strip():
