@@ -66,16 +66,26 @@ class IndexResult:
     """Summary of what index_case did for one case.
 
     action codes:
-      - 'no_case_row': case_key absent from checkpoint.cases (skip)
-      - 'no_body_on_disk': cases row exists but no body files (skip)
-      - 'indexed': at least one (lang) inserted or replaced
-      - 'unchanged': every (lang)'s body_sha256 matched the stored row
+      - 'no_case_row': case_key absent from cp.cases AND viewer.db has
+        no stale rows for it (nothing to do)
+      - 'no_body_on_disk': cp.cases row exists but no body files, AND
+        viewer.db had no stale rows (nothing to do)
+      - 'indexed': at least one write happened — insert, update, OR
+        delete. langs_indexed / langs_unchanged / langs_pruned tell
+        which per-language events occurred.
+      - 'unchanged': existing rows matched, no writes.
+
+    langs_pruned enumerates languages whose stored row was DELETEd —
+    happens when the corresponding body file disappears between runs
+    (upstream retract, scraper cleanup, manual delete), or when the
+    case_key is removed from cp.cases entirely.
     """
 
     case_key: str
     action: str
     langs_indexed: tuple[str, ...] = field(default_factory=tuple)
     langs_unchanged: tuple[str, ...] = field(default_factory=tuple)
+    langs_pruned: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _default_now_iso() -> str:
@@ -87,6 +97,40 @@ def _default_now_iso() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _prune_case_key_except(
+    vw_conn: sqlite3.Connection,
+    case_key: str,
+    keep_langs: set[str],
+) -> list[str]:
+    """Delete rows for ``case_key`` whose lang is NOT in ``keep_langs``.
+
+    Reads case_bodies (authoritative — its DELETE trigger cleans up
+    fts_body), computes the diff, and issues one DELETE against each of
+    fts_cases + case_bodies. Returns the sorted list of pruned langs.
+
+    ``keep_langs`` = empty set means 'prune everything for this case_key'.
+    """
+    existing = [
+        r[0]
+        for r in vw_conn.execute(
+            "SELECT lang FROM case_bodies WHERE case_key = ?", [case_key]
+        )
+    ]
+    to_prune = sorted(l for l in existing if l not in keep_langs)
+    if not to_prune:
+        return []
+    placeholders = ",".join(["?"] * len(to_prune))
+    vw_conn.execute(
+        f"DELETE FROM fts_cases WHERE case_key = ? AND lang IN ({placeholders})",
+        [case_key, *to_prune],
+    )
+    vw_conn.execute(
+        f"DELETE FROM case_bodies WHERE case_key = ? AND lang IN ({placeholders})",
+        [case_key, *to_prune],
+    )
+    return to_prune
 
 
 def _fetch_case_row(
@@ -140,11 +184,38 @@ def index_case(
     """
     now = now_iso if now_iso is not None else _default_now_iso()
     case_row = _fetch_case_row(cp_conn, case_key)
+
+    # Case_key gone from cp.cases → prune EVERY viewer.db row for it.
+    # Without this, an orphan FTS row keeps matching search queries and
+    # its body_source points at a file that will 404 in Phase 3.
     if case_row is None:
+        pruned = _prune_case_key_except(vw_conn, case_key, keep_langs=set())
+        vw_conn.commit()
+        if pruned:
+            return IndexResult(
+                case_key=case_key,
+                action="indexed",
+                langs_pruned=tuple(pruned),
+            )
         return IndexResult(case_key=case_key, action="no_case_row")
 
     sources = discover_body_sources(output_root, case_key, case_row["lang"])
+
+    # Prune rows whose lang is NOT represented on disk any more (bilingual
+    # half deleted, or all bodies removed). Runs BEFORE upserts so the
+    # existing-sha check below can't mistakenly report 'unchanged' for a
+    # case whose stale companion row we're about to delete.
+    current_langs = {s.lang for s in sources}
+    pruned = _prune_case_key_except(vw_conn, case_key, current_langs)
+
     if not sources:
+        vw_conn.commit()
+        if pruned:
+            return IndexResult(
+                case_key=case_key,
+                action="indexed",
+                langs_pruned=tuple(pruned),
+            )
         return IndexResult(case_key=case_key, action="no_body_on_disk")
 
     indexed: list[str] = []
@@ -205,12 +276,13 @@ def index_case(
         indexed.append(source.lang)
 
     vw_conn.commit()
-    if indexed:
+    if indexed or pruned:
         return IndexResult(
             case_key=case_key,
             action="indexed",
             langs_indexed=tuple(indexed),
             langs_unchanged=tuple(unchanged),
+            langs_pruned=tuple(pruned),
         )
     return IndexResult(
         case_key=case_key,
