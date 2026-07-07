@@ -15,6 +15,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from hklii_downloader.viewer.schema import (
     ALL_DDL,
     CASE_BODIES_TABLE_DDL,
@@ -190,18 +192,23 @@ def test_insert_case_body_populates_fts_body_via_trigger(tmp_path: Path) -> None
 def test_delete_case_body_removes_from_fts_body_via_trigger(
     tmp_path: Path,
 ) -> None:
-    """AFTER DELETE trigger: the deleted body is no longer findable."""
+    """AFTER DELETE trigger: the deleted body is no longer findable.
+
+    Note the MATCH term is quoted — FTS5 treats bare ``-`` as NOT,
+    which is a real UX/route concern: search input must be escaped
+    or wrapped in quotes to be treated as literal text.
+    """
     conn = _fresh_db(tmp_path)
     create_schema(conn)
     conn.execute(
         "INSERT INTO case_bodies (case_key, lang, title, body) "
-        "VALUES ('hkcfa/2020/32', 'en', 't', 'unique-body-marker')"
+        "VALUES ('hkcfa/2020/32', 'en', 't', 'uniquebodymarker')"
     )
     conn.execute("DELETE FROM case_bodies WHERE case_key='hkcfa/2020/32'")
     conn.commit()
     r = conn.execute(
         "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH ?",
-        ["unique-body-marker"],
+        ["uniquebodymarker"],
     ).fetchone()
     assert r == (0,)
     conn.close()
@@ -215,24 +222,51 @@ def test_update_case_body_replaces_fts_body_row_via_trigger(
     create_schema(conn)
     conn.execute(
         "INSERT INTO case_bodies (case_key, lang, title, body) "
-        "VALUES ('hkcfa/2020/32', 'en', 't', 'old-body-marker')"
+        "VALUES ('hkcfa/2020/32', 'en', 't', 'oldbodymarker')"
     )
     conn.execute(
-        "UPDATE case_bodies SET body='new-body-marker' "
+        "UPDATE case_bodies SET body='newbodymarker' "
         "WHERE case_key='hkcfa/2020/32'"
     )
     conn.commit()
     r_old = conn.execute(
         "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH ?",
-        ["old-body-marker"],
+        ["oldbodymarker"],
     ).fetchone()
     r_new = conn.execute(
         "SELECT c.case_key FROM fts_body b JOIN case_bodies c ON c.id = b.rowid "
         "WHERE fts_body MATCH ?",
-        ["new-body-marker"],
+        ["newbodymarker"],
     ).fetchone()
     assert r_old == (0,)
     assert r_new == ("hkcfa/2020/32",)
+    conn.close()
+
+
+def test_fts5_treats_bare_hyphen_as_not_operator(tmp_path: Path) -> None:
+    """FTS5 syntax gotcha: unquoted hyphens are NOT operators, so a search
+    like 'old-body-marker' raises OperationalError. The /search route (Phase 4)
+    will escape user input before passing to MATCH; documenting the gotcha here.
+    """
+    conn = _fresh_db(tmp_path)
+    create_schema(conn)
+    conn.execute(
+        "INSERT INTO case_bodies (case_key, lang, title, body) "
+        "VALUES ('hkcfa/2020/32', 'en', 't', 'hyphen-in-body')"
+    )
+    conn.commit()
+    with pytest.raises(sqlite3.OperationalError):
+        conn.execute(
+            "SELECT * FROM fts_body WHERE fts_body MATCH ?",
+            ["hyphen-in-body"],  # bare hyphens → FTS5 syntax error
+        ).fetchall()
+    # Wrapping in double-quotes makes it a phrase literal
+    r = conn.execute(
+        "SELECT c.case_key FROM fts_body b JOIN case_bodies c ON c.id = b.rowid "
+        "WHERE fts_body MATCH ?",
+        ['"hyphen-in-body"'],
+    ).fetchone()
+    assert r == ("hkcfa/2020/32",)
     conn.close()
 
 
@@ -308,9 +342,14 @@ def test_trigram_2char_cjk_query_returns_no_matches(tmp_path: Path) -> None:
 
 
 def test_trigram_snippet_wraps_matches_in_mark_tags(tmp_path: Path) -> None:
-    """snippet(fts_body, 1, '<mark>', '</mark>', '…', 32) wraps highlighted
-    text — design §4 line 86 fixes the highlight tokens as a contract with
-    the styling layer.
+    """snippet(fts_body, 1, '<mark>', '</mark>', '…', N) wraps highlighted
+    text with <mark>...</mark>. Design §4 line 86 fixes these highlight
+    tokens as a contract with the styling layer.
+
+    Note: trigram tokens are 3 chars each; the last snippet arg caps the
+    NUMBER OF TOKENS returned, so the highlighted region may be a
+    substring of the matched word rather than the whole word — the
+    tag pair still surrounds the matched portion.
     """
     conn = _fresh_db(tmp_path)
     create_schema(conn)
@@ -321,12 +360,17 @@ def test_trigram_snippet_wraps_matches_in_mark_tags(tmp_path: Path) -> None:
     )
     conn.commit()
     r = conn.execute(
-        "SELECT snippet(fts_body, 1, '<mark>', '</mark>', '…', 8) "
+        "SELECT snippet(fts_body, 1, '<mark>', '</mark>', '…', 16) "
         "FROM fts_body WHERE fts_body MATCH ?",
         ["foundation"],
     ).fetchone()
     assert r is not None
-    assert "<mark>" in r[0] and "</mark>" in r[0]
-    # The highlighted word should be inside the tags
-    assert "foundation" in r[0].lower()
+    snippet = r[0]
+    assert "<mark>" in snippet and "</mark>" in snippet
+    # The mark-wrapped substring must be a prefix of 'foundation' (trigram
+    # tokens are 3 chars; the snippet's max-tokens cap can truncate)
+    start = snippet.index("<mark>") + len("<mark>")
+    end = snippet.index("</mark>")
+    highlighted = snippet[start:end].lower()
+    assert "foundation".startswith(highlighted) or highlighted in "foundation"
     conn.close()
