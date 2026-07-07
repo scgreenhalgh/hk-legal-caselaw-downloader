@@ -15,28 +15,8 @@
     <button type="submit">Search</button>
   </form>
 
-  {% if query %}
-    {% if rows %}
-    <p class="result-count">{{ total }} result{{ '' if total == 1 else 's' }}.</p>
-    <ol class="search-results" data-testid="search-results">
-      {% for r in rows %}
-      <li class="search-result"
-          data-testid="search-result"
-          data-case-key="{{ r.case_key }}">
-        <a href="/case/{{ r.case_key }}" class="result-link">
-          <span class="neutral">{{ r.neutral }}</span>
-          <span class="title">{{ r.title }}</span>
-          <time datetime="{{ r.date }}">{{ r.date }}</time>
-        </a>
-        {# snippet is plaintext produced by extract_plaintext + FTS5's
-           snippet() — only <mark> is injected, so |safe is XSS-clean. #}
-        <p class="snippet" data-testid="snippet">{{ r.snippet | safe }}</p>
-      </li>
-      {% endfor %}
-    </ol>
-    {% else %}
-    <p class="empty" data-testid="empty-search">No results for &ldquo;{{ query }}&rdquo;.</p>
-    {% endif %}
-  {% endif %}
+  <div id="search-results-container">
+    {% include "partials/search_results.html" %}
+  </div>
 </section>
 {% endblock %}

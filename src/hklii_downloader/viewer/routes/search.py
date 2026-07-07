@@ -82,25 +82,55 @@ def _search_bm25(
 router = APIRouter()
 
 
+def _run_search(request: Request, q: str | None, page: int) -> tuple[list[dict], int]:
+    """Query the FTS5 index if ``q`` is non-empty, else return empty results."""
+    if not q:
+        return [], 0
+    conn = open_readonly(request.app.state.viewer_db)
+    try:
+        return _search_bm25(conn, q, page, _PAGE_SIZE)
+    finally:
+        conn.close()
+
+
 @router.get("/search", response_class=HTMLResponse)
 def search_page(
     request: Request,
     q: str | None = None,
     page: int = 1,
 ) -> HTMLResponse:
-    rows: list[dict] = []
-    total = 0
-    if q:
-        conn = open_readonly(request.app.state.viewer_db)
-        try:
-            rows, total = _search_bm25(conn, q, page, _PAGE_SIZE)
-        finally:
-            conn.close()
-
+    rows, total = _run_search(request, q, page)
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
         "search.html",
+        {
+            "query": q or "",
+            "rows": rows,
+            "total": total,
+            "page": page,
+            "page_size": _PAGE_SIZE,
+        },
+    )
+
+
+@router.get("/search/results", response_class=HTMLResponse)
+def search_results_partial(
+    request: Request,
+    q: str | None = None,
+    page: int = 1,
+) -> HTMLResponse:
+    """HTMX fragment version of the search results.
+
+    Rendered by ``partials/search_results.html`` — the same file
+    /search embeds via ``{% include %}``. Both routes therefore
+    render identical result markup and can't drift.
+    """
+    rows, total = _run_search(request, q, page)
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "partials/search_results.html",
         {
             "query": q or "",
             "rows": rows,
