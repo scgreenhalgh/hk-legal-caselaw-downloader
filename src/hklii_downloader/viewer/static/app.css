@@ -1,0 +1,213 @@
+/*
+ * Viewer-specific styles layered on top of Pico.css v2 (classless).
+ *
+ * Design principle: use Pico's semantic defaults + CSS custom properties
+ * (--pico-*) so light/dark mode work automatically via prefers-color-scheme.
+ * Only add rules for grid layouts + small primitives (badges, marks) that
+ * Pico's classless build doesn't cover.
+ */
+
+/* --- Header + nav ------------------------------------------------------- */
+.viewer-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  padding-block: 0.5rem;
+  margin-block-end: 1.5rem;
+}
+.viewer-header h1 {
+  font-size: 1.25rem;
+  margin: 0;
+}
+.viewer-header .brand {
+  text-decoration: none;
+  color: inherit;
+}
+
+/* --- Court tile grid (home) -------------------------------------------- */
+.court-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.court-tile {
+  margin: 0;
+}
+.court-tile a {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0.75rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  text-decoration: none;
+  color: inherit;
+}
+.court-tile a:hover {
+  background: var(--pico-secondary-background);
+}
+.court-slug { font-weight: 600; letter-spacing: 0.02em; }
+.court-count { color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
+
+/* --- Recent-cases list (home) ------------------------------------------ */
+.recent-cases {
+  list-style: none;
+  padding: 0;
+}
+.recent-cases li {
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  padding-block: 0.5rem;
+}
+.recent-cases a {
+  display: grid;
+  grid-template-columns: minmax(120px, 8em) 1fr auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  text-decoration: none;
+  color: inherit;
+}
+.recent-cases .neutral { font-family: var(--pico-font-family-monospace); font-size: 0.9em; }
+.recent-cases time { color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
+
+/* --- Year buckets (court landing) -------------------------------------- */
+.year-buckets {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.year-bucket a {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--pico-muted-border-color);
+  border-radius: var(--pico-border-radius);
+  text-decoration: none;
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Court badges (citation panels) ------------------------------------ */
+.court-badge {
+  display: inline-block;
+  padding: 0.15em 0.6em;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  background: var(--pico-secondary-background);
+  color: var(--pico-secondary-inverse);
+}
+
+/* --- Citation panels + tabs (case detail) ------------------------------ */
+.citation-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-block: 1rem 0.5rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.citation-tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.75rem;
+  cursor: pointer;
+  color: inherit;
+}
+.citation-tab:hover {
+  border-bottom-color: var(--pico-primary);
+}
+.citation-list {
+  list-style: none;
+  padding: 0;
+}
+.citation-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding-block: 0.4rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.citation-row .langs { color: var(--pico-muted-color); font-size: 0.85em; }
+.citation-row time { color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
+
+/* --- Case detail metadata + body --------------------------------------- */
+.case-metadata h2 { margin-block-end: 0.25rem; }
+.case-metadata .title { color: var(--pico-muted-color); margin-block-end: 1rem; }
+.case-metadata .meta-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin: 0;
+}
+.case-metadata dt {
+  color: var(--pico-muted-color);
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.case-metadata dd { margin: 0; }
+/* Legal-doc reading font on the actual judgment body. */
+.case-body article {
+  font-family: Charter, Georgia, "Times New Roman", Times, serif;
+  line-height: 1.6;
+  max-width: 68ch;
+  margin-block: 1.5rem;
+}
+
+/* --- Search + snippet highlight --------------------------------------- */
+mark {
+  background: var(--pico-mark-background-color, #fef08a);
+  color: inherit;
+  padding: 0.05em 0.2em;
+  border-radius: 2px;
+}
+.search-results { list-style: none; padding: 0; }
+.search-result {
+  padding-block: 0.75rem;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.search-result .snippet {
+  color: var(--pico-muted-color);
+  margin-block: 0.25rem 0;
+  font-size: 0.9em;
+}
+
+/* --- Pager (year page) ------------------------------------------------- */
+.pager {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: center;
+  margin-block: 1.5rem;
+}
+.pager .page-info { color: var(--pico-muted-color); }
+
+/* --- Empty state ------------------------------------------------------- */
+.empty {
+  color: var(--pico-muted-color);
+  padding: 1rem 0;
+  font-style: italic;
+}
+
+/* --- Banner (setup signal) -------------------------------------------- */
+.banner {
+  padding: 0.75rem 1rem;
+  border-radius: var(--pico-border-radius);
+  border: 1px solid var(--pico-muted-border-color);
+  background: var(--pico-secondary-background);
+}
+.banner-warn { border-color: var(--pico-color-amber-500, #d97706); }
+
+/* --- HTMX indicator (hx-indicator support) ---------------------------- */
+.htmx-indicator { display: none; }
+.htmx-request .htmx-indicator { display: inline-block; }
+.htmx-request.htmx-swapping { opacity: 0.6; transition: opacity 100ms; }

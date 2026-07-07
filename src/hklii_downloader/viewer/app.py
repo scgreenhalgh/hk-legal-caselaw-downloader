@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from hklii_downloader.viewer.routes.case_detail import router as case_detail_router
@@ -23,6 +24,7 @@ from hklii_downloader.viewer.routes.year import router as year_router
 
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+_STATIC_DIR = Path(__file__).parent / "static"
 
 
 def create_app(
@@ -42,6 +44,8 @@ def create_app(
     app.state.viewer_db = viewer_db
     app.state.output_root = output_root
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     app.include_router(home_router)
     app.include_router(court_router)
