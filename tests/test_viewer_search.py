@@ -939,10 +939,12 @@ class TestBuildIndexCommitBatching:
 
         counter = _CommitCounter(vw)
 
-        r = build_index(vw, cp, tmp_path, commit_every=100, now_iso=_FIXED_NOW)
+        r = build_index(
+            counter, cp, tmp_path, commit_every=100, now_iso=_FIXED_NOW,
+        )
 
         assert r.indexed == 3
-        assert calls[0] == 1  # only the final catch-all commit
+        assert counter.count == 1  # only the final catch-all commit
         cp.close()
         vw.close()
 

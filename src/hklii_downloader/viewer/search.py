@@ -167,12 +167,19 @@ def index_case(
     case_key: str,
     *,
     now_iso: str | None = None,
+    commit: bool = True,
 ) -> IndexResult:
     """Index one case into viewer.db. Writes are one of insert/update/delete.
 
     Reads case metadata from ``cp_conn`` (checkpoint.db, expected columns:
     court/year/number/neutral/title/date/lang). Discovers on-disk bodies
     via :func:`discover_body_sources`.
+
+    Set ``commit=False`` to defer the per-case fsync to the caller —
+    :func:`build_index` uses that to batch commits across many cases
+    (Tier-3 fsync-efficiency fix). When ``commit=True`` (default),
+    each call ends in ``vw_conn.commit()`` so single-case callers get
+    the same fire-and-forget durability as before.
 
     Branches:
       1. ``case_row`` missing (case removed from cp.cases) → prune every
@@ -204,7 +211,8 @@ def index_case(
     # its body_source points at a file that will 404 in Phase 3.
     if case_row is None:
         pruned = _prune_case_key_except(vw_conn, case_key, keep_langs=set())
-        vw_conn.commit()
+        if commit:
+            vw_conn.commit()
         if pruned:
             return IndexResult(
                 case_key=case_key,
@@ -299,7 +307,8 @@ def index_case(
         )
         indexed.append(source.lang)
 
-    vw_conn.commit()
+    if commit:
+        vw_conn.commit()
     if indexed or pruned:
         return IndexResult(
             case_key=case_key,
@@ -355,6 +364,7 @@ def build_index(
     *,
     courts: list[str] | None = None,
     now_iso: str | None = None,
+    commit_every: int = 100,
 ) -> BuildIndexResult:
     """Walk cp.cases and call :func:`index_case` for each row.
 
@@ -368,6 +378,12 @@ def build_index(
         - non-empty list → WHERE court IN (?, ...)
       now_iso: passed through to index_case for deterministic timestamps
         (tests). None → real UTC clock.
+      commit_every: Tier-3 fsync-efficiency fix. Batch ``commit_every``
+        cases into one transaction — default 100 drops a 162k-corpus
+        build from 162k fsyncs to ~1,620. Final unconditional commit at
+        loop end handles the trailing partial batch. Durability at
+        end-of-build is preserved; individual per-case rollback (which
+        the old shape offered implicitly) is traded for throughput.
 
     Returns a :class:`BuildIndexResult` summarizing the action mix,
     including a `pruned` counter that disambiguates 'N fresh bodies
@@ -392,10 +408,11 @@ def build_index(
         q = f"SELECT court, year, number FROM cases WHERE court IN ({placeholders})"
         params = list(courts)
 
-    for row in cp_conn.execute(q, params):
+    for i, row in enumerate(cp_conn.execute(q, params)):
         case_key = f"{row[0]}/{row[1]}/{row[2]}"
         result = index_case(
-            vw_conn, cp_conn, output_root, case_key, now_iso=now_iso
+            vw_conn, cp_conn, output_root, case_key,
+            now_iso=now_iso, commit=False,
         )
         processed += 1
         if result.action == "indexed":
@@ -406,6 +423,15 @@ def build_index(
             unchanged += 1
         elif result.action == "no_body_on_disk":
             no_body += 1
+        # Batch commit every commit_every cases — flushes buffered
+        # writes to WAL and lets a killed process resume from the last
+        # boundary rather than replay from zero.
+        if (i + 1) % commit_every == 0:
+            vw_conn.commit()
+
+    # Final commit — flushes the trailing partial batch. Idempotent
+    # when the loop happened to end exactly on a boundary.
+    vw_conn.commit()
 
     return BuildIndexResult(
         processed=processed,
