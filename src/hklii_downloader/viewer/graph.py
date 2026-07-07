@@ -182,6 +182,38 @@ def parallel_cites(
     return [row[0] for row in cur.fetchall()]
 
 
+def ord_reg_children(
+    conn: sqlite3.Connection,
+    parent_cap: str,
+    lang: str,
+) -> list[dict]:
+    """Return sub-legislation children of an ordinance ``parent_cap`` in ``lang``.
+
+    Reads checkpoint.db's ``ord_reg_edges`` table (written by
+    ``related_caps`` -> ``checkpoint.insert_ord_reg_edges``). Row shape
+    is ``{parent_cap, child_cap, lang, title, first_seen}``. Order:
+    ``child_cap`` ASC — deterministic for stable viewer rendering.
+
+    ``lang`` is a strict WHERE-clause filter: passing ``"en"`` never
+    surfaces ``"tc"`` rows and vice versa (L2 lens — a viewer route
+    rendering an EN page must never leak TC titles through this
+    reader).
+
+    Returns ``[]`` for a ``parent_cap`` with no children, or a lang with
+    no edges — L5 ambiguous-state, absence is a legitimate answer
+    distinct from a raise.
+    """
+    cur = conn.execute(
+        "SELECT parent_cap, child_cap, lang, title, first_seen "
+        "FROM ord_reg_edges "
+        "WHERE parent_cap = ? AND lang = ? "
+        "ORDER BY child_cap ASC",
+        [parent_cap, lang],
+    )
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
 # ---------------------------------------------------------------------------
 # viewer.db readers — hub_cases + inbound_counts read viewer.db, not checkpoint.db
 # ---------------------------------------------------------------------------
