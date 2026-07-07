@@ -324,7 +324,7 @@ def test_render_case_body_generated_path_when_html_generated_from_is_doc(
     out = render_case_body(src, row)
 
     assert '<article lang="en">' in out
-    assert "Paragraph 1" in out
+    assert "paragraph 1" in out
     assert "Paragraph 2" in out
 
 
