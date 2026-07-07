@@ -229,38 +229,6 @@ def test_cited_by_and_authorities_cited_use_symmetric_min_position(
         conn.close()
 
 
-def test_cited_by_ranks_ukpc_as_near_apex_not_unknown(tmp_path: Path) -> None:
-    """Design promise (§7 line 203): all 13 court slugs are ranked.
-
-    ukpc is the canonical downloader slug for UK Privy Council decisions
-    (cli.py ALL_COURTS). Pre-1997 UKPC was the ultimate appellate court
-    for HK — cited-by rows from a UKPC citer must not collapse into the
-    ELSE 99 bucket alongside 'unknown court' anomalies.
-
-    Fix places ukpc at rank 1 (tied with hkca, reflecting its historical
-    near-apex role in HK case law).
-    """
-    db = tmp_path / "checkpoint.db"
-    _seed_citations(
-        db,
-        [
-            ("hkcfi/1995/50", "hkcfa/2020/1", "en", 3, 1, "1995-06-01T00:00:00"),
-            ("ukpc/1990/5",   "hkcfa/2020/1", "en", 8, 1, "1990-01-01T00:00:00"),
-            ("hkcfa/2019/50", "hkcfa/2020/1", "en", 8, 1, "2019-01-01T00:00:00"),
-        ],
-    )
-    conn = open_readonly(db)
-    try:
-        rows = cited_by(conn, "hkcfa/2020/1")
-        keys = [r["from_key"] for r in rows]
-        # hkcfa (rank 0), ukpc (rank 1, near-apex), hkcfi (rank 3)
-        # ukpc must precede hkcfi despite being older
-        assert keys.index("hkcfa/2019/50") < keys.index("ukpc/1990/5")
-        assert keys.index("ukpc/1990/5") < keys.index("hkcfi/1995/50")
-    finally:
-        conn.close()
-
-
 def test_cited_by_returns_derived_from_court_column(tmp_path: Path) -> None:
     """The returned row shape includes from_court (SQL-derived via substr).
 

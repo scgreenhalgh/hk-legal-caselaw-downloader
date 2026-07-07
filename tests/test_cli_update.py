@@ -403,7 +403,7 @@ class TestCoverageCanaryFunction:
 
         import httpx
         async def _get(url, **kw):
-            if "ukpc" in url and "tc" in url:
+            if "hkfake" in url and "tc" in url:
                 # Simulate the persistent ukpc/tc 500
                 return httpx.Response(500, text="Server Error")
             if "caseDb=hkcfi" in url and "lang=en" in url:
@@ -414,7 +414,7 @@ class TestCoverageCanaryFunction:
 
         divergent = await coverage_canary(
             get=_get, checkpoint=db,
-            courts=["hkcfi", "ukpc"], langs=["en", "tc"],
+            courts=["hkcfi", "hkfake"], langs=["en", "tc"],
             threshold=5,
         )
         # hkcfi/en is +7 (10 live vs 3 local) → included
@@ -572,7 +572,7 @@ class TestCoverageCanaryHonesty:
 
         courts_13 = [
             "hkcfa", "hkca", "hkcfi", "hkdc", "hkldt", "hkfc",
-            "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "ukpc",
+            "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "hkfake",
         ]
         with pytest.raises(CoverageCanaryBlindError):
             await coverage_canary(
@@ -591,13 +591,13 @@ class TestCoverageCanaryHonesty:
 
         import httpx
         async def _one_fails(url, **kw):
-            if "ukpc" in url:
+            if "hkfake" in url:
                 return httpx.Response(500, text="err")
             return httpx.Response(200, json={"count": 0, "timestamp": "x"})
 
         courts_13 = [
             "hkcfa", "hkca", "hkcfi", "hkdc", "hkldt", "hkfc",
-            "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "ukpc",
+            "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "hkfake",
         ]
         # Must return normally — 12 successes is well above the majority
         # threshold, single 5xx is a known-benign per-bucket skip.

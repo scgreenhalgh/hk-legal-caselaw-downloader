@@ -14,10 +14,13 @@ from __future__ import annotations
 
 
 CANONICAL_COURTS: tuple[str, ...] = (
-    "hkcfa", "hkca", "ukpc",
+    "hkcfa", "hkca",
     "hkcfi", "hkdc", "hkmagc", "hkfc",
     "hkldt", "hklat", "hkct", "hksct", "hkcrc", "hkoat",
 )
+# UKPC (UK Privy Council) removed 2026-07-08 in coordination with
+# cli.ALL_COURTS. HKLII's ukpc slug is currently empty, no rows or
+# citations reference it. See cli.py for the fuller explanation.
 
 
 #: Curial-precedence rank rendered as a Unicode Roman numeral.
@@ -30,7 +33,6 @@ CANONICAL_COURTS: tuple[str, ...] = (
 CURIAL_ROMAN: dict[str, str] = {
     "hkcfa":  "Ⅰ",  # Ⅰ
     "hkca":   "Ⅱ",  # Ⅱ
-    "ukpc":   "Ⅱ",  # Ⅱ (tied with HKCA)
     "hkcfi":  "Ⅲ",  # Ⅲ
     "hkdc":   "Ⅳ",  # Ⅳ
     "hkmagc": "Ⅴ",  # Ⅴ
@@ -50,7 +52,6 @@ CURIAL_ROMAN: dict[str, str] = {
 COURT_DISPLAY_NAMES: dict[str, str] = {
     "hkcfa":  "Court of Final Appeal",
     "hkca":   "Court of Appeal",
-    "ukpc":   "UK Privy Council",
     "hkcfi":  "Court of First Instance",
     "hkdc":   "District Court",
     "hkmagc": "Magistrates' Courts",

@@ -17,10 +17,11 @@ from lxml.etree import ParserError, _Element
 
 
 #: Court slugs recognized in neutral citations. Mirrors _COURT_RANK_WHEN_ELSE
-#: in viewer/graph.py — 13 shipped downloader canonical slugs.
+#: in viewer/graph.py — 12 shipped downloader canonical slugs (UKPC dropped
+#: 2026-07-08; see cli.ALL_COURTS comment).
 _COURTS = "|".join([
     "HKCFA", "HKCA", "HKCFI", "HKDC", "HKMAGC", "HKFC",
-    "HKLDT", "HKLAT", "HKCT", "HKSCT", "HKCRC", "HKOAT", "UKPC",
+    "HKLDT", "HKLAT", "HKCT", "HKSCT", "HKCRC", "HKOAT",
 ])
 
 #: Neutral citation regex: ``[YYYY] COURT N`` with case-insensitive court
@@ -41,7 +42,7 @@ _SKIP_TAGS: frozenset[str] = frozenset({"a", "code", "pre"})
 
 def parse_neutral_citation(text: str) -> tuple[str, int, int] | None:
     """Parse a neutral-citation string. Returns ``(court, year, number)``
-    with court lower-cased ('hkcfa', 'ukpc') or ``None`` when no
+    with court lower-cased ('hkcfa', 'hkcfi', ...) or ``None`` when no
     citation is found in ``text``.
     """
     m = NEUTRAL_CITATION_RE.search(text)

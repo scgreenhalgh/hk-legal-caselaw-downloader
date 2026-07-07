@@ -113,8 +113,14 @@ DEFAULT_COURTS = ["hkcfi", "hkca", "hkdc", "hkcfa"]
 # stay consistent.
 ALL_COURTS: list[str] = [
     "hkcfa", "hkca", "hkcfi", "hkdc", "hkldt", "hkfc",
-    "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct", "ukpc",
+    "hkmagc", "hkct", "hkcrc", "hklat", "hkoat", "hksct",
 ]
+# UKPC (UK Privy Council) removed 2026-07-08: HKLII's ukpc slug is
+# currently empty (getmetacase returns count=0 for en, HTTP 500 for tc)
+# and every derived table has 0 rows referencing it. UKPC judgments
+# live at BAILII (bailii.org/uk/cases/UKPC/) and jcpc.uk — foreign
+# jurisdiction from HK's perspective. Re-add here + coordinated
+# viewer/courts.py updates if HKLII ever populates the slug.
 ALL_LANGS: tuple[str, ...] = ("en", "tc")
 
 

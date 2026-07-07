@@ -29,7 +29,9 @@ from hklii_downloader.viewer.body_render.cite import (
         ("[2013] HKCA 533", ("hkca", 2013, 533)),
         ("[2013] HKCFI 100", ("hkcfi", 2013, 100)),
         ("[2020] HKDC 42", ("hkdc", 2020, 42)),
-        ("[1995] UKPC 12", ("ukpc", 1995, 12)),
+        # UKPC removed 2026-07-08 with cli.ALL_COURTS — parser no longer
+        # recognizes it. A stray "[1995] UKPC 12" in body text stays
+        # plaintext, not a hyperlink.
         # Case-insensitive court + inner whitespace tolerance
         ("[2020] hkcfa 1", ("hkcfa", 2020, 1)),
         ("[2020]   HKCFA   1", ("hkcfa", 2020, 1)),
@@ -58,17 +60,26 @@ def test_parse_neutral_citation_returns_none_on_non_match(text: str) -> None:
     assert parse_neutral_citation(text) is None
 
 
-def test_neutral_citation_regex_covers_all_13_court_slugs() -> None:
-    """The regex must recognize the same 13 slugs as _COURT_RANK in
-    viewer/graph.py — otherwise a UKPC or hkoat citation lands as
-    unresolved.
+def test_neutral_citation_regex_covers_all_12_court_slugs() -> None:
+    """The regex must recognize the same 12 slugs as _COURT_RANK in
+    viewer/graph.py — otherwise an hkoat citation lands as unresolved.
+    UKPC removed 2026-07-08; a stray "[1995] UKPC 12" now stays as
+    plaintext (see cli.ALL_COURTS comment).
     """
     for court in [
         "HKCFA", "HKCA", "HKCFI", "HKDC", "HKMAGC", "HKFC",
-        "HKLDT", "HKLAT", "HKCT", "HKSCT", "HKCRC", "HKOAT", "UKPC",
+        "HKLDT", "HKLAT", "HKCT", "HKSCT", "HKCRC", "HKOAT",
     ]:
         text = f"[2020] {court} 1"
         assert NEUTRAL_CITATION_RE.search(text) is not None, court
+
+
+def test_neutral_citation_regex_does_not_match_ukpc_after_removal() -> None:
+    """UKPC was dropped from the parser in the 2026-07-08 cleanup.
+    A body containing "[1995] UKPC 12" must NOT get linkified — the
+    parser returns None and linkify_citations leaves the text alone.
+    """
+    assert NEUTRAL_CITATION_RE.search("[1995] UKPC 12") is None
 
 
 # ---------------------------------------------------------------------------

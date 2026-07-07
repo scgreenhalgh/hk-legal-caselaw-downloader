@@ -73,9 +73,10 @@ def test_home_shows_court_tiles_for_all_canonical_courts(client: TestClient) -> 
     soup = BeautifulSoup(resp.text, "html.parser")
     tiles = soup.select("[data-testid=court-tile]")
     slugs = {t.get("data-court") for t in tiles}
-    # All 13 canonical courts surface — matches graph.py's court-rank list.
+    # All 12 canonical courts surface — matches graph.py's court-rank list.
+    # UKPC removed 2026-07-08 — see cli.ALL_COURTS comment.
     expected = {
-        "hkcfa", "hkca", "ukpc", "hkcfi", "hkdc",
+        "hkcfa", "hkca", "hkcfi", "hkdc",
         "hkmagc", "hkfc", "hkldt", "hklat",
         "hkct", "hksct", "hkcrc", "hkoat",
     }
@@ -186,10 +187,10 @@ def test_home_empty_corpus_shows_empty_state_not_broken_page(
     resp = client.get("/")
     assert resp.status_code == 200
     soup = BeautifulSoup(resp.text, "html.parser")
-    # All 13 tiles still render — court-doesn't-exist vs no-cases-yet
+    # All 12 tiles still render — court-doesn't-exist vs no-cases-yet
     # must remain distinct (courts always exist, cases might not).
     tiles = soup.select("[data-testid=court-tile]")
-    assert len(tiles) == 13
+    assert len(tiles) == 12
     # No recent-case rows; an explicit empty-state marker replaces them.
     assert soup.select("[data-testid=recent-case]") == []
     assert soup.select_one(".empty") is not None
