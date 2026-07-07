@@ -25,8 +25,11 @@ import sqlite3
 from hklii_downloader.viewer.schema import create_schema
 from hklii_downloader.viewer.search import (
     BodySource,
+    BuildIndexResult,
     IndexResult,
+    atomic_swap,
     body_sha256,
+    build_index,
     discover_body_sources,
     extract_plaintext,
     index_case,
@@ -440,6 +443,138 @@ def test_index_case_returns_unchanged_when_sha_matches(tmp_path: Path) -> None:
     assert stamp[0] == "2026-01-01T00:00:00Z"  # first-call stamp preserved
     cp.close()
     vw.close()
+
+
+# ---------------------------------------------------------------------------
+# build_index — iterate cp.cases and index each
+# ---------------------------------------------------------------------------
+
+
+def test_build_index_empty_cases_returns_all_zeros(tmp_path: Path) -> None:
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    result = build_index(vw, cp, tmp_path, now_iso=_FIXED_NOW)
+    assert result == BuildIndexResult(
+        processed=0, indexed=0, unchanged=0, no_body=0
+    )
+    cp.close()
+    vw.close()
+
+
+def test_build_index_indexes_all_cases_with_bodies(tmp_path: Path) -> None:
+    """3 cases: EN-only, bilingual, and one with no body on disk."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/1", lang="en")
+    _seed_case(cp, "hkcfa/2020/2", lang="en")
+    _seed_case(cp, "hkcfa/2020/3", lang="en")  # will have no body
+
+    p1 = _mk_paths(tmp_path, "hkcfa/2020/1")
+    _touch(p1["html"], "<p>english body</p>")
+
+    p2 = _mk_paths(tmp_path, "hkcfa/2020/2")
+    _touch(p2["html"], "<p>english bilingual body</p>")
+    _touch(p2["tc.html"], "<p>中文譯本文字</p>")
+
+    result = build_index(vw, cp, tmp_path, now_iso=_FIXED_NOW)
+    assert result.processed == 3
+    assert result.indexed == 2
+    assert result.unchanged == 0
+    assert result.no_body == 1
+
+    # Bilingual case yields 2 fts_cases rows; EN-only yields 1; total = 3
+    fts_count = vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone()
+    assert fts_count == (3,)
+    cp.close()
+    vw.close()
+
+
+def test_build_index_second_run_reports_unchanged(tmp_path: Path) -> None:
+    """Same corpus, second call → sha matches → unchanged."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/1", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/1")
+    _touch(paths["html"], "<p>stable body</p>")
+
+    r1 = build_index(vw, cp, tmp_path, now_iso="2026-01-01T00:00:00Z")
+    assert r1.indexed == 1 and r1.unchanged == 0
+
+    r2 = build_index(vw, cp, tmp_path, now_iso="2026-02-01T00:00:00Z")
+    assert r2.indexed == 0 and r2.unchanged == 1
+    cp.close()
+    vw.close()
+
+
+def test_build_index_courts_filter_restricts_processing(
+    tmp_path: Path,
+) -> None:
+    """courts=['hkcfa'] processes ONLY CFA cases (idx_court hits)."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/1")
+    _seed_case(cp, "hkca/2020/1")
+    _seed_case(cp, "hkcfi/2020/1")
+
+    p_cfa = _mk_paths(tmp_path, "hkcfa/2020/1")
+    _touch(p_cfa["html"], "<p>cfa body</p>")
+    p_ca = _mk_paths(tmp_path, "hkca/2020/1")
+    _touch(p_ca["html"], "<p>ca body</p>")
+
+    result = build_index(
+        vw, cp, tmp_path, courts=["hkcfa"], now_iso=_FIXED_NOW
+    )
+    assert result.processed == 1
+    assert result.indexed == 1
+
+    courts_indexed = {
+        r[0] for r in vw.execute("SELECT court FROM fts_cases")
+    }
+    assert courts_indexed == {"hkcfa"}
+    cp.close()
+    vw.close()
+
+
+# ---------------------------------------------------------------------------
+# atomic_swap — os.replace wrapper for viewer.db.new → viewer.db
+# ---------------------------------------------------------------------------
+
+
+def test_atomic_swap_replaces_existing_dst(tmp_path: Path) -> None:
+    """atomic_swap(src, dst) → dst has src's content, src is gone."""
+    src = tmp_path / "viewer.db.new"
+    dst = tmp_path / "viewer.db"
+    src.write_bytes(b"new")
+    dst.write_bytes(b"old")
+    atomic_swap(src, dst)
+    assert dst.read_bytes() == b"new"
+    assert not src.exists()
+
+
+def test_atomic_swap_creates_dst_when_absent(tmp_path: Path) -> None:
+    """atomic_swap(src, dst) → dst created if it didn't exist."""
+    src = tmp_path / "viewer.db.new"
+    dst = tmp_path / "viewer.db"
+    src.write_bytes(b"new")
+    atomic_swap(src, dst)
+    assert dst.read_bytes() == b"new"
+    assert not src.exists()
+
+
+def test_atomic_swap_missing_src_raises(tmp_path: Path) -> None:
+    """L1 loud-failure: nonexistent src is a real error, not silent no-op."""
+    src = tmp_path / "does-not-exist"
+    dst = tmp_path / "viewer.db"
+    with pytest.raises(FileNotFoundError):
+        atomic_swap(src, dst)
+
+
+def test_atomic_swap_accepts_str_and_pathlib(tmp_path: Path) -> None:
+    src = tmp_path / "viewer.db.new"
+    dst = tmp_path / "viewer.db"
+    src.write_bytes(b"data")
+    atomic_swap(str(src), str(dst))
+    assert dst.read_bytes() == b"data"
 
 
 def test_index_case_replaces_row_when_body_changes(tmp_path: Path) -> None:
