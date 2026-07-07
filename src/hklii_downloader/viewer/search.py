@@ -201,22 +201,24 @@ def index_case(
 
     sources = discover_body_sources(output_root, case_key, case_row["lang"])
 
-    # Prune rows whose lang is NOT represented on disk any more (bilingual
-    # half deleted, or all bodies removed). Runs BEFORE upserts so the
-    # existing-sha check below can't mistakenly report 'unchanged' for a
-    # case whose stale companion row we're about to delete.
+    if not sources:
+        # META-LENS guard: sources=[] AND case_row exists could mean
+        # 'every body genuinely deleted' OR 'wrong output_root — we're
+        # pointing at a directory with nothing indexable'. We CANNOT
+        # distinguish the two from here, so default to safety: no prune.
+        # Cost of missing a legit all-bodies-deleted case: a stale row
+        # that survives until the next --rebuild; recoverable.
+        # Cost of pruning here: mass FTS destruction on a typo'd -o;
+        # not recoverable without a full re-index run. Choose caution.
+        return IndexResult(case_key=case_key, action="no_body_on_disk")
+
+    # sources non-empty — we have physical evidence the root is legit,
+    # so it's safe to prune (case_key, lang) rows whose lang isn't on
+    # disk. Runs BEFORE the upsert loop so the existing-sha check can't
+    # mistakenly report 'unchanged' for a case whose stale companion row
+    # we're about to delete.
     current_langs = {s.lang for s in sources}
     pruned = _prune_case_key_except(vw_conn, case_key, current_langs)
-
-    if not sources:
-        vw_conn.commit()
-        if pruned:
-            return IndexResult(
-                case_key=case_key,
-                action="indexed",
-                langs_pruned=tuple(pruned),
-            )
-        return IndexResult(case_key=case_key, action="no_body_on_disk")
 
     indexed: list[str] = []
     unchanged: list[str] = []
