@@ -196,6 +196,39 @@ def test_cited_by_dedupes_bilingual_citer_lang(tmp_path: Path) -> None:
         conn.close()
 
 
+def test_cited_by_and_authorities_cited_use_symmetric_min_position(
+    tmp_path: Path,
+) -> None:
+    """L3 promise/impl drift: authorities_cited's docstring says "symmetric
+    to :func:`cited_by`" but cited_by aggregated MAX(position) while
+    authorities_cited aggregated MIN(position) for the same (from, to,
+    en/tc) bilingual pair. The same edge reported opposite ends of HKLII's
+    noteup ordinal from either side.
+
+    Fix pins MIN on both — position=1 means 'top of the noteup list',
+    so MIN represents the more meaningful signal 'closest to the top'.
+    """
+    db = tmp_path / "checkpoint.db"
+    # Same bilingual citation edge, en at position=1, tc at position=5
+    _seed_citations(
+        db,
+        [
+            ("hkcfi/2023/155", "hkcfa/2019/50", "en", 8, 1, "2023-01-01T00:00:00"),
+            ("hkcfi/2023/155", "hkcfa/2019/50", "tc", 8, 5, "2023-01-01T00:00:00"),
+        ],
+    )
+    conn = open_readonly(db)
+    try:
+        cb_rows = cited_by(conn, "hkcfa/2019/50")
+        ac_rows = authorities_cited(conn, "hkcfi/2023/155")
+        # Both must agree — bilingual aggregation collapses to MIN
+        assert cb_rows[0]["position"] == 1
+        assert ac_rows[0]["position"] == 1
+        assert cb_rows[0]["position"] == ac_rows[0]["position"]
+    finally:
+        conn.close()
+
+
 def test_cited_by_ranks_ukpc_as_near_apex_not_unknown(tmp_path: Path) -> None:
     """Design promise (§7 line 203): all 13 court slugs are ranked.
 
