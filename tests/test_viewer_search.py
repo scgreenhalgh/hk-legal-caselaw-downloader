@@ -601,6 +601,101 @@ def test_atomic_swap_accepts_str_and_pathlib(tmp_path: Path) -> None:
     assert dst.read_bytes() == b"data"
 
 
+def test_index_case_prunes_bilingual_half_when_file_disappears(
+    tmp_path: Path,
+) -> None:
+    """Regression: bilingual case had both .html + .tc.html on the first
+    run. TC file is later removed (upstream retracted, scraper cleanup,
+    manual delete). Second index_case must delete the stale TC row from
+    fts_cases + case_bodies, and the AFTER DELETE trigger must clean up
+    fts_body. FTS MATCH against the old TC body must return 0.
+    """
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<p>english body</p>")
+    _touch(paths["tc.html"], "<p>中文譯本 uniquechinese</p>")
+
+    # First run — both langs indexed
+    r1 = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert r1.action == "indexed"
+    assert vw.execute(
+        "SELECT COUNT(*) FROM fts_cases WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone() == (2,)
+
+    # TC file deleted upstream
+    paths["tc.html"].unlink()
+
+    # Second run — stale TC row must be pruned
+    r2 = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert r2.action == "indexed"
+    assert r2.langs_pruned == ("tc",)
+
+    remaining = {
+        r[0]
+        for r in vw.execute(
+            "SELECT lang FROM fts_cases WHERE case_key = ?",
+            ["hkcfa/2020/32"],
+        )
+    }
+    assert remaining == {"en"}
+
+    bodies = vw.execute(
+        "SELECT COUNT(*) FROM case_bodies WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()
+    assert bodies == (1,)
+
+    # FTS MATCH for the pruned TC body returns 0 (trigger cleanup)
+    hits = vw.execute(
+        "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH ?",
+        ["uniquechinese"],
+    ).fetchone()
+    assert hits == (0,)
+    cp.close()
+    vw.close()
+
+
+def test_index_case_prunes_all_rows_when_case_row_disappears_from_cp(
+    tmp_path: Path,
+) -> None:
+    """Case was in cp.cases + indexed. Case is later removed from cp.cases
+    (scraper marks it dropped, or a --clean pass wipes it). Next
+    index_case must return 'indexed' with langs_pruned covering what
+    was in viewer.db — not 'no_case_row' with no cleanup, which would
+    leave orphan FTS rows that keep matching search queries.
+    """
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<p>orphaned body uniqueorphan</p>")
+
+    # First run — indexed
+    index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone() == (1,)
+
+    # Remove the case from cp.cases
+    cp.execute("DELETE FROM cases WHERE court='hkcfa' AND year=2020 AND number=32")
+    cp.commit()
+
+    # Second run — must prune
+    r = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert r.action == "indexed"
+    assert r.langs_pruned == ("en",)
+
+    assert vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone() == (0,)
+    assert vw.execute("SELECT COUNT(*) FROM case_bodies").fetchone() == (0,)
+    assert vw.execute(
+        "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH ?",
+        ["uniqueorphan"],
+    ).fetchone() == (0,)
+    cp.close()
+    vw.close()
+
+
 def test_index_case_replaces_row_when_body_changes(tmp_path: Path) -> None:
     """Same case_key, changed content → sha differs → row replaced. FTS
     reflects the NEW body; old body no longer matches.
