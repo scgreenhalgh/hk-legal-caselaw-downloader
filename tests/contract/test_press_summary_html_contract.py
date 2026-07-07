@@ -53,20 +53,20 @@ import pytest
 def read_press_summary(stem_dir: Path, stem: str, lang: str) -> str | None:
     """Read a press-summary HTML sidecar off disk.
 
-    Contract asserted by the tests below. The implementation lives in the
-    follow-up ``feat:`` commit — this stub returns a poison sentinel so
-    every test in this file fails when TDD-driven.
-
     Returns:
         The file's text content, or ``None`` if the file is missing OR
         is 0 bytes on disk. A 0-byte file is a legitimate "no summary"
         signal — an early enrichment run may have touched the path without
         populating it. Callers who need to distinguish "not tried" from
         "tried and empty" can still check ``Path.exists()`` themselves.
+
+    Never falls back to sibling names — the caller must supply a lang.
     """
-    raise NotImplementedError(
-        "read_press_summary is unimplemented — the feat: commit adds it",
-    )
+    path = stem_dir / f"{stem}.summary_{lang}.html"
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8")
+    return text if text else None
 
 
 # ---------------------------------------------------------------------------
