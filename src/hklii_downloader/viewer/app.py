@@ -1,9 +1,9 @@
-"""FastAPI app factory for the viewer — stub.
+"""FastAPI app factory for the viewer.
 
-Routes land under ``viewer/routes/`` (Phase 4). The factory pattern
-(pass DB paths at boot) keeps the app instance test-friendly: a
-TestClient constructs a fresh app per fixture instead of relying on
-process-level state.
+The factory (pass DB paths at boot) keeps the app instance test-friendly:
+a TestClient constructs a fresh app per fixture instead of relying on
+process-level state. Each route module exposes an ``APIRouter`` that
+:func:`create_app` mounts.
 """
 
 from __future__ import annotations
@@ -11,6 +11,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.templating import Jinja2Templates
+
+from hklii_downloader.viewer.routes.home import router as home_router
+
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 def create_app(
@@ -24,13 +30,12 @@ def create_app(
     ``checkpoint_db`` is read-only over the downloader's source of truth.
     ``viewer_db`` holds the viewer-owned FTS index + hub cache.
     ``output_root`` is the on-disk corpus root for body-render + appeal_chain.
-
-    Routes are added in subsequent Phase 4 commits; this stub returns an
-    empty app so that test collection can proceed and route tests fail at
-    assertions (per CLAUDE.md's 'failing test means an assertion executed').
     """
     app = FastAPI()
     app.state.checkpoint_db = checkpoint_db
     app.state.viewer_db = viewer_db
     app.state.output_root = output_root
+    app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+    app.include_router(home_router)
     return app

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}HKLII viewer — home{% endblock %}
+{% block content %}
+<section aria-labelledby="courts-heading" class="court-tiles-section">
+  <h2 id="courts-heading">Courts</h2>
+  <ul class="court-tiles">
+    {% for tile in court_tiles %}
+    <li class="court-tile"
+        data-testid="court-tile"
+        data-court="{{ tile.slug }}"
+        data-count="{{ tile.count }}">
+      <a href="/court/{{ tile.slug }}">
+        <span class="court-slug">{{ tile.slug | upper }}</span>
+        <span class="court-count">{{ tile.count }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section aria-labelledby="recent-heading" class="recent-section">
+  <h2 id="recent-heading">Recent judgments</h2>
+  {% if recent_cases %}
+  <ol class="recent-cases">
+    {% for c in recent_cases %}
+    <li class="recent-case"
+        data-testid="recent-case"
+        data-case-key="{{ c.court }}/{{ c.year }}/{{ c.number }}"
+        data-date="{{ c.date }}">
+      <a href="/case/{{ c.court }}/{{ c.year }}/{{ c.number }}">
+        <span class="neutral">{{ c.neutral }}</span>
+        <span class="title">{{ c.title }}</span>
+        <time datetime="{{ c.date }}">{{ c.date }}</time>
+      </a>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty">No judgments in the corpus yet.</p>
+  {% endif %}
+</section>
+{% endblock %}
