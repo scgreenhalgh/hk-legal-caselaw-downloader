@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from hklii_downloader.viewer.courts import court_name, curial_roman, thousands
 from hklii_downloader.viewer.routes.case_detail import router as case_detail_router
 from hklii_downloader.viewer.routes.citations import router as citations_router
 from hklii_downloader.viewer.routes.court import router as court_router
@@ -43,7 +44,14 @@ def create_app(
     app.state.checkpoint_db = checkpoint_db
     app.state.viewer_db = viewer_db
     app.state.output_root = output_root
-    app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # Jinja filters — the signature Roman-numeral curial rank + the
+    # court-name expansion. Registered here (not per-route) so every
+    # template can reach them without threading through context.
+    templates.env.filters["curial_roman"] = curial_roman
+    templates.env.filters["court_name"] = court_name
+    templates.env.filters["thousands"] = thousands
+    app.state.templates = templates
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 

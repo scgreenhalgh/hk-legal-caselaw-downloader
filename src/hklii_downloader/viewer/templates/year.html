@@ -1,7 +1,12 @@
 {% extends "base.html" %}
-{% block title %}{{ court_slug | upper }} {{ year }} — HKLII viewer{% endblock %}
+{% block title %}{{ court_slug | court_name }} · {{ year }} — HKLII viewer{% endblock %}
 {% block content %}
-<h2 class="court-year-heading">{{ court_slug | upper }} {{ year }}</h2>
+
+<header class="court-page-heading">
+  <span class="rank">{{ court_slug | curial_roman }}</span>
+  <h2>{{ court_slug | court_name }}</h2>
+  <span class="abbr">{{ court_slug }} · {{ year }}</span>
+</header>
 
 {% if cases %}
 <table class="case-table">
@@ -38,17 +43,18 @@
      aria-label="Pagination">
   {% if page > 1 %}
   <a class="pager-prev"
-     href="/court/{{ court_slug }}/{{ year }}?page={{ page - 1 }}">Previous</a>
-  {% endif %}
+     href="/court/{{ court_slug }}/{{ year }}?page={{ page - 1 }}">← Previous</a>
+  {% else %}<span></span>{% endif %}
   <span class="page-info">Page {{ page }} of {{ total_pages }}</span>
   {% if page < total_pages %}
   <a class="pager-next"
-     href="/court/{{ court_slug }}/{{ year }}?page={{ page + 1 }}">Next</a>
-  {% endif %}
+     href="/court/{{ court_slug }}/{{ year }}?page={{ page + 1 }}">Next →</a>
+  {% else %}<span></span>{% endif %}
 </nav>
 {% else %}
 <p class="empty" data-testid="empty-year">
-  0 cases in {{ court_slug | upper }} {{ year }}.
+  Nothing recorded in {{ court_slug | court_name }} for {{ year }}.
 </p>
 {% endif %}
+
 {% endblock %}

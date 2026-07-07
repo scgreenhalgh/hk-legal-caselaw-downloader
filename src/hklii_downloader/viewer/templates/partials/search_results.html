@@ -1,6 +1,6 @@
 {% if rows %}
 <p class="result-count" data-testid="result-count">
-  {{ total }} result{{ '' if total == 1 else 's' }}.
+  {{ total | thousands }} judgment{{ '' if total == 1 else 's' }} matching &ldquo;{{ query }}&rdquo;
 </p>
 <ol class="search-results" data-testid="search-results">
   {% for r in rows %}
@@ -12,12 +12,14 @@
       <span class="title">{{ r.title }}</span>
       <time datetime="{{ r.date }}">{{ r.date }}</time>
     </a>
-    {# snippet is plaintext body wrapped in <mark> by FTS5's snippet() —
-       plaintext body prevents XSS, only marker markup lands. #}
+    {# snippet is plaintext body wrapped in <mark> by FTS5's snippet();
+       plaintext body means only <mark> markup lands, so | safe is XSS-clean. #}
     <p class="snippet" data-testid="snippet">{{ r.snippet | safe }}</p>
   </li>
   {% endfor %}
 </ol>
 {% elif query %}
-<p class="empty" data-testid="empty-search">No results for &ldquo;{{ query }}&rdquo;.</p>
+<p class="empty" data-testid="empty-search">
+  Nothing matches &ldquo;{{ query }}&rdquo;. Try different wording, or fewer words.
+</p>
 {% endif %}

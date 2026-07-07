@@ -6,10 +6,11 @@
       data-from-key="{{ r.from_key }}"
       data-from-court="{{ r.from_court }}"
       data-first-seen="{{ r.first_seen }}">
+    <span class="rank">{{ r.from_court | curial_roman }}</span>
     <a href="/case/{{ r.from_key }}" class="citation-anchor">{{ r.from_key }}</a>
+    <time datetime="{{ r.first_seen }}">{{ r.first_seen[:10] }}</time>
     <span class="court-badge court-badge--{{ r.from_court }}">{{ r.from_court | upper }}</span>
     <span class="langs">{{ r.langs }}</span>
-    <time datetime="{{ r.first_seen }}">{{ r.first_seen }}</time>
   </li>
   {% endfor %}
 </ol>
@@ -23,5 +24,5 @@
         hx-trigger="click">Load next 50</button>
 {% endif %}
 {% else %}
-<p class="empty" data-testid="empty-cited-by">No incoming citations.</p>
+<p class="empty" data-testid="empty-cited-by">Nothing cites this yet.</p>
 {% endif %}

@@ -1,280 +1,854 @@
 /*
- * Viewer-specific styles layered on top of Pico.css v2 (classless).
+ * HKLII viewer — visual identity.
  *
- * Design principle: use Pico's semantic defaults + CSS custom properties
- * (--pico-*) so light/dark mode work automatically via prefers-color-scheme.
- * Only add rules for grid layouts + small primitives (badges, marks) that
- * Pico's classless build doesn't cover.
+ * Token system: paper (cool law-report paper) + ink + scarlet accent
+ * (judicial-robe scarlet, restrained). Type: Fraunces display, Source
+ * Serif 4 body, IBM Plex Sans + Mono chrome. Signature: Roman-numeral
+ * curial-rank rail on court-typed rows — encodes graph._COURT_RANK_WHEN_ELSE.
+ *
+ * Layered over pico.classless.min.css so Pico's form controls, tables,
+ * and dark-mode variables still work — we override --pico-* to point at
+ * our tokens.
  */
 
-/* --- Custom-list marker reset ------------------------------------------
- * Pico classless keeps ::marker even when we set list-style: none on the
- * parent. Explicitly blank the marker on our layout-controlled lists.
- */
-.court-tiles,
-.year-buckets,
-.recent-cases,
-.search-results,
-.citation-list,
-.parallel-list,
-.hub-cases {
-  list-style: none;
-  padding: 0;
-  margin: 0;
+/* ---------------------------------------------------------------------
+ * @font-face — vendored Latin subsets under /static/fonts/.
+ * font-display: swap so Pico fallbacks show while the woff2 loads.
+ * ------------------------------------------------------------------- */
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("/static/fonts/fraunces-latin-wght-normal.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
 }
-.court-tiles > li::marker,
-.year-buckets > li::marker,
-.recent-cases > li::marker,
-.search-results > li::marker,
-.citation-list > li::marker,
-.parallel-list > li::marker,
-.hub-cases > li::marker {
-  content: "";
+@font-face {
+  font-family: "Source Serif 4";
+  src: url("/static/fonts/source-serif-4-latin-wght-normal.woff2") format("woff2-variations");
+  font-weight: 200 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/ibm-plex-sans-latin-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/ibm-plex-sans-latin-500.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("/static/fonts/ibm-plex-sans-latin-600.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("/static/fonts/ibm-plex-mono-latin-400.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
 }
 
-/* --- Header + nav ------------------------------------------------------- */
+/* ---------------------------------------------------------------------
+ * Design tokens.
+ * Palette: cool law-report paper + warm near-black ink + judicial
+ * scarlet (matched from CFA robes). Chamois FTS marker.
+ * ------------------------------------------------------------------- */
+
+:root {
+  --paper: #F5F5F0;
+  --ink: #0E0E10;
+  --ink-muted: #6E6A63;
+  --rule: #C7C1B5;
+  --scarlet: #8B1F2F;
+  --mark: #F5D06A;
+
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-body: "Source Serif 4", Charter, Georgia, serif;
+  --font-chrome: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SF Mono", Menlo, monospace;
+
+  --measure: 42rem;
+  --measure-wide: 60rem;
+
+  /* Override Pico so its own selectors (form controls, tables) inherit
+     our palette without needing per-selector rewrites. */
+  --pico-background-color: var(--paper);
+  --pico-color: var(--ink);
+  --pico-muted-color: var(--ink-muted);
+  --pico-muted-border-color: var(--rule);
+  --pico-primary: var(--scarlet);
+  --pico-primary-background: var(--scarlet);
+  --pico-primary-border: var(--scarlet);
+  --pico-primary-inverse: var(--paper);
+  --pico-primary-hover: var(--ink);
+  --pico-primary-hover-background: var(--ink);
+  --pico-primary-hover-border: var(--ink);
+  --pico-secondary-background: transparent;
+  --pico-form-element-background-color: var(--paper);
+  --pico-form-element-border-color: var(--rule);
+  --pico-form-element-color: var(--ink);
+  --pico-form-element-focus-color: var(--scarlet);
+  --pico-mark-background-color: var(--mark);
+  --pico-mark-color: var(--ink);
+  --pico-font-family-sans-serif: var(--font-chrome);
+  --pico-font-family-serif: var(--font-body);
+  --pico-font-family-monospace: var(--font-mono);
+  --pico-border-radius: 2px;
+  --pico-line-height: 1.55;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --paper: #141412;
+    --ink: #F0EEE8;
+    --ink-muted: #8E8A82;
+    --rule: #2A2926;
+    --scarlet: #C24A5A;
+    --mark: #B89A48;
+  }
+}
+
+/* ---------------------------------------------------------------------
+ * Base type — chrome sans by default; prose gets serif via .prose or
+ * .case-body article selectors below.
+ * ------------------------------------------------------------------- */
+
+html {
+  background: var(--paper);
+}
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-chrome);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+main {
+  max-width: var(--measure);
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+  padding-block-end: 4rem;
+}
+
+a { color: var(--ink); }
+a:hover { color: var(--scarlet); }
+
+/* Fraunces variable — set opsz + slight optical weight via variation. */
+.font-display,
+.hero-title,
+.section-heading {
+  font-family: var(--font-display);
+  font-variation-settings: "opsz" 96, "SOFT" 25;
+}
+
+/* ---------------------------------------------------------------------
+ * Header — chrome-only, minimal presence.
+ * ------------------------------------------------------------------- */
+
 .viewer-header {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 1rem;
-  border-bottom: 1px solid var(--pico-muted-border-color);
-  padding-block: 0.5rem;
-  margin-block-end: 1.5rem;
-}
-.viewer-header h1 {
-  font-size: 1.25rem;
-  margin: 0;
+  padding: 1.25rem 0 0.9rem;
+  border-bottom: 1px solid var(--rule);
+  margin-block-end: 2.5rem;
+  font-family: var(--font-chrome);
 }
 .viewer-header .brand {
-  text-decoration: none;
   color: inherit;
+  text-decoration: none;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+}
+.viewer-header .brand h1 {
+  font: inherit;
+  margin: 0;
+}
+.viewer-header nav a {
+  color: var(--ink-muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+  letter-spacing: 0.03em;
+}
+.viewer-header nav a:hover { color: var(--scarlet); }
+
+/* ---------------------------------------------------------------------
+ * Section labels — small caps chrome sans, hairline rule above.
+ * ------------------------------------------------------------------- */
+
+.section {
+  padding-block: 2.5rem 1rem;
+  border-top: 1px solid var(--rule);
+  margin-block-start: 2.5rem;
+}
+.section-label {
+  font-family: var(--font-chrome);
+  font-weight: 500;
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 0 0 1.25rem;
 }
 
-/* --- Court tile grid (home) -------------------------------------------- */
-.court-tiles {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 0.5rem;
+/* ---------------------------------------------------------------------
+ * Home — hero + court rail + recent rail.
+ * ------------------------------------------------------------------- */
+
+.hero {
+  padding-block: 1.5rem 3rem;
+}
+.hero-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(2.4rem, 5.5vw, 3.6rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  margin: 0;
+  font-variation-settings: "opsz" 108, "SOFT" 25;
+}
+.hero-tally {
+  color: var(--ink-muted);
+  font-family: var(--font-chrome);
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+  margin-block-start: 1.25rem;
+}
+
+/* Court rail. Roman rank on left, name + abbrev + count in the middle. */
+.court-rail {
   list-style: none;
   padding: 0;
   margin: 0;
 }
-.court-tile {
-  margin: 0;
-}
-.court-tile a {
-  display: flex;
-  justify-content: space-between;
+.court-rail > li::marker { content: ""; }
+.court-rail .rail-row a {
+  display: grid;
+  grid-template-columns: 2rem 1fr auto 4rem;
+  gap: 1rem;
   align-items: baseline;
-  padding: 0.75rem;
-  border: 1px solid var(--pico-muted-border-color);
-  border-radius: var(--pico-border-radius);
+  padding-block: 0.65rem;
+  border-bottom: 1px solid var(--rule);
   text-decoration: none;
   color: inherit;
 }
-.court-tile a:hover {
-  background: var(--pico-secondary-background);
+.court-rail .rail-row:first-child a { border-top: 1px solid var(--rule); }
+.court-rail .rail-row a:hover .name { color: var(--scarlet); }
+.court-rail .rank {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--ink-muted);
+  font-feature-settings: "tnum" 1;
 }
-.court-slug { font-weight: 600; letter-spacing: 0.02em; }
-.court-count { color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
+.court-rail .name {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  color: var(--ink);
+}
+.court-rail .abbr {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+}
+.court-rail .count {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink);
+  text-align: right;
+  font-feature-settings: "tnum" 1;
+}
+.court-rail .rail-row[data-count="0"] .name,
+.court-rail .rail-row[data-count="0"] .count { color: var(--ink-muted); }
 
-/* --- Recent-cases list (home) ------------------------------------------ */
-.recent-cases {
-  list-style: none;
-  padding: 0;
-}
-.recent-cases li {
-  border-bottom: 1px solid var(--pico-muted-border-color);
-  padding-block: 0.5rem;
-}
-.recent-cases a {
-  display: grid;
-  grid-template-columns: minmax(120px, 8em) 1fr auto;
-  gap: 0.75rem;
-  align-items: baseline;
-  text-decoration: none;
-  color: inherit;
-}
-.recent-cases .neutral { font-family: var(--pico-font-family-monospace); font-size: 0.9em; }
-.recent-cases time { color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
-
-/* --- Year buckets (court landing) -------------------------------------- */
-.year-buckets {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 0.5rem;
+/* Recent rail — date left, cite + parties stacked right. */
+.recent-rail {
   list-style: none;
   padding: 0;
   margin: 0;
 }
-.year-bucket a {
-  display: flex;
-  justify-content: space-between;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid var(--pico-muted-border-color);
-  border-radius: var(--pico-border-radius);
+.recent-rail > li::marker { content: ""; }
+.recent-rail .recent-row a {
+  display: grid;
+  grid-template-columns: 6rem 1fr;
+  gap: 1.5rem;
+  padding-block: 0.85rem;
+  border-bottom: 1px solid var(--rule);
   text-decoration: none;
   color: inherit;
-  font-variant-numeric: tabular-nums;
+}
+.recent-rail .recent-row:first-child a { border-top: 1px solid var(--rule); }
+.recent-rail time {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+  padding-top: 0.25rem;
+  font-feature-settings: "tnum" 1;
+}
+.recent-rail .neutral {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--scarlet);
+  letter-spacing: 0.02em;
+  display: block;
+  margin-block-end: 0.15rem;
+}
+.recent-rail .title {
+  font-family: var(--font-body);
+  font-style: italic;
+  font-size: 1.05rem;
+  color: var(--ink);
+  display: block;
 }
 
-/* --- Hub-cases list (court landing) ------------------------------------ */
-.hub-case {
-  border-bottom: 1px solid var(--pico-muted-border-color);
+/* ---------------------------------------------------------------------
+ * Court landing (per-court page) — year rail + hub rail.
+ * ------------------------------------------------------------------- */
+
+.court-page-heading {
+  padding-block: 1rem 2rem;
 }
-.hub-case a {
+.court-page-heading .rank {
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  color: var(--ink-muted);
+  display: inline-block;
+  margin-inline-end: 0.65rem;
+}
+.court-page-heading h2 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(1.8rem, 4vw, 2.5rem);
+  line-height: 1.1;
+  margin: 0;
+  display: inline;
+  font-variation-settings: "opsz" 72, "SOFT" 25;
+}
+.court-page-heading .abbr {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-block-start: 0.6rem;
+}
+
+.year-rail {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.year-rail > li::marker { content: ""; }
+.year-rail .year-row a {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1rem;
+  padding-block: 0.65rem;
+  border-bottom: 1px solid var(--rule);
+  text-decoration: none;
+  color: inherit;
+}
+.year-rail .year-row:first-child a { border-top: 1px solid var(--rule); }
+.year-rail .year {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  font-feature-settings: "tnum" 1;
+}
+.year-rail .count {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink-muted);
+  font-feature-settings: "tnum" 1;
+}
+.year-rail .year-row a:hover .year { color: var(--scarlet); }
+
+/* Hub rail — same shape as citation rows, with inbound count. */
+.hub-rail {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.hub-rail > li::marker { content: ""; }
+.hub-rail .hub-row a {
   display: grid;
   grid-template-columns: 1fr auto;
   align-items: baseline;
-  gap: 0.75rem;
-  padding-block: 0.5rem;
+  gap: 1rem;
+  padding-block: 0.65rem;
+  border-bottom: 1px solid var(--rule);
   text-decoration: none;
   color: inherit;
 }
-.hub-case .case-key {
-  font-family: var(--pico-font-family-monospace);
-  font-size: 0.9em;
+.hub-rail .hub-row:first-child a { border-top: 1px solid var(--rule); }
+.hub-rail .case-key {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--scarlet);
+  letter-spacing: 0.02em;
 }
-.hub-case .inbound-count {
-  color: var(--pico-muted-color);
-  font-variant-numeric: tabular-nums;
-  font-size: 0.9em;
+.hub-rail .inbound-count {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+  font-feature-settings: "tnum" 1;
 }
-.hub-case .inbound-count::before { content: "↳ "; }
+.hub-rail .inbound-count::after {
+  content: " cited";
+  font-family: var(--font-chrome);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-inline-start: 0.35rem;
+}
 
-/* --- Court badges (citation panels) ------------------------------------ */
-.court-badge {
-  display: inline-block;
-  padding: 0.15em 0.6em;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  background: var(--pico-secondary-background);
-  color: var(--pico-secondary-inverse);
+.banner {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--scarlet);
+  color: var(--ink-muted);
+  font-family: var(--font-chrome);
+  font-size: 0.9rem;
+  background: transparent;
+}
+.banner code {
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  background: transparent;
+  color: var(--ink);
+  padding: 0;
 }
 
-/* --- Citation panels + tabs (case detail) ------------------------------ */
+/* ---------------------------------------------------------------------
+ * Year page — case list table. Not a Pico card; hairline rows only.
+ * ------------------------------------------------------------------- */
+
+main:has(.case-table) {
+  max-width: var(--measure-wide);
+}
+.case-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-block: 1.5rem;
+  font-family: var(--font-body);
+  background: transparent;
+}
+.case-table thead th {
+  font-family: var(--font-chrome);
+  font-weight: 500;
+  font-size: 0.7rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+}
+.case-table tbody td {
+  padding: 0.85rem 0.75rem;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  vertical-align: baseline;
+}
+.case-table tbody tr:hover td { background: rgba(139, 31, 47, 0.03); }
+.case-table .neutral a {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--scarlet);
+  text-decoration: none;
+  letter-spacing: 0.02em;
+}
+.case-table .neutral a:hover { color: var(--ink); text-decoration: underline; }
+.case-table .title {
+  font-style: italic;
+  color: var(--ink);
+}
+.case-table .date time {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+  font-feature-settings: "tnum" 1;
+}
+
+.pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding-block: 1.5rem;
+  font-family: var(--font-chrome);
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+}
+.pager a { color: var(--scarlet); text-decoration: none; }
+.pager a:hover { color: var(--ink); }
+.pager .page-info { font-feature-settings: "tnum" 1; }
+
+/* ---------------------------------------------------------------------
+ * Case detail — law-report front matter. Nuke Pico's article-as-card
+ * defaults so the judgment page reads as a document, not a card stack.
+ * ------------------------------------------------------------------- */
+
+.case-detail,
+.case-detail > header,
+.case-detail > footer,
+.case-body article {
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+}
+.case-detail {
+  padding-block: 1rem 3rem;
+}
+.case-body {
+  margin-block: 2rem;
+}
+.report-front {
+  border-bottom: 1px solid var(--rule);
+  padding-block-end: 2rem;
+  margin-block-end: 2.5rem;
+}
+.curial-badge {
+  font-family: var(--font-chrome);
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 0 0 1.5rem;
+}
+.curial-badge .rank {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--scarlet);
+  margin-inline-end: 0.55rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.report-front .cite-neutral {
+  font-family: var(--font-mono);
+  font-size: 0.95rem;
+  color: var(--scarlet);
+  letter-spacing: 0.02em;
+  margin: 0 0 1rem;
+}
+.report-front .parties-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-style: italic;
+  font-size: clamp(1.8rem, 4vw, 2.4rem);
+  line-height: 1.15;
+  color: var(--ink);
+  margin: 0 0 1.5rem;
+  font-variation-settings: "opsz" 72, "SOFT" 25;
+}
+.report-front .delivery {
+  font-family: var(--font-chrome);
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+  margin: 0;
+}
+.report-front .delivery time {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+}
+.report-front .delivery .middle-dot {
+  margin-inline: 0.5rem;
+  color: var(--rule);
+}
+
+/* Judgment body — Source Serif, comfortable reading measure. Full
+   width of ``main`` so the body aligns with the front matter above
+   and citation-sections below (front-matter/body/tabs share a
+   measure means the eye tracks a single column). */
+.case-body article {
+  font-family: var(--font-body);
+  font-size: 1.05rem;
+  line-height: 1.7;
+  color: var(--ink);
+}
+.case-body article p {
+  margin-block: 1em;
+}
+.case-body article h1,
+.case-body article h2,
+.case-body article h3 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-variation-settings: "opsz" 48;
+  margin-block: 2em 0.5em;
+}
+
+/* Citation section — three stacked panels beneath the body, chapter-style. */
+.citation-sections {
+  margin-block-start: 3rem;
+  border-top: 1px solid var(--rule);
+  padding-block-start: 2rem;
+}
 .citation-tabs {
   display: flex;
-  gap: 0.5rem;
-  margin-block: 1rem 0.5rem;
-  border-bottom: 1px solid var(--pico-muted-border-color);
+  gap: 2rem;
+  margin-block-end: 1.5rem;
+  padding: 0;
+  border: 0;
 }
 .citation-tab {
   background: transparent;
   border: 0;
-  border-bottom: 2px solid transparent;
-  padding: 0.5rem 0.75rem;
+  padding: 0;
   cursor: pointer;
-  color: inherit;
+  font-family: var(--font-chrome);
+  font-weight: 500;
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
 }
-.citation-tab:hover {
-  border-bottom-color: var(--pico-primary);
-}
+.citation-tab:hover { color: var(--scarlet); }
+.citation-tab.is-active { color: var(--ink); border-bottom: 1px solid var(--scarlet); padding-block-end: 0.25rem; }
+
+.citation-panel { margin-block: 1rem; }
+
+/* Citation rows (cited-by, authorities). */
 .citation-list {
   list-style: none;
   padding: 0;
-}
-.citation-row {
-  display: grid;
-  grid-template-columns: 1fr auto auto auto;
-  gap: 0.75rem;
-  align-items: baseline;
-  padding-block: 0.4rem;
-  border-bottom: 1px solid var(--pico-muted-border-color);
-}
-.citation-row .langs { color: var(--pico-muted-color); font-size: 0.85em; }
-.citation-row time { color: var(--pico-muted-color); font-variant-numeric: tabular-nums; }
-
-/* --- Case detail metadata + body --------------------------------------- */
-.case-metadata h2 { margin-block-end: 0.25rem; }
-.case-metadata .title { color: var(--pico-muted-color); margin-block-end: 1rem; }
-.case-metadata .meta-list {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 0.25rem 1rem;
   margin: 0;
 }
-.case-metadata dt {
-  color: var(--pico-muted-color);
-  font-size: 0.85em;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+.citation-list > li::marker { content: ""; }
+.citation-row {
+  display: grid;
+  grid-template-columns: 1.75rem 1fr auto;
+  gap: 1rem;
+  align-items: baseline;
+  padding-block: 0.55rem;
+  border-bottom: 1px solid var(--rule);
 }
-.case-metadata dd { margin: 0; }
-/* Legal-doc reading font on the actual judgment body. */
-.case-body article {
-  font-family: Charter, Georgia, "Times New Roman", Times, serif;
-  line-height: 1.6;
-  max-width: 68ch;
-  margin-block: 1.5rem;
+.citation-row .rank {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--ink-muted);
+}
+.citation-row .citation-anchor {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--scarlet);
+  text-decoration: none;
+  letter-spacing: 0.02em;
+}
+.citation-row .citation-anchor:hover { color: var(--ink); text-decoration: underline; }
+.citation-row time {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+  font-feature-settings: "tnum" 1;
+}
+.citation-row .langs { display: none; }  /* implicit unless bilingual — suppressed for now */
+.citation-row .court-badge { display: none; }  /* redundant with rank + case_key */
+
+.parallel-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.parallel-list > li::marker { content: ""; }
+.parallel-row {
+  padding-block: 0.45rem;
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--ink);
+  letter-spacing: 0.02em;
 }
 
-/* --- Search + snippet highlight --------------------------------------- */
-mark {
-  background: var(--pico-mark-background-color, #fef08a);
-  color: inherit;
-  padding: 0.05em 0.2em;
+.load-more {
+  display: block;
+  margin-block: 1.5rem 0;
+  padding: 0.6rem 1rem;
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  font-family: var(--font-chrome);
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.load-more:hover { border-color: var(--scarlet); color: var(--scarlet); }
+
+/* ---------------------------------------------------------------------
+ * Search — hero-adjacent input, results styled like recent rail.
+ * ------------------------------------------------------------------- */
+
+.search-section {
+  padding-block: 1rem 2rem;
+}
+.search-section h2 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(2rem, 4.5vw, 2.8rem);
+  line-height: 1.05;
+  letter-spacing: -0.015em;
+  margin: 0 0 1.5rem;
+  font-variation-settings: "opsz" 84, "SOFT" 25;
+}
+.search-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.75rem;
+  margin-block-end: 2rem;
+  align-items: stretch;
+}
+/* Chanel's one accessory off: the "Query" label above the input.
+   The hero above already says "Search judgments" and the input has a
+   placeholder — an eyebrow label is a third redundant signpost. */
+.search-form label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.search-form input[type="search"] {
+  font-family: var(--font-body);
+  font-size: 1rem;
+  padding: 0.75rem 0.85rem;
+  background: transparent;
+  border: 1px solid var(--rule);
+  color: var(--ink);
   border-radius: 2px;
+  margin: 0;
 }
+.search-form input[type="search"]:focus {
+  outline: none;
+  border-color: var(--scarlet);
+  box-shadow: 0 0 0 3px rgba(139, 31, 47, 0.08);
+}
+.search-form button {
+  font-family: var(--font-chrome);
+  font-weight: 500;
+  font-size: 0.85rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.75rem 1.5rem;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--ink);
+  border-radius: 2px;
+  cursor: pointer;
+  margin: 0;
+}
+.search-form button:hover { background: var(--scarlet); border-color: var(--scarlet); }
+
+.result-count {
+  font-family: var(--font-chrome);
+  font-size: 0.8rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin-block-end: 1rem;
+}
+
+.search-results {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.search-results > li::marker { content: ""; }
 .search-result {
-  padding-block: 0.75rem;
-  border-bottom: 1px solid var(--pico-muted-border-color);
+  padding-block: 1rem;
+  border-bottom: 1px solid var(--rule);
 }
+.search-result:first-child { border-top: 1px solid var(--rule); }
 .search-result .result-link {
   display: grid;
-  grid-template-columns: minmax(120px, 8em) 1fr auto;
-  gap: 0.75rem;
+  grid-template-columns: 6rem 1fr auto;
+  gap: 1.25rem;
   align-items: baseline;
   text-decoration: none;
   color: inherit;
+  margin-block-end: 0.5rem;
 }
 .search-result .result-link .neutral {
-  font-family: var(--pico-font-family-monospace);
-  font-size: 0.9em;
-  color: var(--pico-primary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--scarlet);
+  letter-spacing: 0.02em;
 }
-.search-result .result-link .title { color: inherit; }
+.search-result .result-link .title {
+  font-family: var(--font-body);
+  font-style: italic;
+  font-size: 1.05rem;
+  color: var(--ink);
+}
 .search-result .result-link time {
-  color: var(--pico-muted-color);
-  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--ink-muted);
+  font-feature-settings: "tnum" 1;
 }
 .search-result .snippet {
-  color: var(--pico-muted-color);
-  margin-block: 0.5rem 0;
-  font-size: 0.9em;
-  max-width: 72ch;
+  color: var(--ink-muted);
+  font-family: var(--font-body);
+  margin-block: 0;
+  font-size: 0.95rem;
+  max-width: var(--measure);
+  padding-inline-start: 7.25rem;
 }
 
-/* --- Pager (year page) ------------------------------------------------- */
-.pager {
-  display: flex;
-  gap: 1rem;
-  align-items: center;
-  justify-content: center;
-  margin-block: 1.5rem;
+/* FTS highlight — chamois marker over ink text. */
+mark {
+  background: var(--mark);
+  color: var(--ink);
+  padding: 0.05em 0.2em;
+  border-radius: 1px;
 }
-.pager .page-info { color: var(--pico-muted-color); }
 
-/* --- Empty state ------------------------------------------------------- */
+/* ---------------------------------------------------------------------
+ * Empty states — direction, not mood. Sentence case, active verbs.
+ * ------------------------------------------------------------------- */
+
 .empty {
-  color: var(--pico-muted-color);
-  padding: 1rem 0;
+  color: var(--ink-muted);
+  font-family: var(--font-body);
   font-style: italic;
+  font-size: 1rem;
+  padding-block: 1.5rem;
+  margin: 0;
 }
 
-/* --- Banner (setup signal) -------------------------------------------- */
-.banner {
-  padding: 0.75rem 1rem;
-  border-radius: var(--pico-border-radius);
-  border: 1px solid var(--pico-muted-border-color);
-  background: var(--pico-secondary-background);
-}
-.banner-warn { border-color: var(--pico-color-amber-500, #d97706); }
+/* ---------------------------------------------------------------------
+ * Focus — visible ring in scarlet, restrained.
+ * ------------------------------------------------------------------- */
 
-/* --- HTMX indicator (hx-indicator support) ---------------------------- */
-.htmx-indicator { display: none; }
-.htmx-request .htmx-indicator { display: inline-block; }
-.htmx-request.htmx-swapping { opacity: 0.6; transition: opacity 100ms; }
+:focus-visible {
+  outline: 2px solid var(--scarlet);
+  outline-offset: 3px;
+  border-radius: 1px;
+}
+
+/* Respect reduced motion — no transitions on hover feedback if set. */
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
