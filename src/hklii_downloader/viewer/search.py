@@ -168,19 +168,33 @@ def index_case(
     *,
     now_iso: str | None = None,
 ) -> IndexResult:
-    """Index one case into viewer.db.
+    """Index one case into viewer.db. Writes are one of insert/update/delete.
 
     Reads case metadata from ``cp_conn`` (checkpoint.db, expected columns:
     court/year/number/neutral/title/date/lang). Discovers on-disk bodies
-    via :func:`discover_body_sources`. For each source: extracts plaintext,
-    computes sha, compares to the stored sha in fts_cases; if unchanged,
-    skips; otherwise INSERT-OR-REPLACEs both fts_cases and case_bodies
-    (which triggers fts_body sync via the schema's AFTER-DELETE/INSERT
-    triggers).
+    via :func:`discover_body_sources`.
 
-    Returns an :class:`IndexResult` summarizing action taken.
+    Branches:
+      1. ``case_row`` missing (case removed from cp.cases) → prune every
+         (case_key, lang) row from viewer.db. Result carries langs_pruned;
+         action='indexed' if anything was pruned, else 'no_case_row'.
+      2. ``case_row`` present, ``sources`` empty → NO-OP. We cannot
+         distinguish 'all bodies deleted upstream' from 'output_root
+         is wrong' (see the meta-lens comment inline). Default to safety;
+         action='no_body_on_disk'.
+      3. ``case_row`` present, ``sources`` non-empty → prune any prior
+         (case_key, lang) whose lang isn't on disk any more, then per
+         source: extract plaintext, compute sha, compare to stored;
+         if unchanged skip, else UPSERT fts_cases + case_bodies (fts_body
+         sync happens via the schema's AFTER-INSERT / AFTER-UPDATE
+         triggers on case_bodies). Result carries langs_indexed,
+         langs_unchanged, and langs_pruned as needed; action='indexed'
+         if any write, else 'unchanged'.
+
     ``now_iso`` overrides the timestamp for testing; production omits it
-    and gets UTC now.
+    and gets UTC now. UPSERT is used (not INSERT OR REPLACE) because
+    SQLite suppresses AFTER-DELETE triggers on REPLACE-conflict unless
+    PRAGMA recursive_triggers=1 (per-connection, easy to forget).
     """
     now = now_iso if now_iso is not None else _default_now_iso()
     case_row = _fetch_case_row(cp_conn, case_key)
@@ -302,16 +316,28 @@ def index_case(
 class BuildIndexResult:
     """Action counters across the iteration.
 
-    processed = number of cases we visited (matches cp.cases WHERE court filter).
+    - processed: cases visited (matches the cp.cases WHERE-court filter)
+    - indexed:   cases where at least one write happened (insert, update,
+                 OR delete). Superset of `pruned`.
+    - unchanged: cases where every stored lang's sha matched — no writes.
+    - no_body:   cases whose cp.cases row exists but no body files on
+                 disk under output_root — no writes. Distinct from
+                 wrong-root scenarios which also produce no_body (that's
+                 an intentional safety default, see index_case docs).
+    - pruned:    subset of `indexed` — cases whose langs_pruned tuple was
+                 non-empty. Lets the operator distinguish 'N fresh bodies
+                 indexed' from 'N stale rows removed' (L5 disambiguation).
+
     Sum of indexed + unchanged + no_body may be < processed if any case
-    hit an unexpected action code (e.g. 'no_case_row', which shouldn't
-    happen when iterating cp.cases but is defensive).
+    hit an unexpected action code — defensive for the 'no_case_row'
+    branch, which shouldn't fire when iterating cp.cases.
     """
 
     processed: int
     indexed: int
     unchanged: int
     no_body: int
+    pruned: int = 0
 
 
 def build_index(
@@ -325,12 +351,19 @@ def build_index(
     """Walk cp.cases and call :func:`index_case` for each row.
 
     Args:
-      courts: optional list of court slugs to restrict the walk. None
-        means all courts.
+      courts: which courts to iterate. Two-state semantic — L5:
+        - ``None`` → all courts (no WHERE clause)
+        - ``[]``   → no courts (WHERE court IN ()) — a legitimate no-op
+          for callers who computed an empty allowlist. Do NOT collapse
+          to ``if courts:`` — [] and None then become the same path
+          and an empty allowlist silently kicks off a full-corpus rebuild.
+        - non-empty list → WHERE court IN (?, ...)
       now_iso: passed through to index_case for deterministic timestamps
         (tests). None → real UTC clock.
 
-    Returns a :class:`BuildIndexResult` summarizing the action mix.
+    Returns a :class:`BuildIndexResult` summarizing the action mix,
+    including a `pruned` counter that disambiguates 'N fresh bodies
+    indexed' from 'N stale rows removed' within the `indexed` total.
     """
     processed = 0
     indexed = 0
