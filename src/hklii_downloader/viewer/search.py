@@ -240,72 +240,97 @@ def index_case(
     # mistakenly report 'unchanged' for a case whose stale companion row
     # we're about to delete.
     current_langs = {s.lang for s in sources}
-    pruned = _prune_case_key_except(vw_conn, case_key, current_langs)
 
+    # Tier-4 open-transaction-on-raise guard. Everything from the prune
+    # DELETEs through the per-source UPSERTs runs inside a single
+    # autobegin transaction (Python sqlite3 default isolation_level).
+    # If extract_plaintext or body_sha256 raises mid-loop, the tx is
+    # left open on the connection; on the next call subsequent writers
+    # either hit SQLITE_BUSY (multi-writer) or the module quietly
+    # commits the partial writes when it next hits a non-DML statement.
+    # Roll back on error so the connection lands in a clean state, then
+    # re-raise so the caller (or build_index's per-case guard) can react.
+    # Trade-off: rollback undoes the entire autobegin transaction — in
+    # build_index's batching mode that's up to commit_every cases of
+    # already-successful work. Callers who need per-case isolation
+    # inside a batch should drive index_case with commit=True (each
+    # case commits before the next begins) or add a savepoint layer
+    # around the batch loop.
+    pruned: list[str] = []
     indexed: list[str] = []
     unchanged: list[str] = []
-    for source in sources:
-        html_bytes = source.path.read_bytes()
-        plaintext = extract_plaintext(html_bytes)
-        sha = body_sha256(plaintext)
+    try:
+        pruned = _prune_case_key_except(vw_conn, case_key, current_langs)
+        for source in sources:
+            html_bytes = source.path.read_bytes()
+            plaintext = extract_plaintext(html_bytes)
+            sha = body_sha256(plaintext)
 
-        existing = vw_conn.execute(
-            "SELECT body_sha256, body_source FROM fts_cases "
-            "WHERE case_key = ? AND lang = ?",
-            [case_key, source.lang],
-        ).fetchone()
-        # Tier-3 fix: skip only when BOTH sha and source_kind match. A
-        # rename like .html → .generated.html preserves plaintext (same
-        # sha) but changes body_source. Sha-only skip would leave the
-        # stored body_source pointing at the old kind.
-        if (
-            existing is not None
-            and existing[0] == sha
-            and existing[1] == source.source_kind
-        ):
-            unchanged.append(source.lang)
-            continue
+            existing = vw_conn.execute(
+                "SELECT body_sha256, body_source FROM fts_cases "
+                "WHERE case_key = ? AND lang = ?",
+                [case_key, source.lang],
+            ).fetchone()
+            # Tier-3 fix: skip only when BOTH sha and source_kind match. A
+            # rename like .html → .generated.html preserves plaintext (same
+            # sha) but changes body_source. Sha-only skip would leave the
+            # stored body_source pointing at the old kind.
+            if (
+                existing is not None
+                and existing[0] == sha
+                and existing[1] == source.source_kind
+            ):
+                unchanged.append(source.lang)
+                continue
 
-        # UPSERT — INSERT OR REPLACE would delete-then-reinsert case_bodies,
-        # but SQLite suppresses DELETE-triggers on REPLACE unless
-        # PRAGMA recursive_triggers=1 (per-connection, easy to forget).
-        # ON CONFLICT DO UPDATE fires the AFTER UPDATE trigger which keeps
-        # the row's id stable and correctly resyncs fts_body — proven in
-        # the schema tests + a manual trace.
-        vw_conn.execute(
-            "INSERT INTO fts_cases "
-            "(case_key, lang, court, year, number, neutral, title, date, "
-            " body_source, body_sha256, indexed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (case_key, lang) DO UPDATE SET "
-            " court = excluded.court, year = excluded.year, "
-            " number = excluded.number, neutral = excluded.neutral, "
-            " title = excluded.title, date = excluded.date, "
-            " body_source = excluded.body_source, "
-            " body_sha256 = excluded.body_sha256, "
-            " indexed_at = excluded.indexed_at",
-            [
-                case_key,
-                source.lang,
-                case_row["court"],
-                case_row["year"],
-                case_row["number"],
-                case_row["neutral"],
-                case_row["title"],
-                case_row["date"],
-                source.source_kind,
-                sha,
-                now,
-            ],
-        )
-        vw_conn.execute(
-            "INSERT INTO case_bodies "
-            "(case_key, lang, title, body) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT (case_key, lang) DO UPDATE SET "
-            " title = excluded.title, body = excluded.body",
-            [case_key, source.lang, case_row["title"], plaintext],
-        )
-        indexed.append(source.lang)
+            # UPSERT — INSERT OR REPLACE would delete-then-reinsert case_bodies,
+            # but SQLite suppresses DELETE-triggers on REPLACE unless
+            # PRAGMA recursive_triggers=1 (per-connection, easy to forget).
+            # ON CONFLICT DO UPDATE fires the AFTER UPDATE trigger which keeps
+            # the row's id stable and correctly resyncs fts_body — proven in
+            # the schema tests + a manual trace.
+            vw_conn.execute(
+                "INSERT INTO fts_cases "
+                "(case_key, lang, court, year, number, neutral, title, date, "
+                " body_source, body_sha256, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (case_key, lang) DO UPDATE SET "
+                " court = excluded.court, year = excluded.year, "
+                " number = excluded.number, neutral = excluded.neutral, "
+                " title = excluded.title, date = excluded.date, "
+                " body_source = excluded.body_source, "
+                " body_sha256 = excluded.body_sha256, "
+                " indexed_at = excluded.indexed_at",
+                [
+                    case_key,
+                    source.lang,
+                    case_row["court"],
+                    case_row["year"],
+                    case_row["number"],
+                    case_row["neutral"],
+                    case_row["title"],
+                    case_row["date"],
+                    source.source_kind,
+                    sha,
+                    now,
+                ],
+            )
+            vw_conn.execute(
+                "INSERT INTO case_bodies "
+                "(case_key, lang, title, body) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (case_key, lang) DO UPDATE SET "
+                " title = excluded.title, body = excluded.body",
+                [case_key, source.lang, case_row["title"], plaintext],
+            )
+            indexed.append(source.lang)
+    except BaseException:
+        # Close the autobegin transaction so the connection is usable
+        # for the next caller. BaseException catches KeyboardInterrupt
+        # etc. too — an operator Ctrl-C'ing mid-index still leaves the
+        # DB in a clean state. Re-raise preserves the caller's ability
+        # to react (build_index counts it as failed and moves on).
+        vw_conn.rollback()
+        raise
 
     if commit:
         vw_conn.commit()
@@ -344,10 +369,16 @@ class BuildIndexResult:
     - pruned:    subset of `indexed` — cases whose langs_pruned tuple was
                  non-empty. Lets the operator distinguish 'N fresh bodies
                  indexed' from 'N stale rows removed' (L5 disambiguation).
+    - failed:    cases where index_case raised (corrupt body, disk
+                 error, etc). Tier-4 open-tx-on-raise fix: index_case
+                 rolls its own transaction back, and build_index counts
+                 the case as failed and continues so one bad body does
+                 not abort a 162k-corpus build. Operator can retry
+                 failed cases individually.
 
-    Sum of indexed + unchanged + no_body may be < processed if any case
-    hit an unexpected action code — defensive for the 'no_case_row'
-    branch, which shouldn't fire when iterating cp.cases.
+    Sum of indexed + unchanged + no_body + failed may be < processed if
+    any case hit an unexpected action code — defensive for the
+    'no_case_row' branch, which shouldn't fire when iterating cp.cases.
     """
 
     processed: int
@@ -355,6 +386,7 @@ class BuildIndexResult:
     unchanged: int
     no_body: int
     pruned: int = 0
+    failed: int = 0
 
 
 def build_index(
@@ -394,6 +426,7 @@ def build_index(
     unchanged = 0
     no_body = 0
     pruned = 0
+    failed = 0
 
     # L5 ambiguous-state: courts=None means 'all courts' (no filter);
     # courts=[] means 'zero courts' (a legitimate no-op signal — e.g.
@@ -410,11 +443,25 @@ def build_index(
 
     for i, row in enumerate(cp_conn.execute(q, params)):
         case_key = f"{row[0]}/{row[1]}/{row[2]}"
-        result = index_case(
-            vw_conn, cp_conn, output_root, case_key,
-            now_iso=now_iso, commit=False,
-        )
         processed += 1
+        # Tier-4 open-tx-on-raise fix — the caller-side half. index_case
+        # has already rolled back its own autobegin transaction, so the
+        # connection is clean when the raise arrives here. Count the
+        # case as failed and move on. Rationale: a single corrupt body
+        # must not abort a 162k-corpus build; the operator can retry
+        # failed cases individually after the build finishes.
+        try:
+            result = index_case(
+                vw_conn, cp_conn, output_root, case_key,
+                now_iso=now_iso, commit=False,
+            )
+        except Exception:
+            failed += 1
+            # Skip the commit_every boundary check for this iteration —
+            # index_case rolled back so there's nothing pending to
+            # flush, and the next successful case starts a fresh
+            # autobegin transaction that hits the next boundary.
+            continue
         if result.action == "indexed":
             indexed += 1
             if result.langs_pruned:
@@ -439,6 +486,7 @@ def build_index(
         unchanged=unchanged,
         no_body=no_body,
         pruned=pruned,
+        failed=failed,
     )
 
 
