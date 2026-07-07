@@ -15,6 +15,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from lxml import html as lxml_html
+
+from hklii_downloader.viewer.body_render.sanitizer import sanitize_body
+
 
 #: Language codes accepted at the route boundary. 'zh' is a legacy value
 #: some cp.cases rows may carry (per design §5); it's normalized to 'tc'
@@ -141,3 +145,86 @@ def select_body_source(
             upstream_status=upstream_status,
         )
     return None
+
+
+# ---------------------------------------------------------------------------
+# render_case_body — dispatch on case_row['html_generated_from']
+# ---------------------------------------------------------------------------
+
+
+def _to_bcp47(lang: str) -> str:
+    """Map internal lang codes to BCP-47 for HTML lang= attribute.
+
+    Design §9 line 249: <article lang="{{ body_lang | bcp47 }}">.
+    'en' → 'en'. 'tc' → 'zh-Hant' (Traditional Chinese script tag,
+    which is what our :lang(zh-Hant) CSS selector targets).
+    """
+    return "zh-Hant" if lang == "tc" else lang
+
+
+def _extract_body_inner(sanitized_html: str) -> str:
+    """Return the inner HTML of ``<body>``.
+
+    ``sanitize_body`` always emits a full document (lxml.html.fromstring
+    auto-wraps fragments). We strip the outer shell here so the render
+    output is just the case content, ready for the <article> wrapper.
+    """
+    if not sanitized_html:
+        return ""
+    tree = lxml_html.fromstring(sanitized_html)
+    body = tree.find(".//body")
+    target = body if body is not None else tree
+    parts: list[str] = []
+    if target.text:
+        parts.append(target.text)
+    for child in target:
+        parts.append(
+            lxml_html.tostring(child, encoding="unicode", method="html")
+        )
+    return "".join(parts)
+
+
+def _render_native_hklii(html_bytes: bytes) -> str:
+    """Native HKLII shape: full <html><body> with <form> wrapper, inline
+    styles, <link> stylesheets. Sanitizer handles all of that; we just
+    peel off the outer shell.
+    """
+    return _extract_body_inner(sanitize_body(html_bytes))
+
+
+def _render_generated_fragment(html_bytes: bytes) -> str:
+    """Pandoc-generated fragment: bare <p>...</p> chain. lxml auto-wraps
+    in <html><body> during parse; we then peel the shell same as native.
+    """
+    return _extract_body_inner(sanitize_body(html_bytes))
+
+
+def render_case_body(
+    render_source: RenderSource | None,
+    case_row: dict,
+) -> str:
+    """Render a case body as sanitized HTML wrapped in ``<article>``.
+
+    Dispatch (design §5 line 121):
+      - ``case_row['html_generated_from']`` is truthy (any of 'doc',
+        'rtf', 'pdf') → ``_render_generated_fragment``
+      - else (native HKLII HTML) → ``_render_native_hklii``
+
+    Wraps the sanitized body in ``<article lang="{bcp47}">`` per
+    design §9 line 249. Missing ``render_source`` (route couldn't find
+    a body → 404-shape) yields ``<article lang="en"></article>`` so
+    the template still has a shell to render around.
+    """
+    if render_source is None:
+        return '<article lang="en"></article>'
+
+    html_bytes = render_source.path.read_bytes()
+    generated_from = case_row.get("html_generated_from")
+
+    if generated_from:
+        body_inner = _render_generated_fragment(html_bytes)
+    else:
+        body_inner = _render_native_hklii(html_bytes)
+
+    lang_attr = _to_bcp47(render_source.lang)
+    return f'<article lang="{lang_attr}">{body_inner}</article>'
