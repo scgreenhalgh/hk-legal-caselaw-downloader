@@ -59,6 +59,12 @@ def iter_text_nodes(
     # encoding must decode themselves.
     if isinstance(html_content, bytes):
         html_content = html_content.decode("utf-8")
+    # Empty / whitespace-only input: lxml.html.fromstring raises
+    # ParserError('Document is empty'), which would abort a full-corpus
+    # build_index on the first 0-byte body file. extract_plaintext's
+    # docstring promises empty-body → empty string; honor that here.
+    if not html_content.strip():
+        return
     root = lxml_html.fromstring(html_content)
     skip = frozenset(t.lower() for t in skip_tags) | _ALWAYS_SKIP_TAGS
     for text in _walk(root, skip):
@@ -69,12 +75,23 @@ def iter_text_nodes(
 def _walk(element: _Element, skip: frozenset[str]) -> Iterator[str]:
     """Recursive walker.
 
-    On a skipped element: yields ONLY ``element.tail`` (its subtree is
-    silently dropped). On a kept element: yields ``.text``, recurses into
-    every child, then yields ``.tail``.
+    Three cases:
+      - Comment / ProcessingInstruction / Entity: ``.tag`` is a cyfunction
+        (not str). Skip the subtree entirely — comments can leak authoring
+        notes or CMS boilerplate into FTS-indexed plaintext. The ``.tail``
+        text (after the closing tag, contributed to the parent) is preserved.
+      - Kept element (str tag not in skip): yield ``.text``, recurse into
+        children, then yield ``.tail``.
+      - Skipped element (str tag in skip): yield ONLY ``.tail`` — the
+        subtree is dropped by design (e.g., ``<a>`` interior, ``<script>``).
     """
-    tag = element.tag if isinstance(element.tag, str) else None
-    if tag is not None and tag.lower() in skip:
+    tag = element.tag
+    if not isinstance(tag, str):
+        # Comment / ProcessingInstruction / Entity — subtree dropped.
+        if element.tail:
+            yield element.tail
+        return
+    if tag.lower() in skip:
         if element.tail:
             yield element.tail
         return
