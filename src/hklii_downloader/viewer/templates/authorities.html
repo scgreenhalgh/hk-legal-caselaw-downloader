@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}Authorities — HKLII viewer{% endblock %}
+{% block content %}
+
+<header class="court-page-heading">
+  <h2>Most-cited authorities</h2>
+  {% if selected_court %}
+  <span class="abbr">
+    {{ selected_court }} · {{ selected_court | court_name }}
+  </span>
+  {% endif %}
+</header>
+
+<section class="section" aria-labelledby="authorities-heading">
+  <h3 id="authorities-heading" class="section-label">
+    {% if selected_court %}
+    Hub cases in {{ selected_court | court_name }}
+    {% else %}
+    Hub cases across all courts
+    {% endif %}
+  </h3>
+
+  {% if hub_cache_missing %}
+  <p class="banner" data-testid="hub-cache-missing">
+    Hub cache not yet computed. Run <code>hklii viewer index</code> first.
+  </p>
+  {% elif hub_rows %}
+  <table class="hub-table">
+    <thead>
+      <tr>
+        <th scope="col" class="rank">Rank</th>
+        <th scope="col">Case</th>
+        <th scope="col">Court</th>
+        <th scope="col" class="num">Inbound</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in hub_rows %}
+      <tr class="hub-row"
+          data-testid="hub-row"
+          data-case-key="{{ c.case_key }}"
+          data-inbound="{{ c.inbound_count }}">
+        <td class="rank">{{ c.court | curial_roman }}</td>
+        <td class="case-key">
+          <a href="/case/{{ c.case_key }}">{{ c.case_key }}</a>
+        </td>
+        <td class="court-name">{{ c.court | court_name }}</td>
+        <td class="inbound-count num">{{ c.inbound_count | thousands }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="empty" data-testid="empty-hubs">
+    {% if selected_court %}
+    No hub cases cached for {{ selected_court | court_name }} yet.
+    {% else %}
+    No hub cases cached yet.
+    {% endif %}
+  </p>
+  {% endif %}
+</section>
+
+{% endblock %}
