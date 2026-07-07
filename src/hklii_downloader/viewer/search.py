@@ -11,6 +11,7 @@ See docs/viewer-design.md §4.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -216,6 +217,98 @@ def index_case(
         action="unchanged",
         langs_unchanged=tuple(unchanged),
     )
+
+
+# ---------------------------------------------------------------------------
+# build_index — iterate cp.cases and index_case each
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BuildIndexResult:
+    """Action counters across the iteration.
+
+    processed = number of cases we visited (matches cp.cases WHERE court filter).
+    Sum of indexed + unchanged + no_body may be < processed if any case
+    hit an unexpected action code (e.g. 'no_case_row', which shouldn't
+    happen when iterating cp.cases but is defensive).
+    """
+
+    processed: int
+    indexed: int
+    unchanged: int
+    no_body: int
+
+
+def build_index(
+    vw_conn: sqlite3.Connection,
+    cp_conn: sqlite3.Connection,
+    output_root: str | Path,
+    *,
+    courts: list[str] | None = None,
+    now_iso: str | None = None,
+) -> BuildIndexResult:
+    """Walk cp.cases and call :func:`index_case` for each row.
+
+    Args:
+      courts: optional list of court slugs to restrict the walk. None
+        means all courts.
+      now_iso: passed through to index_case for deterministic timestamps
+        (tests). None → real UTC clock.
+
+    Returns a :class:`BuildIndexResult` summarizing the action mix.
+    """
+    processed = 0
+    indexed = 0
+    unchanged = 0
+    no_body = 0
+
+    if courts:
+        placeholders = ",".join(["?"] * len(courts))
+        q = f"SELECT court, year, number FROM cases WHERE court IN ({placeholders})"
+        params: list[object] = list(courts)
+    else:
+        q = "SELECT court, year, number FROM cases"
+        params = []
+
+    for row in cp_conn.execute(q, params):
+        case_key = f"{row[0]}/{row[1]}/{row[2]}"
+        result = index_case(
+            vw_conn, cp_conn, output_root, case_key, now_iso=now_iso
+        )
+        processed += 1
+        if result.action == "indexed":
+            indexed += 1
+        elif result.action == "unchanged":
+            unchanged += 1
+        elif result.action == "no_body_on_disk":
+            no_body += 1
+
+    return BuildIndexResult(
+        processed=processed,
+        indexed=indexed,
+        unchanged=unchanged,
+        no_body=no_body,
+    )
+
+
+# ---------------------------------------------------------------------------
+# atomic_swap — os.replace wrapper for viewer.db.new → viewer.db
+# ---------------------------------------------------------------------------
+
+
+def atomic_swap(src: str | Path, dst: str | Path) -> None:
+    """Atomically replace ``dst`` with ``src``.
+
+    Wraps :func:`os.replace`, which is atomic on POSIX filesystems: any
+    open file descriptor on the old ``dst`` inode keeps working (the
+    unlinked-but-open inode stays alive until the last handle closes).
+    A fresh open on ``dst`` after this call sees the new inode.
+
+    Raises :class:`FileNotFoundError` if ``src`` does not exist — L1
+    loud-failure: a missing new-index is a real bug, not a silent no-op.
+    """
+    os.replace(str(src), str(dst))
 
 
 @dataclass(frozen=True)
