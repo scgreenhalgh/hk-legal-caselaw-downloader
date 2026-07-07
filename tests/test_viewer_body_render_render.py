@@ -262,7 +262,7 @@ def test_render_case_body_wraps_output_in_article_with_bcp47_lang(
     _touch(paths["html"], "<html><body><p>judgment prose</p></body></html>")
 
     src = select_body_source(_case_row(), tmp_path, requested_lang="en")
-    out = render_case_body(src, _case_row())
+    out = render_case_body(src, _case_row(), tmp_path)
 
     assert out.startswith('<article lang="en">')
     assert out.endswith("</article>")
@@ -275,7 +275,7 @@ def test_render_case_body_tc_gets_zh_hant_lang(tmp_path: Path) -> None:
     _touch(paths["tc.html"], "<html><body><p>中文判決</p></body></html>")
 
     src = select_body_source(_case_row(), tmp_path, requested_lang="tc")
-    out = render_case_body(src, _case_row())
+    out = render_case_body(src, _case_row(), tmp_path)
 
     assert out.startswith('<article lang="zh-Hant">')
     assert "中文判決" in out
@@ -321,7 +321,7 @@ def test_render_case_body_generated_path_when_html_generated_from_is_doc(
     )
     row = _case_row(html_generated_from="doc")
     src = select_body_source(row, tmp_path, requested_lang="en")
-    out = render_case_body(src, row)
+    out = render_case_body(src, row, tmp_path)
 
     assert '<article lang="en">' in out
     assert "paragraph 1" in out
@@ -332,7 +332,7 @@ def test_render_case_body_none_source_returns_empty_article(
     tmp_path: Path,
 ) -> None:
     """No RenderSource (route hit 404 shape) → empty <article>."""
-    out = render_case_body(None, _case_row())
+    out = render_case_body(None, _case_row(), tmp_path)
     assert out == '<article lang="en"></article>' or out == ""
 
 
@@ -346,5 +346,5 @@ def test_render_case_body_empty_file_yields_empty_article(
     _touch(paths["html"], "")
 
     src = select_body_source(_case_row(), tmp_path, requested_lang="en")
-    out = render_case_body(src, _case_row())
+    out = render_case_body(src, _case_row(), tmp_path)
     assert out == '<article lang="en"></article>'
