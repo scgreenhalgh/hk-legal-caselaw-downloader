@@ -14,9 +14,20 @@ viewer sub-package, not at hklii_downloader top level — the design's
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Iterable
+
+
+# Case-key part validators — used by appeal_chain to reject
+# path-traversal attempts before Path composition. Court slug is
+# alphabetic (matches CANONICAL_COURTS shape without importing it
+# here — avoids a viewer→cli cycle). Year is exactly 4 digits.
+# Number is 1+ digits. All three anchored so partial matches fail.
+_COURT_RE = re.compile(r"^[a-z]+$")
+_YEAR_RE = re.compile(r"^\d{4}$")
+_NUM_RE = re.compile(r"^\d+$")
 
 
 class ViewerCacheMissing(Exception):
@@ -285,7 +296,15 @@ def appeal_chain(output_root: str | Path, case_key: str) -> list[dict]:
         cases do not have a sidecar and that is not an error)
       - File present but not valid JSON → :class:`json.JSONDecodeError`
         propagates (L1: real data corruption is not silently hidden)
-      - Malformed ``case_key`` (< 2 slashes) → :class:`ValueError`
+      - Malformed ``case_key`` (< 3 parts, or any part fails the strict
+        regex validators) → :class:`ValueError`
+
+    Path-traversal safety (Tier-3 hardening): court/year/num are each
+    validated against a strict regex (``^[a-z]+$`` / ``^\\d{4}$`` /
+    ``^\\d+$``) before Path composition. A crafted key like
+    ``../../etc/passwd/x`` — which would previously escape
+    ``output_root`` via ``..`` components — now raises ValueError at
+    the input surface.
     """
     parts = case_key.split("/")
     if len(parts) < 3:
@@ -293,6 +312,12 @@ def appeal_chain(output_root: str | Path, case_key: str) -> list[dict]:
             f"case_key must be 'court/year/number', got: {case_key!r}"
         )
     court, year, num = parts[0], parts[1], parts[2]
+    if not _COURT_RE.fullmatch(court):
+        raise ValueError(f"invalid court in case_key {case_key!r}: {court!r}")
+    if not _YEAR_RE.fullmatch(year):
+        raise ValueError(f"invalid year in case_key {case_key!r}: {year!r}")
+    if not _NUM_RE.fullmatch(num):
+        raise ValueError(f"invalid number in case_key {case_key!r}: {num!r}")
     path = (
         Path(output_root)
         / court
