@@ -369,6 +369,7 @@ def build_index(
     indexed = 0
     unchanged = 0
     no_body = 0
+    pruned = 0
 
     # L5 ambiguous-state: courts=None means 'all courts' (no filter);
     # courts=[] means 'zero courts' (a legitimate no-op signal — e.g.
@@ -391,6 +392,8 @@ def build_index(
         processed += 1
         if result.action == "indexed":
             indexed += 1
+            if result.langs_pruned:
+                pruned += 1
         elif result.action == "unchanged":
             unchanged += 1
         elif result.action == "no_body_on_disk":
@@ -401,6 +404,7 @@ def build_index(
         indexed=indexed,
         unchanged=unchanged,
         no_body=no_body,
+        pruned=pruned,
     )
 
 
