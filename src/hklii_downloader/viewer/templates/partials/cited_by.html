@@ -1,0 +1,27 @@
+{% if rows %}
+<ol class="citation-list cited-by-list" data-testid="cited-by-list">
+  {% for r in rows %}
+  <li class="citation-row cited-by-row"
+      data-testid="cited-by-row"
+      data-from-key="{{ r.from_key }}"
+      data-from-court="{{ r.from_court }}"
+      data-first-seen="{{ r.first_seen }}">
+    <a href="/case/{{ r.from_key }}" class="citation-anchor">{{ r.from_key }}</a>
+    <span class="court-badge court-badge--{{ r.from_court }}">{{ r.from_court | upper }}</span>
+    <span class="langs">{{ r.langs }}</span>
+    <time datetime="{{ r.first_seen }}">{{ r.first_seen }}</time>
+  </li>
+  {% endfor %}
+</ol>
+{% if rows | length == page_size %}
+<button type="button"
+        class="load-more"
+        data-testid="load-more"
+        hx-get="/case/{{ case_key }}/cited-by?page={{ page + 1 }}{% if court_filter %}&court={{ court_filter }}{% endif %}"
+        hx-target="[data-testid=cited-by-list]"
+        hx-swap="beforeend"
+        hx-trigger="click">Load next 50</button>
+{% endif %}
+{% else %}
+<p class="empty" data-testid="empty-cited-by">No incoming citations.</p>
+{% endif %}
