@@ -7,6 +7,31 @@
  * Pico's classless build doesn't cover.
  */
 
+/* --- Custom-list marker reset ------------------------------------------
+ * Pico classless keeps ::marker even when we set list-style: none on the
+ * parent. Explicitly blank the marker on our layout-controlled lists.
+ */
+.court-tiles,
+.year-buckets,
+.recent-cases,
+.search-results,
+.citation-list,
+.parallel-list,
+.hub-cases {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.court-tiles > li::marker,
+.year-buckets > li::marker,
+.recent-cases > li::marker,
+.search-results > li::marker,
+.citation-list > li::marker,
+.parallel-list > li::marker,
+.hub-cases > li::marker {
+  content: "";
+}
+
 /* --- Header + nav ------------------------------------------------------- */
 .viewer-header {
   display: flex;
@@ -94,6 +119,30 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* --- Hub-cases list (court landing) ------------------------------------ */
+.hub-case {
+  border-bottom: 1px solid var(--pico-muted-border-color);
+}
+.hub-case a {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding-block: 0.5rem;
+  text-decoration: none;
+  color: inherit;
+}
+.hub-case .case-key {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.9em;
+}
+.hub-case .inbound-count {
+  color: var(--pico-muted-color);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.9em;
+}
+.hub-case .inbound-count::before { content: "↳ "; }
+
 /* --- Court badges (citation panels) ------------------------------------ */
 .court-badge {
   display: inline-block;
@@ -170,15 +219,33 @@ mark {
   padding: 0.05em 0.2em;
   border-radius: 2px;
 }
-.search-results { list-style: none; padding: 0; }
 .search-result {
   padding-block: 0.75rem;
   border-bottom: 1px solid var(--pico-muted-border-color);
 }
+.search-result .result-link {
+  display: grid;
+  grid-template-columns: minmax(120px, 8em) 1fr auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  text-decoration: none;
+  color: inherit;
+}
+.search-result .result-link .neutral {
+  font-family: var(--pico-font-family-monospace);
+  font-size: 0.9em;
+  color: var(--pico-primary);
+}
+.search-result .result-link .title { color: inherit; }
+.search-result .result-link time {
+  color: var(--pico-muted-color);
+  font-variant-numeric: tabular-nums;
+}
 .search-result .snippet {
   color: var(--pico-muted-color);
-  margin-block: 0.25rem 0;
+  margin-block: 0.5rem 0;
   font-size: 0.9em;
+  max-width: 72ch;
 }
 
 /* --- Pager (year page) ------------------------------------------------- */
