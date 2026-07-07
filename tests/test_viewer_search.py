@@ -658,6 +658,57 @@ def test_index_case_prunes_bilingual_half_when_file_disappears(
     vw.close()
 
 
+def test_index_case_wrong_output_root_is_no_op_not_destructive(
+    tmp_path: Path,
+) -> None:
+    """META-LENS regression guard: an operator typing `hklii viewer index
+    -o /wrong/path` or running from wrong CWD must NOT silently DELETE the
+    entire FTS index.
+
+    Pre-fix behavior: sources=[] → 'no_body_on_disk', no cleanup, safe.
+    Fix-first-cut behavior: sources=[] fed keep_langs=set() into
+    _prune_case_key_except → mass DELETE, reported as 'indexed'.
+
+    Correct behavior: when case_row EXISTS in cp.cases (root is fine
+    from cp's perspective) but sources is EMPTY (nothing on disk under
+    output_root), we CANNOT distinguish 'wrong root' from 'all bodies
+    genuinely deleted'. Default to safety: no prune, action='no_body_on_disk'.
+
+    The genuinely-deleted case surfaces on the next --rebuild (which
+    starts from an empty viewer.db and picks up the truth). The wrong-root
+    case is far more common; making it safe is worth losing an edge-case
+    cleanup path.
+    """
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<p>real body content survivethis</p>")
+
+    # First run — indexed correctly against tmp_path
+    index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone() == (1,)
+
+    # Second run — pointed at a WRONG output_root that has no bodies
+    wrong_root = tmp_path / "wrong_root"
+    wrong_root.mkdir()
+    r = index_case(vw, cp, wrong_root, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+
+    # Contract: wrong root is a no-op, NOT destructive
+    assert r.action == "no_body_on_disk"
+    assert r.langs_pruned == ()
+    # Existing row survives
+    assert vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone() == (1,)
+    # FTS still finds the original body
+    hits = vw.execute(
+        "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH ?",
+        ["survivethis"],
+    ).fetchone()
+    assert hits == (1,)
+    cp.close()
+    vw.close()
+
+
 def test_index_case_prunes_all_rows_when_case_row_disappears_from_cp(
     tmp_path: Path,
 ) -> None:
