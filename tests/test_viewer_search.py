@@ -530,6 +530,46 @@ def test_build_index_empty_courts_list_is_a_noop_not_full_rebuild(
     vw.close()
 
 
+def test_build_index_counts_pruned_cases_separately_from_indexed(
+    tmp_path: Path,
+) -> None:
+    """L5 ambiguous-state fix: BuildIndexResult.indexed used to collapse
+    'fresh insert' and 'prune-only' into one counter — an operator
+    couldn't tell '500 new bodies' from '500 stale rows removed'.
+
+    Fix adds a `pruned` counter that increments per case whose
+    langs_pruned was non-empty. `indexed` remains 'any write happened
+    to this case' (superset), so pruned <= indexed.
+    """
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/1", lang="en")
+    _seed_case(cp, "hkcfa/2020/2", lang="en")
+    p1 = _mk_paths(tmp_path, "hkcfa/2020/1")
+    _touch(p1["html"], "<p>english body 1</p>")
+    p2 = _mk_paths(tmp_path, "hkcfa/2020/2")
+    _touch(p2["html"], "<p>english body 2</p>")
+    _touch(p2["tc.html"], "<p>中文譯本 uniqfoo</p>")
+
+    r1 = build_index(vw, cp, tmp_path, now_iso=_FIXED_NOW)
+    assert r1.indexed == 2
+    assert r1.pruned == 0
+
+    # Remove TC file from case 2 — a legitimate 'bilingual half deleted'
+    # scenario. case 1 is unchanged.
+    p2["tc.html"].unlink()
+
+    r2 = build_index(vw, cp, tmp_path, now_iso=_FIXED_NOW)
+    # case 1: unchanged (sha match, nothing pruned)
+    # case 2: prune the TC row, EN row unchanged → counts as pruned
+    assert r2.unchanged == 1
+    assert r2.pruned == 1
+    # `indexed` includes the case that had prune-only writes
+    assert r2.indexed == 1
+    cp.close()
+    vw.close()
+
+
 def test_build_index_courts_filter_restricts_processing(
     tmp_path: Path,
 ) -> None:
