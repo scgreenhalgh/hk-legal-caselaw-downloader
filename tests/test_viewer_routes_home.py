@@ -185,21 +185,22 @@ def test_home_court_tile_links_to_court_landing(client: TestClient) -> None:
     assert anchor["href"] == "/court/hkcfa"
 
 
-def test_home_courts_stay_synced_with_cli_all_courts() -> None:
-    """L2 drift guard: viewer's ``_HOME_COURTS`` must equal
+def test_canonical_courts_stay_synced_with_cli_all_courts() -> None:
+    """L2 drift guard: viewer's ``CANONICAL_COURTS`` must equal
     ``cli.ALL_COURTS`` (as a set). The design's §7 verdict-integration
     note flags this exact drift class — 'curial precedence collapses to
     4 courts was L3 drift against the actual slug list'. A new court
     added to the downloader's canonical list would otherwise silently
-    fall off the viewer home page.
+    fall off the viewer home page and every court-facet filter.
     """
     from hklii_downloader.cli import ALL_COURTS
-    from hklii_downloader.viewer.routes.home import _HOME_COURTS
+    from hklii_downloader.viewer.courts import CANONICAL_COURTS
 
-    missing = set(ALL_COURTS) - set(_HOME_COURTS)
-    extra = set(_HOME_COURTS) - set(ALL_COURTS)
+    missing = set(ALL_COURTS) - set(CANONICAL_COURTS)
+    extra = set(CANONICAL_COURTS) - set(ALL_COURTS)
     assert not missing and not extra, (
-        f"_HOME_COURTS drift vs cli.ALL_COURTS — missing: {missing}, extra: {extra}"
+        f"CANONICAL_COURTS drift vs cli.ALL_COURTS — "
+        f"missing: {missing}, extra: {extra}"
     )
 
 

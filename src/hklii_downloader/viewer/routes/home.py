@@ -17,19 +17,9 @@ import sqlite3
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
+from hklii_downloader.viewer.courts import CANONICAL_COURTS
 from hklii_downloader.viewer.db import open_readonly
 
-
-# Canonical HKLII court slugs (13). Mirrors ``hklii_downloader.cli.ALL_COURTS``
-# and the CASE-expression list in ``viewer.graph._COURT_RANK_WHEN_ELSE`` —
-# duplicated to keep viewer boot from importing click. Order here drives
-# the court-tile grid order on the home page: apex courts first, then
-# CFI, then lower/tribunal courts.
-_HOME_COURTS: tuple[str, ...] = (
-    "hkcfa", "hkca", "ukpc",
-    "hkcfi", "hkdc", "hkmagc", "hkfc",
-    "hkldt", "hklat", "hkct", "hksct", "hkcrc", "hkoat",
-)
 
 _RECENT_LIMIT = 10
 
@@ -67,7 +57,7 @@ def home(request: Request) -> HTMLResponse:
 
     court_tiles = [
         {"slug": slug, "count": counts.get(slug, 0)}
-        for slug in _HOME_COURTS
+        for slug in CANONICAL_COURTS
     ]
     templates = request.app.state.templates
     return templates.TemplateResponse(
