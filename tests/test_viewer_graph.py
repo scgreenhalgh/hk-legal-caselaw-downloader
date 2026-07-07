@@ -704,3 +704,72 @@ def test_appeal_chain_malformed_case_key_raises_value_error(
         appeal_chain(tmp_path, "just-a-string")
     with pytest.raises(ValueError):
         appeal_chain(tmp_path, "onlyone/slash")
+
+
+class TestAppealChainPathTraversal:
+    """Tier-3 finding from Phase 3 review: case_key is user-controlled at
+    the future ``/case/{slug}/{y}/{n}/appeal-chain`` route surface. Without
+    validation, an attacker-crafted key like ``../../etc/passwd/x`` would
+    escape ``output_root`` because ``court='..' year='..' num='etc'``
+    lands ``output_root / .. / .. / etc / ...appeal_history.json`` on disk.
+    """
+
+    def test_dotdot_in_court_component_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "../evil/2020/1")
+
+    def test_dotdot_in_year_component_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa/../1")
+
+    def test_dotdot_in_number_component_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa/2020/..")
+
+    def test_slash_in_component_rejected(self, tmp_path: Path) -> None:
+        """A backslash or embedded slash in a component would confuse the
+        Path join. urlencoded slashes surviving through the router are
+        the realistic vector.
+        """
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa/2020\\/etc/1")
+
+    def test_non_alpha_court_rejected(self, tmp_path: Path) -> None:
+        """Court slugs are ``^[a-z]+$``. Digits or symbols mean a schema
+        drift — surface it loudly rather than build a wrong path.
+        """
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa1/2020/1")
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hk-cfa/2020/1")
+
+    def test_non_digit_year_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa/20xx/1")
+
+    def test_non_digit_number_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa/2020/1a")
+
+    def test_year_not_four_digits_rejected(self, tmp_path: Path) -> None:
+        """Real HKLII years are always four digits (1996+). Different-width
+        input is either historic data (before HKLII coverage — not in scope)
+        or an attack. Reject.
+        """
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa/20/1")
+        with pytest.raises(ValueError):
+            appeal_chain(tmp_path, "hkcfa/20200/1")
+
+    def test_valid_case_key_still_works(self, tmp_path: Path) -> None:
+        """Defence in depth — valid inputs must continue to work exactly
+        as before. Regression against over-strict validation.
+        """
+        d = tmp_path / "hkdc" / "2013"
+        d.mkdir(parents=True)
+        (d / "hkdc_2013_352.appeal_history.json").write_text(
+            '[{"act": "cap 1", "judgments": []}]', encoding="utf-8"
+        )
+        assert appeal_chain(tmp_path, "hkdc/2013/352") == [
+            {"act": "cap 1", "judgments": []}
+        ]
