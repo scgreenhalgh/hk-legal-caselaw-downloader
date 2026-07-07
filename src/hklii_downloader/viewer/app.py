@@ -14,9 +14,12 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from hklii_downloader.viewer.courts import court_name, curial_roman, thousands
+from hklii_downloader.viewer.courts import bcp47, court_name, curial_roman, thousands
+from hklii_downloader.viewer.routes.authorities import router as authorities_index_router
+from hklii_downloader.viewer.routes.browse import router as browse_router
 from hklii_downloader.viewer.routes.case_detail import router as case_detail_router
 from hklii_downloader.viewer.routes.citations import router as citations_router
+from hklii_downloader.viewer.routes.cite import router as cite_router
 from hklii_downloader.viewer.routes.court import router as court_router
 from hklii_downloader.viewer.routes.healthz import router as healthz_router
 from hklii_downloader.viewer.routes.home import router as home_router
@@ -51,6 +54,7 @@ def create_app(
     templates.env.filters["curial_roman"] = curial_roman
     templates.env.filters["court_name"] = court_name
     templates.env.filters["thousands"] = thousands
+    templates.env.filters["bcp47"] = bcp47
     app.state.templates = templates
 
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -62,4 +66,7 @@ def create_app(
     app.include_router(citations_router)
     app.include_router(search_router)
     app.include_router(healthz_router)
+    app.include_router(cite_router)
+    app.include_router(browse_router)
+    app.include_router(authorities_index_router)
     return app
