@@ -20,12 +20,65 @@ from pathlib import Path
 
 import pytest
 
+import sqlite3
+
+from hklii_downloader.viewer.schema import create_schema
 from hklii_downloader.viewer.search import (
     BodySource,
+    IndexResult,
     body_sha256,
     discover_body_sources,
     extract_plaintext,
+    index_case,
 )
+
+
+# Minimal cases-table DDL matching the shipped shape for the columns
+# index_case reads. Phase 6 will add a schema-drift contract test.
+_CP_CASES_MINIMAL_DDL = """
+CREATE TABLE cases (
+    court   TEXT NOT NULL,
+    year    INTEGER NOT NULL,
+    number  INTEGER NOT NULL,
+    neutral TEXT NOT NULL,
+    title   TEXT NOT NULL,
+    date    TEXT NOT NULL,
+    lang    TEXT NOT NULL DEFAULT 'en',
+    PRIMARY KEY (court, year, number)
+);
+"""
+
+
+def _mk_cp(tmp_path: Path) -> sqlite3.Connection:
+    """Fresh writer checkpoint.db with the minimal cases table."""
+    conn = sqlite3.connect(str(tmp_path / "checkpoint.db"))
+    conn.execute(_CP_CASES_MINIMAL_DDL)
+    conn.commit()
+    return conn
+
+
+def _mk_vw(tmp_path: Path) -> sqlite3.Connection:
+    """Fresh writer viewer.db with the shipped schema."""
+    conn = sqlite3.connect(str(tmp_path / "viewer.db"))
+    create_schema(conn)
+    return conn
+
+
+def _seed_case(
+    cp: sqlite3.Connection,
+    case_key: str,
+    *,
+    title: str = "HKSAR v Test",
+    date: str = "2020-01-01",
+    lang: str = "en",
+) -> None:
+    court, year, num = case_key.split("/")
+    cp.execute(
+        "INSERT INTO cases (court, year, number, neutral, title, date, lang) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [court, int(year), int(num), f"[{year}] TEST {num}", title, date, lang],
+    )
+    cp.commit()
 
 
 def _touch(path: Path, content: str = "<html></html>") -> None:
@@ -241,3 +294,193 @@ def test_body_sha256_empty_string_is_deterministic() -> None:
         sha_empty
         == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     )
+
+
+# ---------------------------------------------------------------------------
+# index_case — the single-case orchestrator
+# ---------------------------------------------------------------------------
+
+
+_FIXED_NOW = "2026-07-07T12:00:00Z"
+
+
+def test_index_case_returns_no_case_row_when_case_absent(tmp_path: Path) -> None:
+    """cp.cases has no row for case_key → skip, no writes to viewer.db."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    result = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert result.action == "no_case_row"
+    assert result.langs_indexed == ()
+    assert vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone() == (0,)
+    cp.close()
+    vw.close()
+
+
+def test_index_case_returns_no_body_when_no_files_on_disk(
+    tmp_path: Path,
+) -> None:
+    """cp.cases has the row, but no HTML files → skip."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32")
+    result = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert result.action == "no_body_on_disk"
+    assert vw.execute("SELECT COUNT(*) FROM fts_cases").fetchone() == (0,)
+    cp.close()
+    vw.close()
+
+
+def test_index_case_indexes_en_only_case_end_to_end(tmp_path: Path) -> None:
+    """.html present → row inserted, FTS MATCH finds the body."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<p>The defendant argued a subtle point.</p>")
+
+    result = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+
+    assert result.action == "indexed"
+    assert result.langs_indexed == ("en",)
+    # fts_cases row exists with the expected shape
+    row = vw.execute(
+        "SELECT case_key, lang, court, year, number, "
+        "body_source, indexed_at, body_sha256 "
+        "FROM fts_cases WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()
+    assert row[0] == "hkcfa/2020/32"
+    assert row[1] == "en"
+    assert row[2] == "hkcfa"
+    assert row[3] == 2020
+    assert row[4] == 32
+    assert row[5] == "html"
+    assert row[6] == _FIXED_NOW
+    assert len(row[7]) == 64  # sha256 hex
+    # case_bodies row exists
+    body_row = vw.execute(
+        "SELECT title, body FROM case_bodies WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()
+    assert body_row is not None
+    assert "defendant argued" in body_row[1]
+    # FTS MATCH finds it (trigger sync)
+    matched = vw.execute(
+        "SELECT c.case_key FROM fts_body b "
+        "JOIN case_bodies c ON c.id = b.rowid "
+        "WHERE fts_body MATCH ?",
+        ["defendant"],
+    ).fetchone()
+    assert matched == ("hkcfa/2020/32",)
+    cp.close()
+    vw.close()
+
+
+def test_index_case_indexes_bilingual_case_two_rows(tmp_path: Path) -> None:
+    """.html + .tc.html both present → two fts_cases rows (en + tc)."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<p>English body text</p>")
+    _touch(paths["tc.html"], "<p>中文譯本判決書</p>")
+
+    result = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+
+    assert result.action == "indexed"
+    assert sorted(result.langs_indexed) == ["en", "tc"]
+    langs = {
+        r[0]
+        for r in vw.execute(
+            "SELECT lang FROM fts_cases WHERE case_key = ?",
+            ["hkcfa/2020/32"],
+        )
+    }
+    assert langs == {"en", "tc"}
+    # Body_source tags are per-source
+    sources_by_lang = dict(
+        vw.execute(
+            "SELECT lang, body_source FROM fts_cases WHERE case_key = ?",
+            ["hkcfa/2020/32"],
+        ).fetchall()
+    )
+    assert sources_by_lang == {"en": "html", "tc": "tc.html"}
+    # TC MATCH finds the Chinese body (3+ chars — trigram lower bound)
+    matched = vw.execute(
+        "SELECT c.case_key FROM fts_body b "
+        "JOIN case_bodies c ON c.id = b.rowid "
+        "WHERE fts_body MATCH ?",
+        ["中文譯本"],
+    ).fetchone()
+    assert matched == ("hkcfa/2020/32",)
+    cp.close()
+    vw.close()
+
+
+def test_index_case_returns_unchanged_when_sha_matches(tmp_path: Path) -> None:
+    """Second call with unchanged body → action='unchanged', no upsert."""
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<p>Original body content</p>")
+
+    # First index — writes
+    r1 = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso="2026-01-01T00:00:00Z")
+    assert r1.action == "indexed"
+    # Second index — same content, so sha matches
+    r2 = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso="2026-02-01T00:00:00Z")
+    assert r2.action == "unchanged"
+    assert r2.langs_unchanged == ("en",)
+    # indexed_at is not bumped
+    stamp = vw.execute(
+        "SELECT indexed_at FROM fts_cases WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()
+    assert stamp[0] == "2026-01-01T00:00:00Z"  # first-call stamp preserved
+    cp.close()
+    vw.close()
+
+
+def test_index_case_replaces_row_when_body_changes(tmp_path: Path) -> None:
+    """Same case_key, changed content → sha differs → row replaced. FTS
+    reflects the NEW body; old body no longer matches.
+    """
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<p>oldbodycontent unique1</p>")
+    index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso="2026-01-01T00:00:00Z")
+
+    # Change body on disk
+    _touch(paths["html"], "<p>newbodycontent unique2</p>")
+    r2 = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso="2026-02-01T00:00:00Z")
+
+    assert r2.action == "indexed"
+    assert r2.langs_indexed == ("en",)
+    # Only one row (not two)
+    count = vw.execute(
+        "SELECT COUNT(*) FROM fts_cases WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()
+    assert count == (1,)
+    # New sha != old
+    sha = vw.execute(
+        "SELECT body_sha256 FROM fts_cases WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()[0]
+    assert sha == body_sha256("newbodycontent unique2")
+    # FTS: old marker gone, new marker present
+    old_hits = vw.execute(
+        "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH ?",
+        ["unique1"],
+    ).fetchone()
+    new_hits = vw.execute(
+        "SELECT COUNT(*) FROM fts_body WHERE fts_body MATCH ?",
+        ["unique2"],
+    ).fetchone()
+    assert old_hits == (0,)
+    assert new_hits == (1,)
+    cp.close()
+    vw.close()
