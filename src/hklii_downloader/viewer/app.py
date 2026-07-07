@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from hklii_downloader.viewer.routes.case_detail import router as case_detail_router
 from hklii_downloader.viewer.routes.citations import router as citations_router
 from hklii_downloader.viewer.routes.court import router as court_router
+from hklii_downloader.viewer.routes.healthz import router as healthz_router
 from hklii_downloader.viewer.routes.home import router as home_router
 from hklii_downloader.viewer.routes.search import router as search_router
 from hklii_downloader.viewer.routes.year import router as year_router
@@ -48,4 +49,5 @@ def create_app(
     app.include_router(case_detail_router)
     app.include_router(citations_router)
     app.include_router(search_router)
+    app.include_router(healthz_router)
     return app
