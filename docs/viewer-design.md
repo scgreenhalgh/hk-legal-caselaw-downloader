@@ -374,18 +374,24 @@ hklii serve [-o/--output DIR]      # default: ./output
 30. `test/feat: /browse` requires court prefilter
 31. `test/feat: /authorities` index (banner when hub_cache empty)
 
-**Phase 5 — CLI + Style**:
-32. `test/feat: hklii serve` boots, binds 127.0.0.1:8787, GET / returns 200
-33. `test/feat: viewer.db missing exits 1` with actionable message
-34. `test/feat: bcp47 filter` maps 'tc' → 'zh-Hant'; `body_lang` drives `<article lang>`
-35. `test/feat: app.css` + sanitizer round-trip through golden fixtures
+**Phase 5 — CLI + Style** — DONE (2026-07-07):
+32. `test/feat: hklii serve` boots, binds 127.0.0.1:8787, GET / returns 200 ✓
+33. `test/feat: viewer.db missing exits 1` with actionable message ✓
+34. `test/feat: bcp47 filter` maps 'tc' → 'zh-Hant'; `body_lang` drives `<article lang>` ✓
+35. `test/feat: app.css` + sanitizer round-trip through golden fixtures ✓ (visual identity landed: Fraunces + Source Serif 4 + IBM Plex Sans / Mono, curial-rank Roman numeral rail, judicial scarlet)
 
-**Phase 6 — Contract + Integration** (in downloader package):
-36. Contract tests per shared table (cases, citations, citation_hub_cache, case_parallel_cites, ord_reg_edges, appeal_history JSON, generated HTML, press summary HTML)
-37. `assert_htmx_swap_matches` helper in `tests/conftest.py`
-38. `test_checkpoint_schema_matches_graph_selects` (EXPLAIN QUERY PLAN smoke test)
+**Phase 6 — Contract + Integration** (in downloader package) — DONE (2026-07-07):
+36. Contract tests per shared table (cases, citations, citation_hub_cache, case_parallel_cites, ord_reg_edges, appeal_history JSON, generated HTML, press summary HTML) ✓
+37. `assert_htmx_swap_matches` helper in `tests/conftest.py` ✓
+38. `test_checkpoint_schema_matches_graph_selects` (EXPLAIN QUERY PLAN smoke test) ✓
+39. Tier-4 hardening: `open_readonly` WAL contract test + `index_case` mid-loop-raise rollback + `.generated.html` sidecar constant ✓
 
-Total: ~40 commit pairs. Two-to-three focused working sessions. Every test paste-the-failing-output before implementation per CLAUDE.md non-negotiable #1.
+**Phase 7 — Real-corpus verification** — DONE (2026-07-07):
+40. Subset viewer.db built against hkcfa via `hklii viewer index -o output --court hkcfa --out /tmp/viewer_hkcfa.db` — processed=2154 indexed=2154 unchanged=0 no_body=0 pruned=0.
+41. `hklii serve` walk with playwright MCP over 9 target routes — all rendered without a 5xx. Screenshots at `scratchpad/phase7/*.png` (also copied to `/tmp/phase7_*.png` for the ship record). Only observed console noise: two 404s for nested `image018.png`/`image019.png` referenced from HKLII's original HTML — the case page itself is 200 OK.
+42. Full test suite green: 1202 passing.
+
+Total: ~42 commit pairs. Two-to-three focused working sessions. Every test paste-the-failing-output before implementation per CLAUDE.md non-negotiable #1.
 
 **Rationale**: Downloader migrations first prevents the citation-map angle from writing SQL against tables that don't exist. `graph.py` before routes prevents route code from carrying inline SQL that will later drift. HTMX partials tested with a swap-mode-aware helper closes the L4 wrong-side hazard specific to this UI pattern.
 
@@ -427,3 +433,40 @@ Recap of hard non-goals from the task brief + citation-graph-design.md §6:
 **Risks + mitigations**: (a) Someone re-litigates a non-goal — point at this section. (b) A v2 candidate turns out to be v1-critical for a real workflow — treat it as an unplanned promotion; add the smallest sufficient version.
 
 **Integration notes**: When any v2 candidate lands, revisit the corresponding v1 section for L1-L5 lens review before implementation. Each deferred item was analyzed once in this document; landing it should not skip a fresh look.
+
+## 13. Ship notes — worktree-local-viewer branch (2026-07-07)
+
+What the `worktree-local-viewer` branch actually contains, from a first checkout of the empty scaffold to the tagged ship:
+
+**Runtime surface**
+- `hklii serve` — boots uvicorn against a corpus + viewer.db, binds 127.0.0.1 only, `--port` (default 8787), `--dev` opt-in reload.
+- `hklii viewer index` — builds `viewer.db` (or `viewer.db.new` sidecar with atomic swap) from `<output>/.checkpoint.db` + on-disk body files. `--court` restricts by slug (repeatable), `--incremental` writes in place, `--commit-every` tunes the batch size.
+
+**Route inventory (10+ live routes)**
+- `/` home
+- `/court/{slug}` years grid
+- `/court/{slug}/{year}` cases list
+- `/case/{slug}/{year}/{num}` case detail + HTMX partials for cited-by / authorities-cited / parallel-cites
+- `/search` form + `/search?q=…` results
+- `/cite/{neutral}` 302 to case on hit, 200 unresolved on miss
+- `/authorities` hub index (with empty-cache banner)
+- `/browse` court-prefiltered list
+- `/healthz` JSON
+
+**Data layer**
+- Read-only `sqlite3.connect(?mode=ro, uri=True)` against `checkpoint.db` (no fcntl, safe under noteup writes) — pinned by a WAL contract test.
+- Separate `viewer.db` for FTS5 (trigram tokenizer, CJK 3-char match) + `case_bodies` + `viewer_hub_cache`.
+- `graph.py` at top-level of the downloader package for future RAG re-use — framework-agnostic, plain dicts.
+
+**Visual identity**
+- Serif display (Fraunces + Source Serif 4), IBM Plex Sans / Mono for chrome and citations.
+- Curial-rank Roman numeral rail, judicial scarlet accent (`.badge--apex`).
+- `prefers-color-scheme` only, no manual toggle (deferred).
+
+**Tests**
+- 1202 passing at ship. Every route has a contract test; every downloader-schema table the viewer reads has a paired contract test in `tests/contract/`. Tier-4 hardening covers WAL open-mode, mid-loop rollback in `index_case`, snippet-empty fallback, and the `.generated.html` sidecar constant.
+
+**Real-corpus verification (Phase 7)**
+- Subset build against hkcfa: 2154 cases processed and indexed, no unchanged / no_body / pruned rows.
+- Playwright MCP walk of all 9 routes on the running server: all render, all HTTP 200 (or the intended 302 for `/cite/`).
+- Known cosmetic gap: nested HKLII HTML references relative image assets (`FAMV000050_2024_files/image018.png`) that the viewer does not proxy — case page itself is 200 OK.
