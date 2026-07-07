@@ -74,6 +74,37 @@ def court_name(slug: str) -> str:
     return COURT_DISPLAY_NAMES.get(slug, slug.upper())
 
 
+#: BCP-47 mapping from internal lang codes to the tags emitted on
+#: ``<html>`` / ``<article>``. Design §9 line 262 pins ``'tc' → 'zh-Hant'``
+#: because the CJK font stack in ``app.css`` is targeted by the
+#: ``:lang(zh-Hant)`` selector — the script tag, not the region tag.
+#: Design §5 lines 120-121 treats legacy ``'zh'`` as an alias for
+#: ``'tc'`` (the checkpoint's pre-rename Traditional-Chinese label), so
+#: both codes must produce the same script tag.
+_BCP47_MAP: dict[str, str] = {
+    "en": "en",
+    "tc": "zh-Hant",
+    "zh": "zh-Hant",  # legacy alias — see §5 discriminator rules
+}
+
+
+def bcp47(lang: str) -> str:
+    """Return the BCP-47 tag for internal lang code ``lang``.
+
+    ``'en' → 'en'``, ``'tc' → 'zh-Hant'``, ``'zh' → 'zh-Hant'`` (legacy).
+    Any other input (including ``''``, region tags like ``'zh-CN'``, or
+    an unexpected checkpoint value) falls back to ``'en'`` so the
+    template always emits a valid ``lang`` attribute. See design §9
+    line 262 + §5 lines 120-121.
+
+    The fallback is a defence: HTML with an invalid ``lang=""`` fails
+    validators and confuses screen readers. In production the
+    discriminator only ever passes canonical codes; the fallback is
+    load-bearing only under drift.
+    """
+    return _BCP47_MAP.get(lang, "en")
+
+
 def thousands(value: int | float | str | None) -> str:
     """Format ``value`` with comma thousands separators.
 
