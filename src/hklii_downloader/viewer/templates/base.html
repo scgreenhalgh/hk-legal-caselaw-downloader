@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="{% block html_lang %}en{% endblock %}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <link rel="stylesheet" href="/static/pico.classless.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <title>{% block title %}HKLII viewer{% endblock %}</title>
+</head>
+<body>
+  <header class="viewer-header">
+    <a href="/" class="brand"><h1>HKLII</h1></a>
+    <nav aria-label="Primary">
+      <a href="/search">Search</a>
+    </nav>
+  </header>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

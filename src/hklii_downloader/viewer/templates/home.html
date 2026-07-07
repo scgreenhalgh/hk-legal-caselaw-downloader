@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}HKLII viewer — home{% endblock %}
+{% block content %}
+
+<section class="hero">
+  <h2 class="hero-title">Hong Kong case law,<br>1996 to 2024.</h2>
+  <p class="hero-tally">
+    162,331 judgments · 13 courts · English + 繁體中文
+  </p>
+</section>
+
+<section class="section" aria-labelledby="courts-heading">
+  <h3 id="courts-heading" class="section-label">Courts</h3>
+  <ol class="court-rail">
+    {% for tile in court_tiles %}
+    <li class="rail-row"
+        data-testid="court-tile"
+        data-court="{{ tile.slug }}"
+        data-count="{{ tile.count }}">
+      <a href="/court/{{ tile.slug }}">
+        <span class="rank">{{ tile.slug | curial_roman }}</span>
+        <span class="name">{{ tile.slug | court_name }}</span>
+        <span class="abbr">{{ tile.slug }}</span>
+        <span class="count">{{ tile.count | thousands }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ol>
+</section>
+
+<section class="section" aria-labelledby="recent-heading">
+  <h3 id="recent-heading" class="section-label">Recent judgments</h3>
+  {% if recent_cases %}
+  <ol class="recent-rail">
+    {% for c in recent_cases %}
+    <li class="recent-row"
+        data-testid="recent-case"
+        data-case-key="{{ c.court }}/{{ c.year }}/{{ c.number }}"
+        data-date="{{ c.date }}">
+      <a href="/case/{{ c.court }}/{{ c.year }}/{{ c.number }}">
+        <time datetime="{{ c.date }}">{{ c.date }}</time>
+        <span class="lines">
+          <span class="neutral">{{ c.neutral }}</span>
+          <span class="title">{{ c.title }}</span>
+        </span>
+      </a>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty">Nothing recorded yet — run <code>hklii download</code> to fill the corpus.</p>
+  {% endif %}
+</section>
+
+{% endblock %}

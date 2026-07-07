@@ -11,6 +11,10 @@ dependencies = [
     "httpx[socks,http2]>=0.28.1",
     "lxml>=6.1.1",
     "rich>=15.0.0",
+    # Viewer stack — local browser UI over the downloaded corpus
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "jinja2>=3.1.0",
 ]
 
 [project.scripts]

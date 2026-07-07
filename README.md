@@ -80,6 +80,36 @@ uv run hklii enrich -o ./downloads --direct -y
 
 For cases already downloaded, fetches the press summary (both languages, when available) and appeal history JSON.
 
+### `hklii viewer index` + `hklii serve` — offline read-only viewer
+
+Build an FTS5 index over your downloaded corpus, then boot a local browsable UI:
+
+```bash
+# Build the viewer's FTS5 index from checkpoint.db + on-disk HTML bodies
+uv run hklii viewer index -o ./output
+
+# Boot the viewer at http://127.0.0.1:8787
+uv run hklii serve -o ./output
+```
+
+Everything is single-user, localhost-only (127.0.0.1 hardcoded), no auth. The
+viewer opens `checkpoint.db` read-only (`mode=ro`, no fcntl) so it never blocks
+a concurrent `scrape` or `enrich` writer.
+
+**Subset build** — index only one court while iterating:
+
+```bash
+uv run hklii viewer index -o ./output --court hkcfa --out /tmp/viewer_hkcfa.db
+uv run hklii serve -o ./output --fts /tmp/viewer_hkcfa.db --port 8877
+```
+
+**Available routes**: `/`, `/court/{slug}`, `/court/{slug}/{year}`,
+`/case/{slug}/{year}/{num}` (with lazy HTMX partials for cited-by /
+authorities-cited / parallel-cites), `/search?q=…`, `/cite/{neutral}` (302
+resolver), `/authorities?court={slug}`, `/browse?court={slug}`, `/healthz`.
+
+Full design + non-goals in [`docs/viewer-design.md`](docs/viewer-design.md).
+
 ### URL Format
 
 ```

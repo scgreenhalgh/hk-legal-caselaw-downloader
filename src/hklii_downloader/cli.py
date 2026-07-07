@@ -34,6 +34,18 @@ def main(ctx):
         click.echo(ctx.get_help())
 
 
+# Phase 5 viewer boot — registered here (not decorated in viewer/cli.py)
+# so `hklii serve` reads as a peer of `hklii download` / `hklii scrape`.
+from hklii_downloader.viewer.cli import serve as _viewer_serve  # noqa: E402
+from hklii_downloader.viewer.cli import viewer as _viewer_group  # noqa: E402
+main.add_command(_viewer_serve, name="serve")
+# `hklii viewer index` — the FTS-build prerequisite for `hklii serve`.
+# Lives under a `viewer` subgroup so future viewer-side subcommands
+# (e.g. `hklii viewer hub-cache`) land as siblings without polluting
+# the top-level command list.
+main.add_command(_viewer_group, name="viewer")
+
+
 @main.command()
 @click.argument("urls", nargs=-1, required=True)
 @click.option(

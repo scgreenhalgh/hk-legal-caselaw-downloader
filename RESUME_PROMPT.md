@@ -1,144 +1,87 @@
 /effort max
 /ultracode
 
-You are resuming the HKLII project. Prior session shipped 3 review-pass
-rounds, 51 fixes across 54 commits — **all pushed to `origin/main`**.
-Corpus is stable (162,331 cases + 242,488 citations + 11,617 parallel
-cites + 4,506 ord/reg edges + ~6k legis). 786 tests pass.
+Resuming HKLII offline viewer. Phases 1-3 done: graph helpers, FTS
+pipeline, body-render pipeline — TDD pairs, two review rounds folded in.
+**977 tests pass. 57 commits ahead of `main`. Nothing pushed to origin.**
 
-**Immediate task (this session): design + build the offline viewer at
-`~/Developer/hklii_viewer` (branch `worktree-local-viewer`).**
-Search, filtering, case-to-case linking, citation-map view.
+**Immediate task: Phase 4 — 10 FastAPI routes.** TestClient + BS4
+assertions, no live server until Phase 5.
 
-## Load context (don't skim — but pull, don't preload)
-
-Open in order; each pull is small:
+## Load context (pull, don't preload)
 
 1. `~/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md`
-   — auto-memory index. Read every line; it points at the rest.
-2. `memory/whole-codebase-review-2026-07-07.md` — what shipped last
-   session, what's deferred, and the 5-lens methodology in use.
-3. `docs/review-patterns.md` — the 5 review lenses. Apply them
-   while coding the viewer, especially L4 (test the wrapper, not
-   just the wrapped) and L1 (no bare `except`).
-4. `docs/citation-graph-design.md` — SEED SPEC for the viewer.
-   Sections that matter: **§4.1** (helper contract in
-   `hklii/graph.py`), **§5** (RAG integration hooks — informs
-   metadata surface), **§6** (browser integration points — the
-   four HTMX routes). Design is 3 sessions old; treat as
-   starting point, not a spec.
-5. `memory/citation-graph-shipped.md` — data model summary.
-6. `memory/backup-coverage-final.md` — corpus scale (29 GB, 162k
-   judgments, formats per court).
+   — auto-memory index.
+2. `memory/session-close-2026-07-07-viewer-phases-1-3.md` — Phase 1-3
+   outcomes, tier-3/4 deferrals, SQLite footguns (UPSERT vs INSERT OR
+   REPLACE trigger-fire).
+3. `memory/viewer-build-through-phase-3.md` — module layout: `viewer/db.py`
+   `schema.py` `graph.py` `search.py` `body_render/{text,render,sanitizer,
+   cite}.py`. Read before adding modules — helpers exist.
+4. `~/Developer/hklii_viewer/docs/viewer-design.md` §§7-10 — route
+   contracts, templates, HTMX partials, error surfaces. **§11 line 320**
+   has Phase 4 ship order.
+5. `~/Developer/hklii_downloader/docs/review-patterns.md` — 5 lenses.
+   Apply at each pair: L1 silent skip, L2 semantic drift, L3 docstring
+   drift, L4 wrong-side test (route AND helper), L5 ambiguous state.
 
-## Session position (verify before starting)
+## Baseline (verify before starting)
 
 ```bash
-# Downloader repo — must be clean and level with origin
-cd /Users/seangreenhalgh/Developer/hklii_downloader
-git status
-git log --oneline origin/main..HEAD | wc -l   # 0
-
-# Suite — must still be green
-timeout 300 uv run pytest -q 2>&1 | tail -3    # 786 passed
-
-# Viewer worktree — clean, on the right branch
 cd ~/Developer/hklii_viewer
-git status
-git branch --show-current                       # worktree-local-viewer
+git status                                       # clean, worktree-local-viewer
+git log --oneline main..HEAD | wc -l             # 57
+timeout 300 uv run pytest -q 2>&1 | tail -3      # 977 passed
 
-# Corpus — snapshot to /tmp so we don't fight scrapers over WAL
-cp /Users/seangreenhalgh/Developer/hklii_downloader/output/.checkpoint.db /tmp/cp.db
-sqlite3 /tmp/cp.db "SELECT status, COUNT(*) FROM cases GROUP BY status;"
-sqlite3 /tmp/cp.db "SELECT COUNT(*) FROM citations;"
-sqlite3 /tmp/cp.db "SELECT COUNT(*) FROM case_parallel_cites;"
-sqlite3 /tmp/cp.db "SELECT COUNT(*) FROM ord_reg_edges;"
-sqlite3 /tmp/cp.db "SELECT COUNT(*) FROM legis_documents;"
+cd ~/Developer/hklii_downloader
+git status                                       # clean
+git log --oneline origin/main..HEAD | wc -l      # 0
 ```
 
-**Expected baseline:**
-- 786 tests pass (no drift from prior session's fixes)
-- Working tree clean apart from `scratchpad/`
-- 0 commits ahead of `origin/main` in the downloader repo
-- `~/Developer/hklii_viewer` exists on branch `worktree-local-viewer`,
-  clean, no viewer scaffolding yet — layout mirrors parent repo, but
-  `pyproject.toml` has `fastapi>=0.115.0 / uvicorn>=0.32.0 /
-  jinja2>=3.1.0` pre-declared under a "Viewer stack" comment
-- Corpus: 162,331 downloaded, 242,488 citations, etc.
+If any drifts, stop and surface.
 
-## Immediate task: offline viewer
+## Phase 4 sequencing (design §11 line 320)
 
-**Purpose:** browse the 162k HKLII case corpus + 242k citation graph
-offline, with:
+Ten routes as TDD pairs. Order matters — later reuse earlier templates:
 
-- **Full-text search** over judgment bodies (SQLite FTS5 is the
-  natural fit — same DB, no extra service)
-- **Filtering** by court, year, date range, has_translation,
-  has_summaries, format present
-- **Case linking** — click any citation `[YYYY] COURT N` to jump
-  to the cited case
-- **Citation map** — visualize inbound (who cited this) and
-  outbound (who this cites) edges per case
+1. `GET /` — home: recent cases + court tiles
+2. `GET /court/{slug}` — landing: year buckets + hub cases
+3. `GET /court/{slug}/{year}` — year: paginated case list
+4. `GET /case/{slug}/{cid}` — detail: metadata + rendered body
+5. `GET /case/{slug}/{cid}/cited-by` — HTMX partial: inbound
+6. `GET /case/{slug}/{cid}/authorities` — HTMX partial: outbound
+7. `GET /case/{slug}/{cid}/parallel` — HTMX partial: parallel cites
+8. `GET /search` — FTS form + BM25 results
+9. `GET /search/results` — HTMX partial: paginated results
+10. `GET /healthz` — DB open + schema-version check
 
-**Framework (already decided by pyproject.toml signals):**
-- FastAPI + uvicorn + Jinja2 templates
-- HTMX for interactivity (server-rendered — matches
-  design-doc §6)
-- No React / Vite / Solid / Svelte
-- No extra search service — SQLite FTS5
+Each pair: failing test (200, template renders, BS4 asserts element),
+then implementation. **Paste failing test output before implementing**
+(global rule #1). Two commits: `test: add failing test for route N`,
+then `feat: implement route N`. Never combine.
 
-**Non-goals (explicit):**
-- No online sync to HKLII (downloader owns that)
-- No user accounts / auth (single-user, local-only)
-- No force-directed graph explorer (§6: "lawyers work in ranked lists")
-- No treatment labels (applied/distinguished/overruled) — v2
-- No character-level pinpoints — v2
-- No search results ranking beyond FTS5's BM25 default
+## Design deviations locked in
 
-## Design phase — run this first as a workflow
+- **Option 3 scope**: viewer never writes `checkpoint.db`. Hub cache in
+  `viewer.db`. No `from_court` column added upstream.
+- **Body dispatch**: `select_body_source` prefers native `.html`, falls
+  back to `.generated.html`, invalidates via `format_availability_digest`.
+- **Sanitizer**: unwrap (form/button) / drop-subtree (script/style/iframe)
+  / void-drop (link/meta) — three sets, don't collapse.
+- **Citation linkifier**: HKLII pre-wraps neutral cites in `<a>`; regex
+  correctly skips. Zero additional wrapping on real bodies is expected.
 
-The design doc locks helper contracts (§4.1) + route shapes (§6) but
-leaves these viewer-build gaps open — hit each as a parallel angle:
+## Deferrals (do not re-open unless asked)
 
-| Angle | Question |
-|---|---|
-| Full-text search | FTS5 schema (which columns virtual? Chinese tokenisation for TC bodies?), query grammar (bare terms, `"quoted"`, `court:CFA`, `year:2020..2023`), result rendering |
-| Case body rendering | 162k judgments range 0–2 MB. Server-render inline? iframe the raw .html? Where does citation-highlighting fire (server-side regex over .html, or a client HTMX pass)? |
-| Browse & filter | `/court/{slug}/{year}` list pages. What columns? Pagination shape? |
-| Citation map viz | D3 vs Cytoscape vs plain SVG. Design doc says "no force-directed" — settle on hierarchical / list-based tree with click-to-expand? |
-| `hklii serve` CLI shape | Bind localhost only? Port? Live-reload? How does the viewer read `checkpoint.db` while scrapers write (open in `mode=ro&immutable=0` URI? WAL polling?) |
-| Styling | Tailwind CDN vs a classless framework (Pico?) vs vanilla. Legal-corpus body typography matters — serif for judgment text? |
-| Testing | Playwright / pytest-async? What's the golden-path e2e? How do the 5 review lenses map to a web UI? |
-
-**Recommended workflow shape:** fan out these 7 angles as parallel
-design agents, judge with an adversarial verify pass, synthesize a
-single design doc at `docs/viewer-design.md`. Then ship as TDD pairs.
-
-## Then build
-
-Per session CLAUDE.md rules: TDD always, atomic commits, test-first.
-Apply the 5 review lenses at each PR-scoped block:
-
-- **L1** silent skip — no bare `except`; observable side-effects only
-- **L2** semantic drift — grep all readers of shared state (the
-  `citation_hub_cache`, `formats`, `has_translation`) before writes
-- **L3** docstring drift — every non-trivial docstring is a test
-- **L4** wrong-side test — test the FastAPI route AND the helper it
-  calls; integration test the HTMX-driven partial swaps
-- **L5** ambiguous state — enumerate NULL / 0 / empty for every
-  nullable column the viewer reads
+- Tier-3: appeal_chain path traversal, sha+body_source drift, commit-per-
+  case fsync — Phase 5 with CLI + WAL story.
+- Tier-4 PLAUSIBLE: open-tx on mid-run raise, snippet empty-highlight,
+  open_readonly concurrent-writer test — Phase 6 with contract tests.
 
 ## Ready
 
-Run the baseline checks. If they hold, tell the user "clean baseline
-confirmed — launching viewer design workflow" and launch a Workflow
-that fans out the 7 design angles above.
+Run baseline. If clean, say "baseline clean, Phase 4 route 1 next" and
+start the first failing test. If baseline drifts, stop and surface.
 
-If baseline drifts (tests broken, unpushed commits, missing
-worktree), stop and surface. Do not start the viewer build on a
-drifting foundation.
-
-Do not touch the parent downloader repo unless a fix migrates from
-the viewer scope (e.g., a `graph.py` helper the viewer needs but
-belongs in the downloader package). If a cross-repo change is
-needed, ask before making it.
+Do not push to origin without ask. Do not touch downloader repo unless a
+helper migrates upstream (unlikely this phase).

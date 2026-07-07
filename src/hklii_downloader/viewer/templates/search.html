@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Search — HKLII viewer{% endblock %}
+{% block content %}
+
+<section class="search-section" aria-labelledby="search-heading">
+  <h2 id="search-heading">Search judgments</h2>
+
+  <form method="get" action="/search" data-testid="search-form" class="search-form">
+    <label for="q">Query</label>
+    <input type="search"
+           id="q"
+           name="q"
+           value="{{ query }}"
+           placeholder="Try “breach of contract” or 香港特別行政區"
+           minlength="3"
+           autocomplete="off">
+    <button type="submit">Search</button>
+  </form>
+
+  <div id="search-results-container">
+    {% include "partials/search_results.html" %}
+  </div>
+</section>
+
+{% endblock %}

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}{{ case.neutral }} — HKLII viewer{% endblock %}
+{% block content %}
+
+<article class="case-detail">
+  <header class="report-front" data-testid="case-metadata">
+    <p class="curial-badge">
+      <span class="rank">{{ case.court | curial_roman }}</span>
+      <span class="court">{{ case.court | court_name }}</span>
+    </p>
+    <p class="cite-neutral">{{ case.neutral }}</p>
+    <h2 class="parties-title">{{ case.title }}</h2>
+    <p class="delivery">
+      <time datetime="{{ case.date }}">{{ case.date }}</time>
+      <span class="middle-dot">·</span>
+      <span>{{ case.court | upper }}</span>
+    </p>
+  </header>
+
+  <section class="case-body" data-testid="case-body">
+    {{ body_html | safe }}
+  </section>
+
+  <div class="citation-sections">
+    <nav class="citation-tabs" aria-label="Citation panels">
+      <button type="button"
+              class="citation-tab"
+              data-testid="cited-by-tab"
+              hx-get="/case/{{ case_key }}/cited-by"
+              hx-target="#panel-cited-by"
+              hx-swap="innerHTML"
+              hx-trigger="click">Cited by</button>
+      <button type="button"
+              class="citation-tab"
+              data-testid="authorities-tab"
+              hx-get="/case/{{ case_key }}/authorities"
+              hx-target="#panel-authorities"
+              hx-swap="innerHTML"
+              hx-trigger="click">Cites</button>
+      <button type="button"
+              class="citation-tab"
+              data-testid="parallel-tab"
+              hx-get="/case/{{ case_key }}/parallel"
+              hx-target="#panel-parallel"
+              hx-swap="innerHTML"
+              hx-trigger="click">Also reported as</button>
+    </nav>
+
+    <div id="panel-cited-by" class="citation-panel"></div>
+    <div id="panel-authorities" class="citation-panel"></div>
+    <div id="panel-parallel" class="citation-panel"></div>
+  </div>
+</article>
+
+{% endblock %}

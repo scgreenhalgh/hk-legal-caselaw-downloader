@@ -1,0 +1,28 @@
+{% if rows %}
+<ol class="citation-list authorities-list" data-testid="authorities-list">
+  {% for r in rows %}
+  <li class="citation-row authorities-row"
+      data-testid="authorities-row"
+      data-to-key="{{ r.to_key }}"
+      data-to-court="{{ r.to_court }}"
+      data-first-seen="{{ r.first_seen }}">
+    <span class="rank">{{ r.to_court | curial_roman }}</span>
+    <a href="/case/{{ r.to_key }}" class="citation-anchor">{{ r.to_key }}</a>
+    <time datetime="{{ r.first_seen }}">{{ r.first_seen[:10] }}</time>
+    <span class="court-badge court-badge--{{ r.to_court }}">{{ r.to_court | upper }}</span>
+    <span class="langs">{{ r.langs }}</span>
+  </li>
+  {% endfor %}
+</ol>
+{% if rows | length == page_size %}
+<button type="button"
+        class="load-more"
+        data-testid="load-more"
+        hx-get="/case/{{ case_key }}/authorities?page={{ page + 1 }}"
+        hx-target="[data-testid=authorities-list]"
+        hx-swap="beforeend"
+        hx-trigger="click">Load next 50</button>
+{% endif %}
+{% else %}
+<p class="empty" data-testid="empty-authorities">This judgment cites nothing yet.</p>
+{% endif %}
