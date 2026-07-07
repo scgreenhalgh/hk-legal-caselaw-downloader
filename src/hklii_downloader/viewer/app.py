@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from hklii_downloader.viewer.routes.court import router as court_router
 from hklii_downloader.viewer.routes.home import router as home_router
+from hklii_downloader.viewer.routes.year import router as year_router
 
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -40,4 +41,5 @@ def create_app(
 
     app.include_router(home_router)
     app.include_router(court_router)
+    app.include_router(year_router)
     return app
