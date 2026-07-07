@@ -12,9 +12,12 @@ from pathlib import Path
 
 import pytest
 
+import json
+
 from hklii_downloader.viewer.db import open_readonly
 from hklii_downloader.viewer.graph import (
     ViewerCacheMissing,
+    appeal_chain,
     authorities_cited,
     cited_by,
     hub_cases,
@@ -537,3 +540,102 @@ def test_inbound_counts_empty_input_returns_empty_dict(tmp_path: Path) -> None:
         assert inbound_counts(conn, []) == {}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# appeal_chain — reads output/{court}/{year}/{stem}.appeal_history.json
+# ---------------------------------------------------------------------------
+
+
+_SAMPLE_CHAIN = [
+    {
+        "act": "CACC124/2013",
+        "judgments": [
+            {
+                "neutral": "[2013] HKCA 533",
+                "date": "2013-10-07",
+                "remarks": "",
+                "path": "/en/cases/hkca/2013/533",
+                "lang": "EN",
+            }
+        ],
+    },
+    {
+        "act": "DCCC860/2012",
+        "judgments": [
+            {
+                "neutral": "[2013] HKDC 352",
+                "date": "2013-03-12",
+                "remarks": "",
+                "path": "/en/cases/hkdc/2013/352",
+                "lang": "EN",
+            }
+        ],
+    },
+]
+
+
+def _seed_appeal_sidecar(
+    output_root: Path,
+    case_key: str,
+    chain: list[dict],
+) -> Path:
+    """Write output/{court}/{year}/{court}_{year}_{num}.appeal_history.json."""
+    court, year, num = case_key.split("/", 2)
+    dst = output_root / court / year / f"{court}_{year}_{num}.appeal_history.json"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(json.dumps(chain), encoding="utf-8")
+    return dst
+
+
+def test_appeal_chain_reads_expected_path_and_returns_parsed_json(
+    tmp_path: Path,
+) -> None:
+    """Path shape: output_root/{court}/{year}/{court}_{year}_{n}.appeal_history.json.
+    Returned value is the parsed JSON (list of acts) as-is.
+    """
+    _seed_appeal_sidecar(tmp_path, "hkdc/2013/352", _SAMPLE_CHAIN)
+    chain = appeal_chain(tmp_path, "hkdc/2013/352")
+    assert chain == _SAMPLE_CHAIN
+    assert len(chain) == 2
+    assert chain[0]["act"] == "CACC124/2013"
+
+
+def test_appeal_chain_no_sidecar_returns_empty_list(tmp_path: Path) -> None:
+    """Most cases in the corpus don't have appeal chains. File absence is
+    a legitimate 'no chain' signal, NOT a silent-skip (L1 nuance): the
+    caller intends to render an empty appeal-strip, not surface an error.
+    """
+    # tmp_path exists but no sidecar is written
+    assert appeal_chain(tmp_path, "hkcfa/2020/1") == []
+
+
+def test_appeal_chain_malformed_json_raises(tmp_path: Path) -> None:
+    """L1 strict lens: JSON parse errors must raise. A malformed sidecar
+    is a real data issue (partial write, disk corruption) — the viewer
+    surfaces it rather than silently pretending the case has no chain.
+    """
+    court, year, num = "hkcfa", "2020", "1"
+    dst = tmp_path / court / year / f"{court}_{year}_{num}.appeal_history.json"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text("not valid json {", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        appeal_chain(tmp_path, "hkcfa/2020/1")
+
+
+def test_appeal_chain_accepts_str_and_pathlib_output_root(tmp_path: Path) -> None:
+    _seed_appeal_sidecar(tmp_path, "hkdc/2013/352", _SAMPLE_CHAIN)
+    for arg in (str(tmp_path), tmp_path):
+        assert appeal_chain(arg, "hkdc/2013/352") == _SAMPLE_CHAIN
+
+
+def test_appeal_chain_malformed_case_key_raises_value_error(
+    tmp_path: Path,
+) -> None:
+    """A case_key without two slashes cannot resolve a path — raise, don't
+    silently return [].
+    """
+    with pytest.raises(ValueError):
+        appeal_chain(tmp_path, "just-a-string")
+    with pytest.raises(ValueError):
+        appeal_chain(tmp_path, "onlyone/slash")
