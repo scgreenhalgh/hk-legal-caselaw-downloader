@@ -13,8 +13,20 @@
       <time datetime="{{ r.date }}">{{ r.date }}</time>
     </a>
     {# snippet is plaintext body wrapped in <mark> by FTS5's snippet();
-       plaintext body means only <mark> markup lands, so | safe is XSS-clean. #}
-    <p class="snippet" data-testid="snippet">{{ r.snippet | safe }}</p>
+       plaintext body means only <mark> markup lands, so | safe is XSS-clean.
+
+       r.snippet_state ('content' | 'empty' | 'whitespace') is set by
+       _classify_snippet in routes/search.py. The two fallback states
+       share a marker paragraph so users see the row has a match, just
+       not one FTS5 could excerpt. data-snippet-state carries the
+       distinct L5 signal so tests and CSS can style/diagnose each. #}
+    {% if r.snippet_state == "content" %}
+    <p class="snippet" data-testid="snippet" data-snippet-state="content">{{ r.snippet | safe }}</p>
+    {% else %}
+    <p class="snippet snippet--fallback"
+       data-testid="snippet"
+       data-snippet-state="{{ r.snippet_state }}">{{ snippet_fallback }}</p>
+    {% endif %}
   </li>
   {% endfor %}
 </ol>
