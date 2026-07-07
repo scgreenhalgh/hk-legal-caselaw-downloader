@@ -183,3 +183,55 @@ def test_home_court_tile_links_to_court_landing(client: TestClient) -> None:
     anchor = hkcfa_tile.find("a", href=True)
     assert anchor is not None
     assert anchor["href"] == "/court/hkcfa"
+
+
+def test_home_courts_stay_synced_with_cli_all_courts() -> None:
+    """L2 drift guard: viewer's ``_HOME_COURTS`` must equal
+    ``cli.ALL_COURTS`` (as a set). The design's §7 verdict-integration
+    note flags this exact drift class — 'curial precedence collapses to
+    4 courts was L3 drift against the actual slug list'. A new court
+    added to the downloader's canonical list would otherwise silently
+    fall off the viewer home page.
+    """
+    from hklii_downloader.cli import ALL_COURTS
+    from hklii_downloader.viewer.routes.home import _HOME_COURTS
+
+    missing = set(ALL_COURTS) - set(_HOME_COURTS)
+    extra = set(_HOME_COURTS) - set(ALL_COURTS)
+    assert not missing and not extra, (
+        f"_HOME_COURTS drift vs cli.ALL_COURTS — missing: {missing}, extra: {extra}"
+    )
+
+
+def test_home_empty_corpus_shows_empty_state_not_broken_page(
+    tmp_path: Path,
+) -> None:
+    """L5 ambiguous-state: an empty corpus is a legitimate state (fresh
+    install, mid-migration) — the home page must render successfully and
+    surface the emptiness, not 500 and not silently render an empty list
+    that reads as a scraper failure.
+    """
+    checkpoint = tmp_path / "checkpoint.db"
+    viewer = tmp_path / "viewer.db"
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    _seed_cases(checkpoint, [])
+    _build_viewer_db(viewer)
+
+    app = create_app(
+        checkpoint_db=checkpoint,
+        viewer_db=viewer,
+        output_root=output_root,
+    )
+    client = TestClient(app)
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    soup = BeautifulSoup(resp.text, "html.parser")
+    # All 13 tiles still render — court-doesn't-exist vs no-cases-yet
+    # must remain distinct (courts always exist, cases might not).
+    tiles = soup.select("[data-testid=court-tile]")
+    assert len(tiles) == 13
+    # No recent-case rows; an explicit empty-state marker replaces them.
+    assert soup.select("[data-testid=recent-case]") == []
+    assert soup.select_one(".empty") is not None
