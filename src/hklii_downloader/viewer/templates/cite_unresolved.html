@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Citation not in corpus — HKLII viewer{% endblock %}
+{% block content %}
+
+<section class="cite-unresolved-section" data-testid="cite-unresolved">
+  <h2>Citation not in this corpus</h2>
+  <p class="empty">
+    We parsed &ldquo;<strong>{{ neutral }}</strong>&rdquo; as a
+    {{ parsed_court | court_name }} neutral citation
+    (<code>{{ parsed_court }}/{{ parsed_year }}/{{ parsed_number }}</code>),
+    but no matching case is in this local snapshot.
+  </p>
+  <p>
+    <a href="{{ search_href }}">Search the full-text index for
+      &ldquo;{{ neutral }}&rdquo;</a> &mdash; a nearby form may exist
+    under a variant spelling or an adjacent number.
+  </p>
+</section>
+
+{% endblock %}
