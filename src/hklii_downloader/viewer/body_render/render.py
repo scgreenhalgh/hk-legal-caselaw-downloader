@@ -12,12 +12,21 @@ against.
 
 from __future__ import annotations
 
+import functools
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
 from lxml import html as lxml_html
 
 from hklii_downloader.viewer.body_render.sanitizer import sanitize_body
+
+
+#: Bump this whenever the sanitizer rules change (or any element of the
+#: render pipeline that could produce a different output for the same
+#: input bytes). Every cached entry has the version embedded in its key,
+#: so a bump invalidates the whole cache on the next request.
+_SANITIZER_VERSION: str = "1"
 
 
 #: Language codes accepted at the route boundary. 'zh' is a legacy value
@@ -199,9 +208,63 @@ def _render_generated_fragment(html_bytes: bytes) -> str:
     return _extract_body_inner(sanitize_body(html_bytes))
 
 
+def _compute_format_digest(output_root: str | Path, case_row: dict) -> str:
+    """Hash of ``(has_html, has_tc_html, has_generated_html)`` for the case.
+
+    Invalidates the render cache when a new sibling arrives — even if
+    the currently-chosen source is byte-unchanged. Design §5 line 117:
+    'render `.generated.html`-only case → cache → create `.html` sibling
+    → re-request must re-render to native.'
+    """
+    court = case_row["court"]
+    year = case_row["year"]
+    number = case_row["number"]
+    stem = f"{court}_{year}_{number}"
+    d = Path(output_root) / court / str(year)
+    flags = (
+        (d / f"{stem}.html").exists(),
+        (d / f"{stem}.tc.html").exists(),
+        (d / f"{stem}.generated.html").exists(),
+    )
+    return hashlib.sha256(repr(flags).encode()).hexdigest()[:16]
+
+
+@functools.lru_cache(maxsize=256)
+def _cached_render_body(
+    path_str: str,
+    mtime_ns: int,
+    format_digest: str,
+    sanitizer_version: str,
+    lang: str,
+    generated_from: str,
+) -> str:
+    """Actual render pipeline — LRU-cached.
+
+    Key components (design §5 line 117):
+      - path_str + mtime_ns: source-file identity
+      - format_digest: sibling availability (invalidates on new .html
+        arriving next to a chosen .generated.html)
+      - sanitizer_version: pipeline-code invariant
+      - lang: passthrough (part of the wrapped output)
+      - generated_from: dispatch choice (native vs pandoc-fragment)
+
+    ``generated_from`` is a string not None|str so it hashes cleanly
+    ('' means native path).
+    """
+    with open(path_str, "rb") as f:
+        html_bytes = f.read()
+    if generated_from:
+        body_inner = _render_generated_fragment(html_bytes)
+    else:
+        body_inner = _render_native_hklii(html_bytes)
+    lang_attr = _to_bcp47(lang)
+    return f'<article lang="{lang_attr}">{body_inner}</article>'
+
+
 def render_case_body(
     render_source: RenderSource | None,
     case_row: dict,
+    output_root: str | Path,
 ) -> str:
     """Render a case body as sanitized HTML wrapped in ``<article>``.
 
@@ -210,21 +273,30 @@ def render_case_body(
         'rtf', 'pdf') → ``_render_generated_fragment``
       - else (native HKLII HTML) → ``_render_native_hklii``
 
-    Wraps the sanitized body in ``<article lang="{bcp47}">`` per
-    design §9 line 249. Missing ``render_source`` (route couldn't find
-    a body → 404-shape) yields ``<article lang="en"></article>`` so
-    the template still has a shell to render around.
+    Cached (design §5 line 117): the underlying
+    :func:`_cached_render_body` is ``functools.lru_cache(maxsize=256)``
+    keyed on ``(sanitizer_version, format_digest, source_path,
+    source_mtime, lang, generated_from)``. Format digest hashes the
+    presence of all three potential body files, so a new sibling
+    invalidates the cache even when the currently-chosen source is
+    byte-unchanged.
+
+    Wraps in ``<article lang="{bcp47}">`` per design §9 line 249.
+    Missing ``render_source`` (route couldn't find a body → 404-shape)
+    yields ``<article lang="en"></article>`` so the template still has
+    a shell to render around.
     """
     if render_source is None:
         return '<article lang="en"></article>'
 
-    html_bytes = render_source.path.read_bytes()
-    generated_from = case_row.get("html_generated_from")
-
-    if generated_from:
-        body_inner = _render_generated_fragment(html_bytes)
-    else:
-        body_inner = _render_native_hklii(html_bytes)
-
-    lang_attr = _to_bcp47(render_source.lang)
-    return f'<article lang="{lang_attr}">{body_inner}</article>'
+    format_digest = _compute_format_digest(output_root, case_row)
+    mtime_ns = render_source.path.stat().st_mtime_ns
+    generated_from = case_row.get("html_generated_from") or ""
+    return _cached_render_body(
+        path_str=str(render_source.path),
+        mtime_ns=mtime_ns,
+        format_digest=format_digest,
+        sanitizer_version=_SANITIZER_VERSION,
+        lang=render_source.lang,
+        generated_from=generated_from,
+    )
