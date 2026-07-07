@@ -1,0 +1,9 @@
+{% if cites %}
+<ul class="citation-list parallel-list" data-testid="parallel-list">
+  {% for cite in cites %}
+  <li class="parallel-row" data-testid="parallel-row">{{ cite }}</li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty" data-testid="empty-parallel">No parallel citations.</p>
+{% endif %}

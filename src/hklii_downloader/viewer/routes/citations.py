@@ -117,3 +117,31 @@ def authorities_partial(
             "page_size": _PAGE_SIZE,
         },
     )
+
+
+@router.get(
+    "/case/{slug}/{year}/{number}/parallel",
+    response_class=HTMLResponse,
+)
+def parallel_partial(
+    request: Request,
+    slug: str,
+    year: int,
+    number: int,
+) -> HTMLResponse:
+    if slug not in CANONICAL_COURTS:
+        raise HTTPException(status_code=404, detail="Unknown court")
+
+    case_key = f"{slug}/{year}/{number}"
+    conn = open_readonly(request.app.state.checkpoint_db)
+    try:
+        cites = parallel_cites(conn, case_key)
+    finally:
+        conn.close()
+
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "partials/parallel.html",
+        {"case_key": case_key, "cites": cites},
+    )
