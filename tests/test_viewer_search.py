@@ -829,3 +829,59 @@ def test_index_case_replaces_row_when_body_changes(tmp_path: Path) -> None:
     assert new_hits == (1,)
     cp.close()
     vw.close()
+
+
+def test_index_case_updates_body_source_when_kind_changes_same_sha(
+    tmp_path: Path,
+) -> None:
+    """Tier-3 finding: sha + body_source drift.
+
+    Same case_key, IDENTICAL plaintext, DIFFERENT on-disk source_kind
+    (e.g. ``.html`` renamed to ``.generated.html``). The fast-path
+    'existing.sha matches, skip' would silently keep the stale
+    body_source in fts_cases, so DB says 'html' while the served file
+    is 'generated.html'. Downstream body-source dispatchers and any
+    provenance UI that reads body_source would show the wrong source.
+
+    Fix: the fast-path also compares source_kind. Same sha AND same
+    source_kind → skip; any drift on either → UPSERT.
+    """
+    cp = _mk_cp(tmp_path)
+    vw = _mk_vw(tmp_path)
+    _seed_case(cp, "hkcfa/2020/32", lang="en")
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    body_html = "<p>Identical body text — this survives extraction.</p>"
+
+    # First index — .html source. Stored body_source = 'html'.
+    _touch(paths["html"], body_html)
+    r1 = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+    assert r1.action == "indexed"
+    row = vw.execute(
+        "SELECT body_source, body_sha256 FROM fts_cases WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()
+    assert row[0] == "html"
+    original_sha = row[1]
+
+    # Swap on disk: .html removed, .generated.html with identical content.
+    # discover_body_sources will now return source_kind='generated.html'.
+    paths["html"].unlink()
+    _touch(paths["generated.html"], body_html)
+
+    # Re-index. Sha is unchanged (same plaintext) — the old fast-path
+    # would have skipped and left body_source='html' stale.
+    r2 = index_case(vw, cp, tmp_path, "hkcfa/2020/32", now_iso=_FIXED_NOW)
+
+    # Assertions:
+    assert "en" in r2.langs_indexed, (
+        f"drift on source_kind must trigger an UPSERT, got action={r2.action}, "
+        f"langs_indexed={r2.langs_indexed}"
+    )
+    updated = vw.execute(
+        "SELECT body_source, body_sha256 FROM fts_cases WHERE case_key = ?",
+        ["hkcfa/2020/32"],
+    ).fetchone()
+    assert updated[0] == "generated.html"
+    assert updated[1] == original_sha  # sha unchanged, source_kind is what drifted
+    cp.close()
+    vw.close()
