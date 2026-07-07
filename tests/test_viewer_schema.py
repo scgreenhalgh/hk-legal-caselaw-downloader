@@ -44,6 +44,20 @@ def test_create_schema_is_idempotent(tmp_path: Path) -> None:
     conn.close()
 
 
+def test_create_schema_sets_journal_mode_wal(tmp_path: Path) -> None:
+    """Design doc §4 line 107 declares 'viewer.db created with PRAGMA
+    journal_mode=WAL'. Without it, viewer.db defaults to DELETE mode,
+    which grabs an exclusive lock on every commit — a running
+    `hklii serve` process would hit SQLITE_BUSY across the entire
+    `hklii viewer index --incremental` window (20+ min for full corpus).
+    """
+    conn = _fresh_db(tmp_path)
+    create_schema(conn)
+    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+    conn.close()
+
+
 def test_all_expected_tables_created(tmp_path: Path) -> None:
     conn = _fresh_db(tmp_path)
     create_schema(conn)
