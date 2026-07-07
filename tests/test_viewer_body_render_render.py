@@ -299,7 +299,7 @@ def test_render_case_body_native_path_when_html_generated_from_is_none(
         "</body></html>",
     )
     src = select_body_source(_case_row(), tmp_path, requested_lang="en")
-    out = render_case_body(src, _case_row(html_generated_from=None))
+    out = render_case_body(src, _case_row(html_generated_from=None), tmp_path)
 
     assert "<form" not in out  # unwrapped by sanitizer
     assert "HKSAR v CHAN" in out
@@ -348,3 +348,94 @@ def test_render_case_body_empty_file_yields_empty_article(
     src = select_body_source(_case_row(), tmp_path, requested_lang="en")
     out = render_case_body(src, _case_row(), tmp_path)
     assert out == '<article lang="en"></article>'
+
+
+# ---------------------------------------------------------------------------
+# Render cache — LRU keyed on (sanitizer_version, format_digest, path, mtime)
+# ---------------------------------------------------------------------------
+
+
+def test_render_case_body_cache_hits_on_repeat_call(tmp_path: Path) -> None:
+    """Second call with unchanged input hits the LRU cache."""
+    from hklii_downloader.viewer.body_render import render as render_mod
+
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<html><body><p>cache-me</p></body></html>")
+
+    src = select_body_source(_case_row(), tmp_path, requested_lang="en")
+    render_mod._cached_render_body.cache_clear()
+    r1 = render_case_body(src, _case_row(), tmp_path)
+    hits_before = render_mod._cached_render_body.cache_info().hits
+    r2 = render_case_body(src, _case_row(), tmp_path)
+    hits_after = render_mod._cached_render_body.cache_info().hits
+
+    assert r1 == r2
+    assert hits_after == hits_before + 1
+
+
+def test_render_cache_invalidated_when_new_html_sibling_appears(
+    tmp_path: Path,
+) -> None:
+    """Design §5 line 117 explicit test:
+    render `.generated.html`-only case → cache → create `.html` sibling
+    → re-request must re-render to native.
+
+    Mechanism: format_availability_digest changes when a sibling arrives,
+    the LRU key differs, and select_body_source picks the new higher-
+    priority source.
+    """
+    from hklii_downloader.viewer.body_render import render as render_mod
+
+    render_mod._cached_render_body.cache_clear()
+
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["generated.html"], "<p>pandoc fragment content</p>")
+    row = _case_row(html_generated_from="doc")
+
+    src1 = select_body_source(row, tmp_path, requested_lang="en")
+    assert src1.source_kind == "generated.html"
+    r1 = render_case_body(src1, row, tmp_path)
+    assert "pandoc fragment content" in r1
+
+    # A .html sibling arrives (upstream re-scrape found the native form)
+    _touch(paths["html"], "<html><body><p>native prose</p></body></html>")
+
+    # select_body_source now picks .html (higher priority)
+    src2 = select_body_source(row, tmp_path, requested_lang="en")
+    assert src2.source_kind == "html"
+
+    # Re-render must reflect the new source.
+    r2 = render_case_body(src2, row, tmp_path)
+    assert "native prose" in r2
+    assert r1 != r2
+
+
+def test_render_cache_invalidated_when_source_mtime_changes(
+    tmp_path: Path,
+) -> None:
+    """A byte-change to the currently-chosen source bumps mtime → cache miss."""
+    import os
+    import time
+
+    from hklii_downloader.viewer.body_render import render as render_mod
+
+    render_mod._cached_render_body.cache_clear()
+
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<html><body><p>version 1</p></body></html>")
+    src = select_body_source(_case_row(), tmp_path, requested_lang="en")
+    r1 = render_case_body(src, _case_row(), tmp_path)
+    assert "version 1" in r1
+
+    # Ensure mtime granularity is crossed
+    time.sleep(0.01)
+    paths["html"].write_text(
+        "<html><body><p>version 2</p></body></html>", encoding="utf-8"
+    )
+    # Force a distinct mtime in case the filesystem coalesces
+    st = paths["html"].stat()
+    os.utime(paths["html"], ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+
+    src2 = select_body_source(_case_row(), tmp_path, requested_lang="en")
+    r2 = render_case_body(src2, _case_row(), tmp_path)
+    assert "version 2" in r2
