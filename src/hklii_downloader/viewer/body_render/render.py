@@ -36,6 +36,16 @@ _SANITIZER_VERSION: str = "1"
 _VALID_REQUESTED_LANGS: frozenset[str] = frozenset({"en", "tc"})
 
 
+#: Filename suffix for pandoc-generated body sidecars. Written by the
+#: scraper next to the primary ``{stem}.html`` when the upstream body is
+#: only served as .doc/.rtf/.pdf. The suffix is part of the on-disk
+#: contract pinned by tests/contract/test_generated_html_contract.py —
+#: naming it here makes the sidecar shape a first-class module symbol
+#: instead of a repeated magic string across `discover_body_sources`,
+#: `select_body_source`, and `_compute_format_digest`.
+GENERATED_HTML_SUFFIX: str = ".generated.html"
+
+
 @dataclass(frozen=True)
 class RenderSource:
     """The on-disk body chosen for a render request.
@@ -109,7 +119,7 @@ def select_body_source(
     d = Path(output_root) / court / str(year)
     html_path = d / f"{stem}.html"
     tc_html_path = d / f"{stem}.tc.html"
-    gen_html_path = d / f"{stem}.generated.html"
+    gen_html_path = d / f"{stem}{GENERATED_HTML_SUFFIX}"
 
     if requested_lang == "tc":
         if tc_html_path.exists():
@@ -224,7 +234,7 @@ def _compute_format_digest(output_root: str | Path, case_row: dict) -> str:
     flags = (
         (d / f"{stem}.html").exists(),
         (d / f"{stem}.tc.html").exists(),
-        (d / f"{stem}.generated.html").exists(),
+        (d / f"{stem}{GENERATED_HTML_SUFFIX}").exists(),
     )
     return hashlib.sha256(repr(flags).encode()).hexdigest()[:16]
 
