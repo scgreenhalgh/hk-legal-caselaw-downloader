@@ -53,17 +53,38 @@ def test_allowed_attrs_includes_design_documented_six() -> None:
 
 @pytest.mark.parametrize(
     "tag",
-    ["script", "style", "link", "meta", "iframe",
-     "object", "embed", "form", "input", "button", "base"],
+    # Non-void reject tags — content between open/close is a real subtree
+    ["script", "style", "iframe", "object", "embed", "form", "button"],
 )
-def test_reject_tag_and_subtree_removed(tag: str) -> None:
-    """Each reject-list tag is dropped along with its content."""
+def test_non_void_reject_tag_and_subtree_removed(tag: str) -> None:
+    """Non-void reject-list tags are dropped along with their content."""
     html = f"<div>keep<{tag}>drop this</{tag}>also keep</div>"
     out = sanitize_body(html)
     assert "drop this" not in out
     assert "keep" in out
     assert "also keep" in out
     assert f"<{tag}" not in out
+
+
+@pytest.mark.parametrize(
+    "tag",
+    # Void reject tags — the tag itself gets stripped; there's no subtree
+    ["link", "meta", "input", "base"],
+)
+def test_void_reject_tag_removed_from_output(tag: str) -> None:
+    """Void reject tags (self-closing) are removed. Their real-world HKLII
+    occurrences are attributes-only (<link href='/lrs/x.css'>,
+    <meta charset=…>) — the tag itself is what we're stripping.
+
+    lxml treats text between <void>...</void> as sibling text, not
+    subtree content, so any surrounding text survives — which is what
+    a real render pipeline wants anyway.
+    """
+    html = f'<div>before<{tag} href="/x"/><span>after</span></div>'
+    out = sanitize_body(html)
+    assert f"<{tag}" not in out
+    assert "before" in out
+    assert "after" in out
 
 
 def test_reject_element_tail_preserved_on_parent(
