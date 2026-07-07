@@ -53,17 +53,59 @@ def test_allowed_attrs_includes_design_documented_six() -> None:
 
 @pytest.mark.parametrize(
     "tag",
-    # Non-void reject tags — content between open/close is a real subtree
-    ["script", "style", "iframe", "object", "embed", "form", "button"],
+    # Drop-subtree reject tags — content between open/close carries
+    # JS/CSS/binary payloads that must be excised entirely
+    ["script", "style", "iframe", "object", "embed"],
 )
-def test_non_void_reject_tag_and_subtree_removed(tag: str) -> None:
-    """Non-void reject-list tags are dropped along with their content."""
+def test_drop_subtree_reject_tag_and_content_removed(tag: str) -> None:
+    """Drop-subtree reject tags are removed along with everything inside."""
     html = f"<div>keep<{tag}>drop this</{tag}>also keep</div>"
     out = sanitize_body(html)
     assert "drop this" not in out
     assert "keep" in out
     assert "also keep" in out
     assert f"<{tag}" not in out
+
+
+@pytest.mark.parametrize(
+    "tag",
+    # Unwrap tags — HKLII wraps judgment content in <form name="search_body">;
+    # dropping the subtree would strip the entire judgment (verified against
+    # hkcfa/2013/hkcfa_2013_11.html: 27KB → 119 chars with the drop-only
+    # strategy). Unwrap keeps children, drops only the tag itself.
+    ["form", "button"],
+)
+def test_unwrap_reject_tag_removes_tag_but_preserves_content(
+    tag: str,
+) -> None:
+    """Unwrap-tag content survives; only the tag itself disappears."""
+    html = f'<div>before<{tag} name="x">judgment prose</{tag}>after</div>'
+    out = sanitize_body(html)
+    assert f"<{tag}" not in out
+    assert "judgment prose" in out  # content promoted into parent
+    assert "before" in out
+    assert "after" in out
+
+
+def test_hklii_form_wrapper_unwraps_body_content(
+) -> None:
+    """Regression: real HKLII judgments look like <html><body>
+    <form name="search_body"><table>...judgment...</table></form>
+    </body></html>. Dropping <form> would zero the body; the sanitizer
+    must unwrap so downstream sees a sensible body.
+    """
+    html = (
+        "<html><body>"
+        '<form name="search_body">'
+        "<table><tr><td>FACC No. 8 of 2012</td></tr></table>"
+        "<parties>HKSAR v CHAN HOI TAT</parties>"
+        "</form>"
+        "</body></html>"
+    )
+    out = sanitize_body(html)
+    assert "<form" not in out
+    assert "FACC No. 8 of 2012" in out
+    assert "<parties>HKSAR v CHAN HOI TAT</parties>" in out
 
 
 @pytest.mark.parametrize(
