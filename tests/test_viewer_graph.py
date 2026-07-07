@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 from hklii_downloader.viewer.db import open_readonly
-from hklii_downloader.viewer.graph import cited_by
+from hklii_downloader.viewer.graph import (
+    authorities_cited,
+    cited_by,
+    parallel_cites,
+)
 
 
 # Mirror of the shipped citations table (see hklii_downloader.checkpoint._SCHEMA).
@@ -29,6 +33,29 @@ CREATE TABLE citations (
 ) WITHOUT ROWID;
 """
 _CITATIONS_INDEX = "CREATE INDEX idx_cit_to ON citations(to_key);"
+
+# Mirror of the shipped case_parallel_cites table.
+_PARALLEL_CITES_DDL = """
+CREATE TABLE case_parallel_cites (
+    case_key      TEXT NOT NULL,
+    parallel_cite TEXT NOT NULL,
+    PRIMARY KEY (case_key, parallel_cite)
+) WITHOUT ROWID;
+"""
+
+
+def _seed_parallel_cites(
+    db_path: Path,
+    rows: list[tuple[str, str]],
+) -> None:
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(_PARALLEL_CITES_DDL)
+    conn.executemany(
+        "INSERT INTO case_parallel_cites (case_key, parallel_cite) VALUES (?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
 
 
 def _seed_citations(
@@ -179,5 +206,126 @@ def test_cited_by_returns_derived_from_court_column(tmp_path: Path) -> None:
     try:
         rows = cited_by(conn, "hkcfa/2020/1")
         assert rows[0]["from_court"] == "hkcfa"
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# authorities_cited — symmetric to cited_by; WHERE from_key=? GROUP BY to_key
+# ---------------------------------------------------------------------------
+
+
+def test_authorities_cited_orders_by_cited_court_precedence(tmp_path: Path) -> None:
+    """authorities_cited orders cited (to_key) courts by curial precedence.
+
+    Same citer (hkcfi/2023/155) cites 4 cases across 3 courts. Expected order:
+    CFA, then CA, then CFI, with first_seen DESC within same court.
+    """
+    db = tmp_path / "checkpoint.db"
+    _seed_citations(
+        db,
+        [
+            ("hkcfi/2023/155", "hkca/2018/524",  "en", 5, 1, "2023-01-01T00:00:00"),
+            ("hkcfi/2023/155", "hkcfa/2019/50",  "en", 8, 2, "2023-02-01T00:00:00"),
+            ("hkcfi/2023/155", "hkcfi/2020/22",  "en", 3, 3, "2023-03-01T00:00:00"),
+            ("hkcfi/2023/155", "hkcfi/2021/99",  "en", 2, 4, "2023-04-01T00:00:00"),
+        ],
+    )
+    conn = open_readonly(db)
+    try:
+        rows = authorities_cited(conn, "hkcfi/2023/155")
+        keys = [r["to_key"] for r in rows]
+        assert keys == [
+            "hkcfa/2019/50",   # CFA (rank 0)
+            "hkca/2018/524",   # CA  (rank 1)
+            "hkcfi/2021/99",   # CFI (rank 2), later first_seen
+            "hkcfi/2020/22",   # CFI (rank 2), earlier first_seen
+        ]
+    finally:
+        conn.close()
+
+
+def test_authorities_cited_dedupes_bilingual_citer_lang(tmp_path: Path) -> None:
+    """Bilingual (en+tc) citation of the same target collapses to one row."""
+    db = tmp_path / "checkpoint.db"
+    _seed_citations(
+        db,
+        [
+            ("hkcfi/2023/155", "hkcfa/2019/50", "en", 8, 1, "2023-01-01T00:00:00"),
+            ("hkcfi/2023/155", "hkcfa/2019/50", "tc", 8, 1, "2023-01-01T00:00:00"),
+        ],
+    )
+    conn = open_readonly(db)
+    try:
+        rows = authorities_cited(conn, "hkcfi/2023/155")
+        assert len(rows) == 1
+        assert rows[0]["to_key"] == "hkcfa/2019/50"
+        assert set(rows[0]["langs"].split(",")) == {"en", "tc"}
+    finally:
+        conn.close()
+
+
+def test_authorities_cited_unknown_case_returns_empty_list(tmp_path: Path) -> None:
+    db = tmp_path / "checkpoint.db"
+    _seed_citations(db, [])
+    conn = open_readonly(db)
+    try:
+        assert authorities_cited(conn, "hkcfa/9999/999") == []
+    finally:
+        conn.close()
+
+
+def test_authorities_cited_returns_derived_to_court_column(tmp_path: Path) -> None:
+    """Row shape includes to_court (SQL-derived via substr on to_key)."""
+    db = tmp_path / "checkpoint.db"
+    _seed_citations(
+        db,
+        [
+            ("hkcfi/2023/155", "hkcfa/2019/50", "en", 8, 1, "2023-01-01T00:00:00"),
+        ],
+    )
+    conn = open_readonly(db)
+    try:
+        rows = authorities_cited(conn, "hkcfi/2023/155")
+        assert rows[0]["to_court"] == "hkcfa"
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# parallel_cites — SELECT parallel_cite FROM case_parallel_cites WHERE case_key=?
+# ---------------------------------------------------------------------------
+
+
+def test_parallel_cites_returns_sorted_list_of_strings(tmp_path: Path) -> None:
+    """List of parallel citation strings, sorted ASC for stable rendering."""
+    db = tmp_path / "checkpoint.db"
+    _seed_parallel_cites(
+        db,
+        [
+            ("hkcfa/2020/1", "[2021] 6 HKC 46"),
+            ("hkcfa/2020/1", "(2020) 23 HKCFAR 100"),
+            ("hkcfa/2020/1", "[2020] HKCFA 32"),
+        ],
+    )
+    conn = open_readonly(db)
+    try:
+        cites = parallel_cites(conn, "hkcfa/2020/1")
+        assert cites == [
+            "(2020) 23 HKCFAR 100",
+            "[2020] HKCFA 32",
+            "[2021] 6 HKC 46",
+        ]
+    finally:
+        conn.close()
+
+
+def test_parallel_cites_unknown_case_returns_empty_list(tmp_path: Path) -> None:
+    """L5: missing case is not an error — just no parallel cites."""
+    db = tmp_path / "checkpoint.db"
+    _seed_parallel_cites(db, [])
+    conn = open_readonly(db)
+    try:
+        assert parallel_cites(conn, "hkcfa/9999/999") == []
     finally:
         conn.close()
