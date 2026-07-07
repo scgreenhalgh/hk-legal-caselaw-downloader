@@ -242,11 +242,19 @@ def index_case(
         sha = body_sha256(plaintext)
 
         existing = vw_conn.execute(
-            "SELECT body_sha256 FROM fts_cases "
+            "SELECT body_sha256, body_source FROM fts_cases "
             "WHERE case_key = ? AND lang = ?",
             [case_key, source.lang],
         ).fetchone()
-        if existing is not None and existing[0] == sha:
+        # Tier-3 fix: skip only when BOTH sha and source_kind match. A
+        # rename like .html → .generated.html preserves plaintext (same
+        # sha) but changes body_source. Sha-only skip would leave the
+        # stored body_source pointing at the old kind.
+        if (
+            existing is not None
+            and existing[0] == sha
+            and existing[1] == source.source_kind
+        ):
             unchanged.append(source.lang)
             continue
 
