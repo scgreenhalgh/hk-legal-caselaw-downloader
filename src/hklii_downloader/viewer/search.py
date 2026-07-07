@@ -263,13 +263,18 @@ def build_index(
     unchanged = 0
     no_body = 0
 
-    if courts:
+    # L5 ambiguous-state: courts=None means 'all courts' (no filter);
+    # courts=[] means 'zero courts' (a legitimate no-op signal — e.g.
+    # a CLI intersected --courts with the shipped list and found no
+    # overlap). Do NOT collapse to the same path — that silently kicks
+    # off a full-corpus rebuild instead of a no-op.
+    if courts is None:
+        q = "SELECT court, year, number FROM cases"
+        params: list[object] = []
+    else:
         placeholders = ",".join(["?"] * len(courts))
         q = f"SELECT court, year, number FROM cases WHERE court IN ({placeholders})"
-        params: list[object] = list(courts)
-    else:
-        q = "SELECT court, year, number FROM cases"
-        params = []
+        params = list(courts)
 
     for row in cp_conn.execute(q, params):
         case_key = f"{row[0]}/{row[1]}/{row[2]}"
