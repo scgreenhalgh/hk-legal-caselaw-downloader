@@ -28,6 +28,40 @@ _PAGE_SIZE = 50
 FTS_HIGHLIGHT_START: str = "<mark>"
 FTS_HIGHLIGHT_END: str = "</mark>"
 
+#: L5 (ambiguous state) marker rendered when FTS5's snippet() cannot
+#: produce visible highlighted text — typically because the match hit
+#: only the title column and the body column is empty or whitespace.
+#: Template uses this as the paragraph body; ``data-snippet-state``
+#: records the underlying cause (``empty`` vs ``whitespace``) so tests
+#: and later CSS work can distinguish the two without collapsing them.
+FTS_SNIPPET_FALLBACK: str = "(match outside displayed excerpt)"
+
+
+def _classify_snippet(snippet: str) -> str:
+    """Return the L5-distinct state for a snippet string.
+
+    * ``empty``      — FTS5 returned ``""`` (body column had no content,
+                       so ``snippet(fts_body, col=1, …)`` had nothing to
+                       excerpt).
+    * ``whitespace`` — snippet is non-empty but ``.strip()`` collapses
+                       it to nothing visible (body existed but was
+                       whitespace-only after sanitizer collapse).
+    * ``content``    — snippet has real characters. Normally contains
+                       ``<mark>…</mark>`` around matched tokens, but a
+                       title-only match with a real-content body still
+                       lands here (the leading tokens are shown without
+                       highlights, which is the intended FTS5 default).
+
+    The three values MUST stay distinct — collapsing ``empty`` and
+    ``whitespace`` into a single ``blank`` value would re-introduce
+    the ambiguous state this classifier exists to eliminate.
+    """
+    if snippet == "":
+        return "empty"
+    if snippet.strip() == "":
+        return "whitespace"
+    return "content"
+
 
 def _escape_fts_query(q: str) -> str:
     """Wrap the raw user query as an FTS5 quoted phrase.
@@ -76,7 +110,14 @@ def _search_bm25(
         (escaped, per_page, offset),
     )
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()], total
+    rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+    # Attach the L5 signal so the template can pick the fallback branch
+    # rather than rendering a visually-blank <p> when snippet() returns
+    # "" or whitespace-only. See ``_classify_snippet`` for the three
+    # distinct states.
+    for r in rows:
+        r["snippet_state"] = _classify_snippet(r["snippet"])
+    return rows, total
 
 
 router = APIRouter()
@@ -110,6 +151,7 @@ def search_page(
             "total": total,
             "page": page,
             "page_size": _PAGE_SIZE,
+            "snippet_fallback": FTS_SNIPPET_FALLBACK,
         },
     )
 
@@ -137,5 +179,6 @@ def search_results_partial(
             "total": total,
             "page": page,
             "page_size": _PAGE_SIZE,
+            "snippet_fallback": FTS_SNIPPET_FALLBACK,
         },
     )
