@@ -134,3 +134,66 @@ def test_hklii_semantic_tags_pass_through() -> None:
     html = "<parties><p>plaintiff v defendant</p></parties>"
     result = list(iter_text_nodes(html))
     assert result == ["plaintiff v defendant"]
+
+
+def test_empty_bytes_input_returns_empty_iter_without_raising() -> None:
+    """Regression: lxml.html.fromstring('') raises ParserError 'Document
+    is empty'. A 0-byte body file on disk was aborting the full-corpus
+    build_index. Guard: iter_text_nodes returns [] for empty/whitespace-only.
+
+    extract_plaintext's docstring promises 'Empty body → empty string' —
+    the walker underlying it must not raise.
+    """
+    assert list(iter_text_nodes(b"")) == []
+    assert list(iter_text_nodes("")) == []
+
+
+def test_whitespace_only_input_returns_empty_iter() -> None:
+    """Same as empty-bytes case: fromstring raises on whitespace-only too."""
+    assert list(iter_text_nodes(b"   \n\t  ")) == []
+    assert list(iter_text_nodes("   \n\t  ")) == []
+
+
+def test_html_comment_content_not_yielded() -> None:
+    """Regression: lxml.html.fromstring preserves HTML comments as Comment
+    nodes whose .tag is a cyfunction (not a str). Previous _walk guard
+    `if isinstance(tag, str)` set tag=None for those, and the skip-check
+    short-circuited, so element.text + .tail leaked into extract_plaintext
+    → FTS-indexed as body text.
+
+    Fix: non-str tags are treated as skip-subtrees. Their .tail belongs
+    to the parent (visible between the comment and the next tag), so
+    the tail is preserved.
+    """
+    html = "<p>before<!-- SECRET NOTE -->after</p>"
+    result = list(iter_text_nodes(html))
+    assert "SECRET" not in " ".join(result)
+    assert "NOTE" not in " ".join(result)
+    # But tail 'after' is preserved (parent's text between the comment
+    # and end of <p>).
+    assert "after" in result
+    assert "before" in result
+
+
+def test_ie_conditional_comment_not_yielded() -> None:
+    """IE conditional comments in legacy HKLII HTML must not leak."""
+    html = (
+        "<body>"
+        "<!--[if lt IE 9]>legacy stuff<![endif]-->"
+        "<p>real prose</p>"
+        "</body>"
+    )
+    result = " ".join(iter_text_nodes(html))
+    assert "real prose" in result
+    assert "legacy stuff" not in result
+    assert "IE" not in result
+
+
+def test_processing_instruction_content_not_yielded() -> None:
+    """<?xml-stylesheet ...?> — ProcessingInstruction nodes also have
+    non-str .tag; same skip-subtree treatment.
+    """
+    html = '<?xml-stylesheet href="/x.css" type="text/css"?><p>body</p>'
+    result = list(iter_text_nodes(html))
+    assert "xml-stylesheet" not in " ".join(result)
+    assert "body" in result
