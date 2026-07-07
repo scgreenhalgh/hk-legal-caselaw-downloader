@@ -154,6 +154,23 @@ def test_whitespace_only_input_returns_empty_iter() -> None:
     assert list(iter_text_nodes("   \n\t  ")) == []
 
 
+def test_content_that_parses_to_nothing_returns_empty_iter() -> None:
+    """Coverage gap the initial fix missed: strip-truthy inputs that lxml
+    still can't parse (comment-only, DOCTYPE-only, PI-only) also raise
+    ParserError('Document is empty'). A rare corpus edge case (pandoc
+    emitting just a DOCTYPE, retracted-content sidecar with a comment
+    placeholder) would abort the full-corpus build_index the same way
+    the truly-empty case did before the first fix.
+    """
+    for html in [
+        "<!-- placeholder for retracted content -->",
+        "<!DOCTYPE html>",
+        '<?xml-stylesheet href="x.css"?>',
+        "<!--one--><!--two-->",
+    ]:
+        assert list(iter_text_nodes(html)) == [], f"failed on {html!r}"
+
+
 def test_html_comment_content_not_yielded() -> None:
     """Regression: lxml.html.fromstring preserves HTML comments as Comment
     nodes whose .tag is a cyfunction (not a str). Previous _walk guard
