@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}
+{%- if missing_court -%}
+Browse — HKLII viewer
+{%- else -%}
+Browse · {{ court_slug | court_name }}{% if year %} · {{ year }}{% endif %} — HKLII viewer
+{%- endif -%}
+{% endblock %}
+{% block content %}
+
+{% if missing_court %}
+<header class="court-page-heading">
+  <h2>Browse the corpus</h2>
+  <span class="abbr">Pick a court to begin</span>
+</header>
+
+<p class="banner" data-testid="browse-missing-court">
+  Choose a court to browse. The corpus is too large to render unfiltered;
+  add <code>?court=&lt;slug&gt;</code> to the URL, or pick from the list
+  below.
+</p>
+
+<section class="section" aria-labelledby="courts-heading">
+  <h3 id="courts-heading" class="section-label">Courts</h3>
+  <ul class="court-picker">
+    {% for slug in courts %}
+    <li>
+      <a href="/browse?court={{ slug }}" data-testid="browse-court-pick" data-slug="{{ slug }}">
+        <span class="rank">{{ slug | curial_roman }}</span>
+        <span class="name">{{ slug | court_name }}</span>
+        <span class="abbr">{{ slug }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+
+{% else %}
+
+<header class="court-page-heading">
+  <span class="rank">{{ court_slug | curial_roman }}</span>
+  <h2>{{ court_slug | court_name }}</h2>
+  <span class="abbr">{{ court_slug }}{% if year %} · {{ year }}{% endif %}</span>
+</header>
+
+<nav class="browse-controls" aria-label="Sort" data-testid="browse-controls">
+  <span class="section-label">Sort</span>
+  <ul class="sort-tabs">
+    {% for mode in sort_modes %}
+    <li>
+      <a
+        href="/browse?court={{ court_slug }}{% if year %}&year={{ year }}{% endif %}&sort={{ mode }}"
+        data-testid="sort-link"
+        data-sort="{{ mode }}"
+        {% if mode == sort %}aria-current="page" class="active"{% endif %}
+      >{{ mode }}</a>
+    </li>
+    {% endfor %}
+  </ul>
+</nav>
+
+{% if cases %}
+<table class="case-table">
+  <thead>
+    <tr>
+      <th scope="col">Neutral</th>
+      <th scope="col">Parties</th>
+      <th scope="col">Date</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in cases %}
+    <tr class="case-row"
+        data-testid="case-row"
+        data-case-key="{{ c.court }}/{{ c.year }}/{{ c.number }}"
+        data-date="{{ c.date }}">
+      <td class="neutral">
+        <a href="/case/{{ c.court }}/{{ c.year }}/{{ c.number }}">{{ c.neutral }}</a>
+      </td>
+      <td class="title">{{ c.title }}</td>
+      <td class="date">
+        <time datetime="{{ c.date }}">{{ c.date }}</time>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<nav class="pager"
+     data-testid="pager"
+     data-page="{{ page }}"
+     data-total-pages="{{ total_pages }}"
+     data-total="{{ total }}"
+     aria-label="Pagination">
+  {% if page > 1 %}
+  <a class="pager-prev"
+     href="/browse?court={{ court_slug }}{% if year %}&year={{ year }}{% endif %}&sort={{ sort }}&page={{ page - 1 }}">← Previous</a>
+  {% else %}<span></span>{% endif %}
+  <span class="page-info">Page {{ page }} of {{ total_pages }}</span>
+  {% if page < total_pages %}
+  <a class="pager-next"
+     href="/browse?court={{ court_slug }}{% if year %}&year={{ year }}{% endif %}&sort={{ sort }}&page={{ page + 1 }}">Next →</a>
+  {% else %}<span></span>{% endif %}
+</nav>
+{% else %}
+<p class="empty" data-testid="empty-browse">
+  Nothing recorded in {{ court_slug | court_name }}{% if year %} for {{ year }}{% endif %}.
+</p>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}
