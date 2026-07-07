@@ -23,13 +23,24 @@ regression that blocks a legitimate SELECT would also surface here.
   individually. A NULL leaking past ``mark_legis_downloaded`` (e.g. the
   UPDATE mis-targets the row) fails the specific column, not a shrugged
   "row exists".
+* **L2 semantic drift** — ``formats`` is JSON-encoded in the shipped
+  writer; the parity check against ``cases.formats`` catches a future
+  drift where one table stays JSON and the other moves to CSV/repr().
 * **L4 wrong-side** — write via the real public API + read via the real
   viewer connection surface. No test-internal shortcut on either side.
+* **L5 ambiguous state** — the PK-rejection test uses a raw INSERT (not
+  the checkpoint upsert's ``ON CONFLICT DO UPDATE``) so we distinguish
+  "schema PK enforced" from "API absorbs conflicts". Two different
+  guarantees; conflating them would hide a schema-drift bug.
 """
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from hklii_downloader.checkpoint import CheckpointDB
 from hklii_downloader.viewer.db import open_readonly
@@ -136,7 +147,112 @@ class TestLegisDocumentsContract:
         assert latest_version_date == CANONICAL["latest_version_date"]
         assert status == CANONICAL["status"]
         # formats is stored as a JSON string — assert non-NULL here and
-        # the JSON round-trip lens covers the parse-back semantics.
+        # exhaustively round-trip it in the dedicated test below.
         assert formats_json is not None, (
             "mark_legis_downloaded left formats NULL — writer regression"
         )
+
+    def test_primary_key_rejects_duplicate_raw_insert(
+        self, tmp_path: Path,
+    ) -> None:
+        """Schema PK (abbr, num, lang) is enforced at the SQLite layer.
+
+        Uses raw INSERT — NOT the checkpoint upsert, which has
+        ``ON CONFLICT ... DO UPDATE`` and would absorb the collision.
+        The alarm this test exists for: a migration that widens the PK
+        (e.g. adds ``latest_vid`` to it, or drops ``lang``) would let
+        two rows with the same (abbr, num, lang) coexist and silently
+        corrupt every viewer query that assumes uniqueness.
+        L5 lens — distinguish "schema enforces PK" from "API absorbs
+        conflicts"; two different guarantees, don't conflate.
+        """
+        cp_path = tmp_path / "checkpoint.db"
+        _seed_and_close(cp_path)
+
+        # Raw writable connection — bypass CheckpointDB's ON CONFLICT
+        # UPDATE and hit the schema constraint directly. Not open_readonly
+        # because that would block writes before we could probe the PK.
+        conn = sqlite3.connect(str(cp_path))
+        try:
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO legis_documents "
+                    "(abbr, num, lang, title, status) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        CANONICAL["abbr"],
+                        CANONICAL["num"],
+                        CANONICAL["lang"],
+                        "Any Other Title",
+                        "pending",
+                    ),
+                )
+        finally:
+            conn.close()
+
+    def test_formats_column_json_round_trips_and_matches_cases_shape(
+        self, tmp_path: Path,
+    ) -> None:
+        """``formats`` is a JSON-encoded list-of-str, same shape as
+        ``cases.formats``.
+
+        Two guarantees pinned in one test:
+        1. Writer serializes to JSON → reader parses back to the
+           identical Python list (values + order + element types).
+        2. Serialization format is CONSISTENT with ``cases.formats``,
+           the sibling table that ``mark_downloaded`` writes with the
+           same JSON convention. A future refactor that moves one table
+           to CSV/repr() while the other stays JSON fails this test —
+           L2 semantic-drift lens.
+        """
+        cp_path = tmp_path / "checkpoint.db"
+        _seed_and_close(cp_path)
+
+        conn = open_readonly(str(cp_path))
+        try:
+            legis_formats_json = conn.execute(
+                "SELECT formats FROM legis_documents "
+                "WHERE abbr=? AND num=? AND lang=?",
+                (CANONICAL["abbr"], CANONICAL["num"], CANONICAL["lang"]),
+            ).fetchone()[0]
+        finally:
+            conn.close()
+
+        # Guarantee 1: JSON round-trip preserves list-of-str exactly.
+        assert legis_formats_json is not None
+        parsed = json.loads(legis_formats_json)
+        assert parsed == CANONICAL["formats"]
+        assert isinstance(parsed, list)
+        assert all(isinstance(x, str) for x in parsed)
+
+        # Guarantee 2: cases.formats writes the same JSON shape. If a
+        # future migration diverges the two encodings, this fires.
+        cases_cp = tmp_path / "cases_cp.db"
+        db2 = CheckpointDB(str(cases_cp))
+        try:
+            db2.upsert_case(
+                court="hkcfa", year=2020, number=32,
+                neutral="[2020] HKCFA 32",
+                title="Contract-Parity Sentinel",
+                date="2020-06-30",
+            )
+            db2.mark_downloaded(
+                court="hkcfa", year=2020, number=32,
+                formats=CANONICAL["formats"],  # type: ignore[arg-type]
+            )
+        finally:
+            db2.close()
+
+        conn2 = open_readonly(str(cases_cp))
+        try:
+            cases_formats_json = conn2.execute(
+                "SELECT formats FROM cases "
+                "WHERE court=? AND year=? AND number=?",
+                ("hkcfa", 2020, 32),
+            ).fetchone()[0]
+        finally:
+            conn2.close()
+
+        # Compare parsed shapes (encoders may differ on whitespace but
+        # the semantic content must match) — this is the drift alarm.
+        assert json.loads(cases_formats_json) == parsed
