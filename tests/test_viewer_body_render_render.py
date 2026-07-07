@@ -13,6 +13,7 @@ import pytest
 
 from hklii_downloader.viewer.body_render.render import (
     RenderSource,
+    render_case_body,
     select_body_source,
 )
 
@@ -244,3 +245,106 @@ def test_accepts_str_and_pathlib_output_root(tmp_path: Path) -> None:
     for arg in (str(tmp_path), tmp_path):
         src = select_body_source(_case_row(), arg, requested_lang="en")
         assert src is not None
+
+
+# ---------------------------------------------------------------------------
+# render_case_body dispatch (native HKLII vs pandoc fragment)
+# ---------------------------------------------------------------------------
+
+
+def test_render_case_body_wraps_output_in_article_with_bcp47_lang(
+    tmp_path: Path,
+) -> None:
+    """Design §9 line 249: <article lang="{{ body_lang | bcp47 }}"> wraps
+    every rendered body. English maps to 'en'; TC maps to 'zh-Hant'.
+    """
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "<html><body><p>judgment prose</p></body></html>")
+
+    src = select_body_source(_case_row(), tmp_path, requested_lang="en")
+    out = render_case_body(src, _case_row())
+
+    assert out.startswith('<article lang="en">')
+    assert out.endswith("</article>")
+    assert "judgment prose" in out
+
+
+def test_render_case_body_tc_gets_zh_hant_lang(tmp_path: Path) -> None:
+    """Bilingual TC body → article lang='zh-Hant' (BCP-47)."""
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["tc.html"], "<html><body><p>中文判決</p></body></html>")
+
+    src = select_body_source(_case_row(), tmp_path, requested_lang="tc")
+    out = render_case_body(src, _case_row())
+
+    assert out.startswith('<article lang="zh-Hant">')
+    assert "中文判決" in out
+
+
+def test_render_case_body_native_path_when_html_generated_from_is_none(
+    tmp_path: Path,
+) -> None:
+    """case_row.html_generated_from == None → native HKLII dispatch.
+    Sanitizes a full-document HTML shape (has outer <html>/<body>/<form>).
+    """
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(
+        paths["html"],
+        # Real HKLII shape: form-wrapped body content
+        "<html><body>"
+        '<form name="search_body">'
+        "<parties>HKSAR v CHAN</parties>"
+        "<p>judgment prose here</p>"
+        "</form>"
+        "</body></html>",
+    )
+    src = select_body_source(_case_row(), tmp_path, requested_lang="en")
+    out = render_case_body(src, _case_row(html_generated_from=None))
+
+    assert "<form" not in out  # unwrapped by sanitizer
+    assert "HKSAR v CHAN" in out
+    assert "judgment prose" in out
+
+
+def test_render_case_body_generated_path_when_html_generated_from_is_doc(
+    tmp_path: Path,
+) -> None:
+    """case_row.html_generated_from == 'doc' → generated-fragment dispatch.
+    Pandoc emits a bare fragment (no <html> shell); the renderer wraps it
+    in <article> the same way.
+    """
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(
+        paths["generated.html"],
+        # Pandoc fragment: bare paragraphs
+        "<p>Pandoc-derived paragraph 1</p><p>Paragraph 2</p>",
+    )
+    row = _case_row(html_generated_from="doc")
+    src = select_body_source(row, tmp_path, requested_lang="en")
+    out = render_case_body(src, row)
+
+    assert '<article lang="en">' in out
+    assert "Paragraph 1" in out
+    assert "Paragraph 2" in out
+
+
+def test_render_case_body_none_source_returns_empty_article(
+    tmp_path: Path,
+) -> None:
+    """No RenderSource (route hit 404 shape) → empty <article>."""
+    out = render_case_body(None, _case_row())
+    assert out == '<article lang="en"></article>' or out == ""
+
+
+def test_render_case_body_empty_file_yields_empty_article(
+    tmp_path: Path,
+) -> None:
+    """0-byte body file (matches iter_text_nodes empty guard chain) →
+    the render pipeline must not crash; template gets an empty article.
+    """
+    paths = _mk_paths(tmp_path, "hkcfa/2020/32")
+    _touch(paths["html"], "")
+
+    src = select_body_source(_case_row(), tmp_path, requested_lang="en")
+    out = render_case_body(src, _case_row())
+    assert out == '<article lang="en"></article>'
