@@ -146,6 +146,42 @@ def seed_hub_cache(
         conn.close()
 
 
+def seed_search_index(
+    path: Path,
+    rows: list[dict],
+) -> None:
+    """Seed viewer.db.fts_cases + case_bodies (triggers fts_body sync).
+
+    Each ``rows`` entry is a dict with keys:
+      case_key, lang, court, year, number, neutral, title, date, body
+
+    body_source ('html'), body_sha256 ('deadbeef'), and indexed_at
+    ('2026-07-06T00:00:00') are placeholders — the route doesn't inspect
+    them, they only satisfy the fts_cases NOT NULL constraints.
+    """
+    conn = sqlite3.connect(str(path))
+    try:
+        for r in rows:
+            conn.execute(
+                "INSERT INTO fts_cases (case_key, lang, court, year, number, "
+                "neutral, title, date, body_source, body_sha256, indexed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'html', 'deadbeef', "
+                "'2026-07-06T00:00:00')",
+                (
+                    r["case_key"], r["lang"], r["court"], r["year"],
+                    r["number"], r["neutral"], r["title"], r["date"],
+                ),
+            )
+            conn.execute(
+                "INSERT INTO case_bodies (case_key, lang, title, body) "
+                "VALUES (?, ?, ?, ?)",
+                (r["case_key"], r["lang"], r["title"], r["body"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def drop_hub_cache_table(path: Path) -> None:
     """Drop ``viewer_hub_cache`` so :func:`hub_cases` raises
     :class:`ViewerCacheMissing`. Used by route tests that verify the
