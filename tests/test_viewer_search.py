@@ -20,7 +20,12 @@ from pathlib import Path
 
 import pytest
 
-from hklii_downloader.viewer.search import BodySource, discover_body_sources
+from hklii_downloader.viewer.search import (
+    BodySource,
+    body_sha256,
+    discover_body_sources,
+    extract_plaintext,
+)
 
 
 def _touch(path: Path, content: str = "<html></html>") -> None:
@@ -164,3 +169,75 @@ def test_accepts_str_and_pathlib_output_root(tmp_path: Path) -> None:
     for arg in (str(tmp_path), tmp_path):
         result = discover_body_sources(arg, "hkcfa/2020/32", case_lang="en")
         assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# extract_plaintext + body_sha256 — index-time text preparation
+# ---------------------------------------------------------------------------
+
+
+def test_extract_plaintext_returns_body_text_only() -> None:
+    """extract_plaintext yields prose from a real HKLII HTML sample."""
+    html = (
+        b"<html><head><script>evil()</script></head>"
+        b"<body><p>The defendant argued.</p></body></html>"
+    )
+    result = extract_plaintext(html)
+    assert "defendant argued" in result
+    assert "evil()" not in result
+
+
+def test_extract_plaintext_normalizes_whitespace() -> None:
+    """Multiple whitespace runs collapse to single space. Leading/trailing
+    stripped. Makes body_sha256 stable against source-format churn.
+    """
+    html = "<p>  hello\n\n\n   world  </p>"
+    assert extract_plaintext(html) == "hello world"
+
+
+def test_extract_plaintext_preserves_cjk() -> None:
+    """UTF-8 bytes decoded correctly (via iter_text_nodes's utf-8 decode)."""
+    html = "<p>香港特別行政區 終審法院</p>".encode("utf-8")
+    result = extract_plaintext(html)
+    assert result == "香港特別行政區 終審法院"
+
+
+def test_extract_plaintext_accepts_str_and_bytes() -> None:
+    html = "<p>hello world</p>"
+    assert extract_plaintext(html) == "hello world"
+    assert extract_plaintext(html.encode("utf-8")) == "hello world"
+
+
+def test_extract_plaintext_empty_body_returns_empty_string() -> None:
+    """L5: empty body is a legitimate answer (case with no content) —
+    downstream code can check for this before writing an empty FTS row.
+    """
+    assert extract_plaintext("<html><body></body></html>") == ""
+
+
+def test_body_sha256_returns_64_char_hex() -> None:
+    """SHA-256 hex digest is 64 chars."""
+    sha = body_sha256("hello world")
+    assert len(sha) == 64
+    assert all(c in "0123456789abcdef" for c in sha)
+
+
+def test_body_sha256_is_deterministic() -> None:
+    """Same input → same digest. Basis of the incremental-diff check."""
+    assert body_sha256("hello world") == body_sha256("hello world")
+
+
+def test_body_sha256_differs_on_content_change() -> None:
+    """Different input → different digest. Guards against index staleness."""
+    assert body_sha256("hello world") != body_sha256("hello worm")
+
+
+def test_body_sha256_empty_string_is_deterministic() -> None:
+    """The empty-body sha is a stable sentinel — an index row with this
+    sha means 'we indexed an empty body' (as opposed to 'never indexed').
+    """
+    sha_empty = body_sha256("")
+    assert (
+        sha_empty
+        == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )
