@@ -251,25 +251,24 @@ hklii serve [-o/--output DIR]      # default: ./output
 
 ## 9. Styling
 
-**DECISION**: Vanilla CSS design system, hand-written, ~8 KB total, shipped as one static file `viewer/static/app.css`. NO framework, NO build step, NO web fonts, NO icon library, NO CDN. No critical-CSS split (verdict-YAGNI: 10 KB serves in single-digit ms locally).
+**DECISION (Phase 5 revision — 2026-07-07)**: **Pico.css v2 classless** (71 KB minified) vendored into `viewer/static/pico.classless.min.css` + a thin viewer-specific overlay `viewer/static/app.css` (~130 lines). The prior "vanilla, hand-written, ~8 KB" plan (below) was replaced when the actual authoring cost of every grid/table/form primitive turned out to dominate the Phase 5 budget — Pico ships all of that + auto dark mode + form controls + tables in one drop-in file. No build step. No CDN at runtime (file is vendored). MIT-licensed.
 
-**Type stack**:
-- Body serif: `Charter, Georgia, "Times New Roman", Times, serif`
-- TC body: `"PingFang TC", "Heiti TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif`, applied via `:lang(zh-Hant)` selector
-- UI chrome: native sans stack (`-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, ...`)
-- Cites/monospace: `"SF Mono", Menlo, Consolas, monospace` with `font-variant-numeric: tabular-nums`
+**Overlay `app.css` scope**:
+- Court-tile grid (home) + year-bucket grid (court landing)
+- Court badges (citation panels)
+- Citation-row grid layouts (cited-by / authorities panels)
+- Legal-doc serif on `.case-body article` — `Charter, Georgia, "Times New Roman", Times, serif` + `max-width: 68ch` (Bringhurst) so the judgment reads like a book while chrome stays sans (Pico's system-ui default)
+- FTS `<mark>` snippet highlight
+- Pager, empty-state, banner primitives
+- `.htmx-indicator` display rules
+
+**Semantic HTML unchanged**: templates continue to emit `<table>/<article>/<nav>/<header>/<main>` without utility-class noise — Pico's classless build styles them.
 
 **BCP-47 language mapping (verdict-wrong-tool fix)**: `bcp47(lang)` Jinja filter maps `'en' → 'en'`, `'tc' → 'zh-Hant'`. Templates use `lang="{{ body_lang | bcp47 }}"` on `<article>`. `body_lang` is derived from **WHICH FILE is being served** (route-level `served_body_lang`), NOT from `case.lang` (which collapses bilingual to 'en' and would render TC bodies in Georgia). A test seeds a bilingual case with DB `lang='en'` + served `.tc.html` and asserts the article gets `lang="zh-Hant"`.
 
-**Dark mode**: `@media (prefers-color-scheme: dark)` remap of CSS custom properties. NO manual toggle, NO localStorage, NO `data-theme` DOM contract (verdict-YAGNI).
+**Dark mode**: `<meta name="color-scheme" content="light dark">` + Pico's own `prefers-color-scheme` remap of `--pico-*` CSS custom properties. No manual toggle. Overlay in `app.css` references only `--pico-*` variables so it flips automatically with the framework.
 
-**Density**:
-- Root 16px; body reading `--body-fs: 17px`, `line-height: 1.6`, `max-width: 68ch` (Bringhurst rule)
-- Chrome UI: 14px
-- Tables: 13px, 32px row height
-- Zebra striping OFF; row separators via `border-bottom`
-
-**Color tokens**: `:root` custom properties for `--bg`, `--fg`, `--fg-muted`, `--border`, `--accent`, `--hl-bg`. Accent single teal-blue. Court badges start with `.badge` neutral + `.badge--apex` (CFA+CA) only; per-court palette expanded when browse actually needs it.
+**Color tokens**: rely on Pico's `--pico-primary`, `--pico-muted-color`, `--pico-muted-border-color`, `--pico-secondary-background`, etc. No custom color palette in v1; per-court badge palette lands only when browse asks for it.
 
 **HKLII HTML sanitization (RENDER-time, not ingest)**: `viewer/body_render/sanitizer.py` runs on demand, LRU-cached by mtime + path. NEVER writes files on disk. Strips `<link href="/lrs/…">`, `<link href="/css/…">` (dead offline), inline `font-family`/`font-size`/`bgcolor` on `<td>`/`<p>`. Preserves `align`, `width`, `valign`, `colspan`, `rowspan`, `href` (**allowlist model**, verdict-integration fix — new HKLII inline attributes fail loudly rather than silent win).
 
@@ -277,9 +276,9 @@ hklii serve [-o/--output DIR]      # default: ./output
 
 **Icons**: Zero library. Unicode where clear (§ ✓ →). Inline SVG for 2-3 gaps at ~500 B each.
 
-**FTS5 marker CSS contract**: `FTS_HIGHLIGHT_START = "<mark>"` / `FTS_HIGHLIGHT_END = "</mark>"` constants in `viewer/search.py`; styling's `mark { background: var(--hl-bg); }` references them via a code comment.
+**FTS5 marker CSS contract**: `FTS_HIGHLIGHT_START = "<mark>"` / `FTS_HIGHLIGHT_END = "</mark>"` constants in `viewer/routes/search.py`; `app.css` styles `mark { background: var(--pico-mark-background-color, #fef08a); }` referencing Pico's own variable with a static fallback.
 
-**Rationale**: Hand-rolled CSS + system fonts + no build step matches the offline-solo-user constraint. Deferring the CJK-font detection heuristic, dark-mode toggle, and split-panes bilingual view keeps v1 surface small enough to review under all 5 lenses in one pass.
+**Rationale**: Pico's authoring-cost saving (no manual reinvention of table/form/card/pager primitives) beats the size argument at 71 KB — still single-digit ms locally, still no build step, still no runtime CDN. The Phase 4 shape (`data-testid` selectors + semantic HTML) survived the switch untouched: no route test failed after wiring Pico. Deferring the CJK-font detection heuristic, dark-mode toggle, and split-panes bilingual view keeps v1 surface small enough to review under all 5 lenses in one pass.
 
 **Risks + mitigations**: (a) Legacy Linux without CJK fonts renders tofu — user sees it, adds fonts, or opts into future `--vendor-fonts`. (b) HKLII `<td style="font-family: Arial">` beats stylesheet — sanitizer strips inline `font-family`; fixture test asserts absence. (c) Dark mode inverts `bgcolor="#FFFFFF"` cells — sanitizer strips `bgcolor` except on `<th>`.
 
