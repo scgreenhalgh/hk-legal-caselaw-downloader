@@ -79,3 +79,41 @@ def cited_by_partial(
             "page_size": _PAGE_SIZE,
         },
     )
+
+
+@router.get(
+    "/case/{slug}/{year}/{number}/authorities",
+    response_class=HTMLResponse,
+)
+def authorities_partial(
+    request: Request,
+    slug: str,
+    year: int,
+    number: int,
+    page: int = 1,
+) -> HTMLResponse:
+    if slug not in CANONICAL_COURTS:
+        raise HTTPException(status_code=404, detail="Unknown court")
+    if page < 1:
+        raise HTTPException(status_code=404, detail="Invalid page")
+
+    case_key = f"{slug}/{year}/{number}"
+    conn = open_readonly(request.app.state.checkpoint_db)
+    try:
+        rows = authorities_cited(
+            conn, case_key, page=page, per_page=_PAGE_SIZE
+        )
+    finally:
+        conn.close()
+
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "partials/authorities.html",
+        {
+            "case_key": case_key,
+            "rows": rows,
+            "page": page,
+            "page_size": _PAGE_SIZE,
+        },
+    )
