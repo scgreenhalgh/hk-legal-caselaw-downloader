@@ -124,8 +124,16 @@ def create_schema(conn: sqlite3.Connection) -> None:
     """Execute every DDL block via ``executescript`` for multi-statement
     support. Idempotent (every CREATE uses IF NOT EXISTS).
 
+    Also sets ``PRAGMA journal_mode=WAL`` (design §4 line 107). WAL is a
+    persistent per-DB property: once set the first time, it survives
+    connection close and reopen. Setting it here means every fresh
+    viewer.db picks it up automatically at creation, and a subsequent
+    ``hklii serve`` reader coexists with a ``hklii viewer index --incremental``
+    writer without either blocking the other.
+
     Note: ``executescript`` issues an implicit BEGIN/COMMIT — do NOT wrap
     the caller in a transaction, or nested-transaction errors will fire.
     """
+    conn.execute("PRAGMA journal_mode = WAL")
     for ddl in ALL_DDL:
         conn.executescript(ddl)
