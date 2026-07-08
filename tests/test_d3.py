@@ -272,3 +272,54 @@ class TestD3ParseFilesResponse:
         result = parse_files_response(body)
         assert len(result.entries) == 1
         assert result.entries[0].year == 1964
+
+
+class TestD3PdfUrl:
+    """pdf_url — hop-2 URL resolver for the three JSON body shapes."""
+
+    def test_external_absolute_url_returned_unchanged(self):
+        """Shape C — hkiac/pcpdaab point at external source-org hosts."""
+        from hklii_downloader.d3 import D3_FAMILIES, pdf_url
+
+        family = next(f for f in D3_FAMILIES if f.slug == "hkiac")
+        response = {
+            "content": "",
+            "pdf": (
+                "https://www.hkiac.org/sites/default/files/"
+                "ck_filebrowser/IP/hk/decision/DHK-2100183_Decision.pdf"
+            ),
+        }
+
+        url = pdf_url(family, response)
+
+        assert url == (
+            "https://www.hkiac.org/sites/default/files/"
+            "ck_filebrowser/IP/hk/decision/DHK-2100183_Decision.pdf"
+        )
+
+    def test_hklii_relative_url_joined_to_base(self):
+        """Shape A — histlaw ships a same-origin `/static/...` path."""
+        from hklii_downloader.d3 import D3_FAMILIES, pdf_url
+
+        family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+        response = {"pdf": "/static/en/histlaw/1964/1.pdf"}
+
+        url = pdf_url(family, response)
+
+        assert url == "https://www.hklii.hk/static/en/histlaw/1964/1.pdf"
+
+    def test_html_slug_no_pdf_field_returns_none(self):
+        """Shape B — hklrccp/hklrcr/pcpdc: no `pdf` key → no second hop."""
+        from hklii_downloader.d3 import D3_FAMILIES, pdf_url
+
+        family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+        response = {"content": "<h3>...</h3>", "file_type": 1}
+
+        assert pdf_url(family, response) is None
+
+    def test_empty_pdf_field_returns_none(self):
+        """Defensive — pdf key present but empty string treated as absent."""
+        from hklii_downloader.d3 import D3_FAMILIES, pdf_url
+
+        family = next(f for f in D3_FAMILIES if f.slug == "hkiac")
+        assert pdf_url(family, {"pdf": ""}) is None
