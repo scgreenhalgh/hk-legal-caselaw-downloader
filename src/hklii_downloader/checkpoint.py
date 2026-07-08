@@ -1520,10 +1520,30 @@ class CheckpointDB:
         )
         self._conn.commit()
 
-    def hopt_stats(self) -> dict:
-        rows = self._conn.execute(
-            "SELECT status, COUNT(*) FROM hopt_documents GROUP BY status"
-        ).fetchall()
+    def hopt_stats(self, abbrs: tuple[str, ...] | None = None) -> dict:
+        """Return per-status counts of hopt_documents rows.
+
+        When ``abbrs`` is provided, only rows for those abbrs are
+        counted. Required by ``_run_scrape_d3`` to avoid confusing the
+        operator with leftover HoptRunner-owned pending counts that
+        the D3 drain loop (correctly scoped after C1) would never
+        touch anyway.
+        """
+        if abbrs is None:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) FROM hopt_documents "
+                "GROUP BY status"
+            ).fetchall()
+        else:
+            if not abbrs:
+                return {"total": 0, "pending": 0, "in_progress": 0,
+                        "downloaded": 0, "failed": 0}
+            placeholders = ",".join("?" for _ in abbrs)
+            rows = self._conn.execute(
+                f"SELECT status, COUNT(*) FROM hopt_documents "
+                f"WHERE abbr IN ({placeholders}) GROUP BY status",
+                tuple(abbrs),
+            ).fetchall()
         counts = {r[0]: r[1] for r in rows}
         return {
             "total": sum(counts.values()),

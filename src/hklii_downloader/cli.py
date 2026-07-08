@@ -2781,7 +2781,11 @@ async def _run_scrape_d3(
         upserted = await runner.enumerate_all()
         click.echo(f"Upserted {upserted} d3 rows.")
 
-        stats = db.hopt_stats()
+        # H4 — scope stats to D3 slugs so a leftover HoptRunner queue
+        # doesn't inflate the target count shown to the operator.
+        # D3Runner.fetch_pending is already abbr-scoped (C1) so this
+        # is UX-only, but honesty in the target print matters.
+        stats = db.hopt_stats(abbrs=slugs)
         target = stats["pending"] if limit is None else min(
             limit, stats["pending"],
         )
