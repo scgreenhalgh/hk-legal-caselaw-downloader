@@ -14,6 +14,30 @@ import httpx
 import pytest
 
 
+class TestLegisLangs:
+    """``LEGIS_LANGS`` is the source of truth for which lang variants
+    the legis scraper enumerates and fetches. HKLII serves EN, TC AND
+    SC for the three legis-native slugs (ord / reg / instrument),
+    confirmed live 2026-07-08 via ``getlegisfiles?lang=sc`` +
+    ``getcapversions?lang=sc`` + ``getcapversiontoc``. Prior state
+    was EN+TC only — SC was flagged as a D3 punt but the endpoints
+    Just Work, so pull SC on the same cadence as TC."""
+
+    def test_includes_sc(self):
+        from hklii_downloader.legis import LEGIS_LANGS
+        assert "sc" in LEGIS_LANGS, (
+            "LEGIS_LANGS omits SC; scrape-legis will never pull the "
+            "trilingual legis slugs' SC variants, and every SC bucket "
+            "in db_freshness will report a permanent 0/N delta."
+        )
+
+    def test_includes_en_and_tc(self):
+        """Sanity — the tightening must not accidentally drop EN/TC."""
+        from hklii_downloader.legis import LEGIS_LANGS
+        assert "en" in LEGIS_LANGS
+        assert "tc" in LEGIS_LANGS
+
+
 class TestUrlConstruction:
     def test_getlegisfiles_url(self):
         from hklii_downloader.legis import getlegisfiles_url

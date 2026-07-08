@@ -78,6 +78,36 @@ class HoptRecord:
     status: str
 
 
+@dataclass
+class DbFreshnessRecord:
+    """One row of db_freshness — per-(kind, scope, lang) freshness
+    ledger backing Phase D2 freshness-driven scraping.
+
+    Column ownership is split across three writers:
+      * wire-side (upsert_freshness_probe): live_count, live_updated_at,
+        live_probed_at, probe_error
+      * local-side (recompute_local_count): local_count, local_counted_at
+      * scrape-runner (mark_bucket_scraped): last_scrape_completed_at,
+        source_generation_id
+
+    Every non-key column is nullable — a first-run bucket exists with
+    every value NULL, a probe-only bucket has wire cols set and
+    scrape/local NULL, and so on. Callers interpret NULLs per the
+    fresh_definition rule in freshness.py.
+    """
+    kind: str                              # 'cases' | 'legis' | 'hopt'
+    scope: str                             # slug: 'hkcfa', 'ord', 'hkts'...
+    lang: str                              # 'en' | 'tc'
+    live_count: int | None                 # HKLII-reported count
+    live_updated_at: str | None            # HKLII 'timestamp', 'YYYY-MM-DD'
+    live_probed_at: int | None             # unix ts of last probe attempt
+    probe_error: str | None                # last non-200/non-JSON error
+    local_count: int | None                # our downloaded-status COUNT(*)
+    local_counted_at: int | None           # unix ts of last recompute
+    last_scrape_completed_at: int | None   # unix ts of last clean sweep
+    source_generation_id: int | None       # enum_runs.generation_id link
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS cases (
     court    TEXT NOT NULL,
@@ -205,10 +235,64 @@ CREATE TABLE IF NOT EXISTS enum_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_enum_runs_completed
     ON enum_runs(completed_at);
+CREATE TABLE IF NOT EXISTS db_freshness (
+    -- Phase D2 freshness ledger. One row per (kind, scope, lang) triple
+    -- ('cases' × ALL_COURTS × en/tc, 'legis' × LEGIS_CAP_TYPES × en/tc,
+    -- 'hopt' × HOPT_ABBRS × en/tc, plus ukpc under kind='cases').
+    --
+    -- Column ownership is split three ways — each writer must touch
+    -- ONLY its own columns and use COALESCE-preserving semantics on
+    -- the others. Same discipline as upsert_hopt_document w.r.t.
+    -- status:
+    --   * upsert_freshness_probe (wire):     live_*, probe_error
+    --   * recompute_local_count (local):     local_count, local_counted_at
+    --   * mark_bucket_scraped (scrape run):  last_scrape_completed_at,
+    --                                        source_generation_id
+    --
+    -- A drift here silently corrupts the freshness signal: a probe
+    -- clobbering last_scrape_completed_at back to NULL would re-trigger
+    -- every scrape at the next update.
+    --
+    -- Composite natural PK + WITHOUT ROWID matches ord_reg_edges /
+    -- citations / case_parallel_cites convention. The table stays
+    -- small (~100 rows).
+    kind                     TEXT NOT NULL,
+    scope                    TEXT NOT NULL,
+    lang                     TEXT NOT NULL,
+    live_count               INTEGER,
+    live_updated_at          TEXT,
+    live_probed_at           INTEGER,
+    probe_error              TEXT,
+    local_count              INTEGER,
+    local_counted_at         INTEGER,
+    last_scrape_completed_at INTEGER,
+    source_generation_id     INTEGER,
+    PRIMARY KEY (kind, scope, lang)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_db_freshness_probed
+    ON db_freshness(live_probed_at);
+CREATE INDEX IF NOT EXISTS idx_db_freshness_scraped
+    ON db_freshness(last_scrape_completed_at);
 """
 
 _ENRICHMENT_KINDS = ("summary_en", "summary_zh", "appeal_history")
 _ENRICHMENT_STATUSES = ("pending", "downloaded", "na", "failed")
+
+# db_freshness.kind values — dispatched by recompute_local_count over
+# cases / legis_documents / hopt_documents respectively. UKPC lives
+# under kind='cases' because its rows are stored in the cases table
+# (see ukpc.py + upsert_downloaded_case).
+_FRESHNESS_KINDS = ("cases", "legis", "hopt")
+
+# Column-to-table dispatch for recompute_local_count. Isolated as a
+# constant so a future kind (e.g. 'histlaw' once D3 lands) is a
+# single-line addition rather than a scattered edit across the method
+# body.
+_FRESHNESS_TABLE_BY_KIND = {
+    "cases": ("cases", "court"),
+    "legis": ("legis_documents", "abbr"),
+    "hopt": ("hopt_documents", "abbr"),
+}
 
 
 class CheckpointDB:
@@ -378,6 +462,67 @@ class CheckpointDB:
             (court, year, number, neutral, title, date, lang, last_seen_at),
         )
         self._conn.commit()
+
+    def upsert_downloaded_case(
+        self, court: str, year: int, number: int, lang: str,
+        neutral: str, title: str, date: str, formats: list[str],
+        last_seen_at: int | None = None,
+    ) -> None:
+        """Insert a cases row directly at status='downloaded'.
+
+        UKPC entries are enumerated + fetched + saved in one pass by
+        :class:`hklii_downloader.ukpc.UkpcRunner`. They must never sit
+        at status='pending' waiting to be claimed because
+        :meth:`claim_pending` is court-unscoped and would let a plain
+        ``hklii scrape`` invocation pull ukpc rows off the pending
+        queue and hit ``getjudgment`` — the WRONG endpoint family for
+        the hopt-C UKPC slug — on every subsequent run.
+
+        On conflict, preserves the existing status (downloaded stays
+        downloaded, no reverts) and refreshes the metadata columns.
+        Uses the same lang-collapse rule as :meth:`upsert_case` so a
+        future EN counterpart for an already-TC row collapses to
+        lang='en' consistently across the cases table.
+        """
+        self._conn.execute(
+            "INSERT INTO cases "
+            "(court, year, number, neutral, title, date, lang, status, "
+            "formats, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'downloaded', ?, ?) "
+            "ON CONFLICT (court, year, number) DO UPDATE SET "
+            "neutral=excluded.neutral, title=excluded.title, "
+            "date=excluded.date, "
+            "lang=CASE "
+            "  WHEN cases.lang='en' OR excluded.lang='en' THEN 'en' "
+            "  ELSE excluded.lang "
+            "END, "
+            "formats=excluded.formats, "
+            "last_seen_at=COALESCE(excluded.last_seen_at, "
+            "                      cases.last_seen_at)",
+            (court, year, number, neutral, title, date, lang,
+             json.dumps(formats), last_seen_at),
+        )
+        self._conn.commit()
+
+    def has_downloaded_case(
+        self, court: str, year: int, number: int,
+    ) -> bool:
+        """Return True iff (court, year, number) exists at
+        status='downloaded'.
+
+        Used by :class:`hklii_downloader.ukpc.UkpcRunner` for idempotent
+        resume — a re-run over the same corpus skips already-downloaded
+        rows without re-fetching. Cheaper than the row-loading version
+        of :meth:`get_formats` because the caller only needs the
+        boolean.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM cases "
+            "WHERE court=? AND year=? AND number=? "
+            "AND status='downloaded' LIMIT 1",
+            (court, year, number),
+        ).fetchone()
+        return row is not None
 
     def claim_pending(self, court: str | None = None) -> CaseRecord | None:
         if court:
@@ -1538,6 +1683,183 @@ class CheckpointDB:
             bucket["total"] += n
             bucket[status] = bucket.get(status, 0) + n
         return result
+
+    # ---- db_freshness accessors (Phase D2) ---------------------------
+    #
+    # Ownership discipline: each writer touches only its own columns.
+    # A drift here silently corrupts the freshness signal — e.g. a
+    # probe clobbering last_scrape_completed_at back to NULL would
+    # re-trigger every scrape at the next update. Enforced by the
+    # tests in tests/test_freshness_checkpoint.py.
+
+    def upsert_freshness_probe(
+        self, kind: str, scope: str, lang: str, *,
+        live_count: int | None,
+        live_updated_at: str | None,
+        live_probed_at: int,
+        probe_error: str | None,
+    ) -> None:
+        """Record the outcome of one wire probe against the getmeta*
+        endpoint for (kind, scope, lang).
+
+        * live_count / live_updated_at are COALESCE-preserved on
+          conflict — a failed probe (live_count=None) must NOT wipe a
+          previous good value, otherwise a single wire flake flips
+          every healthy bucket to STALE via the _fresh rule's
+          `live_count IS NOT NULL` requirement.
+        * live_probed_at / probe_error describe the LAST attempt and
+          are always overwritten. A healthy probe after a failed one
+          must clear probe_error to NULL.
+        * Never touches local_count / last_scrape_completed_at /
+          source_generation_id — those belong to other writers.
+        """
+        self._conn.execute(
+            "INSERT INTO db_freshness "
+            "(kind, scope, lang, live_count, live_updated_at, "
+            "live_probed_at, probe_error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (kind, scope, lang) DO UPDATE SET "
+            "live_count=COALESCE(excluded.live_count, "
+            "                     db_freshness.live_count), "
+            "live_updated_at=COALESCE(excluded.live_updated_at, "
+            "                          db_freshness.live_updated_at), "
+            "live_probed_at=excluded.live_probed_at, "
+            "probe_error=excluded.probe_error",
+            (kind, scope, lang, live_count, live_updated_at,
+             live_probed_at, probe_error),
+        )
+        self._conn.commit()
+
+    def recompute_local_count(
+        self, kind: str, scope: str, lang: str,
+        sidecar_count: int | None = None,
+    ) -> int:
+        """Refresh local_count / local_counted_at for a bucket by
+        running the kind-specific SELECT COUNT(*) over the
+        status='downloaded' slice, and return the count so the caller
+        can log it without a re-SELECT.
+
+        Dispatch is table-driven via _FRESHNESS_TABLE_BY_KIND so a
+        future kind (e.g. 'histlaw' after D3) is a single-line add.
+        Wire columns and scrape-runner columns are COALESCE-preserved
+        on conflict — this writer owns local_count / local_counted_at
+        only.
+
+        Bilingual-collapse handling for ``kind='cases'`` + ``lang='tc'``:
+        :meth:`upsert_case` collapses every bilingual (en+tc) row to
+        lang='en', so ``WHERE lang='tc'`` returns tc-only rows and
+        misses the bilingual half of HKLII's ``getmetacase?lang=tc``
+        count. The prior OR-lang-en compensation over-counted by every
+        en-only row (schema can't distinguish bilingual-collapsed-to-en
+        from true en-only), which permanently blocked parity for any
+        court with any en-only content — hkca/tc landed 39170 vs a live
+        9830 on the 2026-07-08 live probe.
+
+        The right split identifies bilingual rows from disk: each
+        bilingual case has a ``*.tc.json`` sidecar written by
+        :mod:`case_translations`. Callers with filesystem access
+        (:class:`freshness.FreshnessRunner`) walk the disk and pass
+        the count via ``sidecar_count``. Without it we return the
+        deterministic tc-only count — safe (STALE, not FRESH) but the
+        parity comparison only holds when the caller supplies the
+        sidecar count.
+
+        Legis / hopt kinds are unaffected — those tables have no
+        collapse rule and their per-lang counts are direct.
+        ``sidecar_count`` is silently ignored for those kinds.
+        """
+        if kind not in _FRESHNESS_KINDS:
+            raise ValueError(
+                f"unknown freshness kind {kind!r}; "
+                f"expected one of {_FRESHNESS_KINDS}"
+            )
+        table, scope_col = _FRESHNESS_TABLE_BY_KIND[kind]
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM {table} "
+            f"WHERE {scope_col}=? AND lang=? AND status='downloaded'",
+            (scope, lang),
+        ).fetchone()
+        count = int(row[0]) if row else 0
+        if kind == "cases" and lang == "tc" and sidecar_count:
+            count += int(sidecar_count)
+        now = int(time.time())
+        self._conn.execute(
+            "INSERT INTO db_freshness "
+            "(kind, scope, lang, local_count, local_counted_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (kind, scope, lang) DO UPDATE SET "
+            "local_count=excluded.local_count, "
+            "local_counted_at=excluded.local_counted_at",
+            (kind, scope, lang, count, now),
+        )
+        self._conn.commit()
+        return count
+
+    def mark_bucket_scraped(
+        self, kind: str, scope: str, lang: str, *,
+        completed_at: int,
+        source_generation_id: int | None = None,
+    ) -> None:
+        """Record a clean scrape completion for (kind, scope, lang).
+
+        Called by every scrape runner (BulkScraper, HoptRunner,
+        LegisRunner, UkpcRunner) on successful sweep completion. If no
+        db_freshness row exists yet (first-run scrape landing before
+        any probe), INSERT with NULL wire columns so a later probe
+        can UPSERT-refresh them.
+
+        source_generation_id is optional — hopt/legis scrapes don't
+        touch enum_runs and pass None; cases scrapes pass the
+        generation_id of the enum_run whose enumeration surfaced the
+        rows this scrape captured.
+
+        Wire columns (live_*, probe_error) and local columns are
+        COALESCE-preserved on conflict — this writer owns
+        last_scrape_completed_at / source_generation_id only.
+        """
+        self._conn.execute(
+            "INSERT INTO db_freshness "
+            "(kind, scope, lang, last_scrape_completed_at, "
+            "source_generation_id) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (kind, scope, lang) DO UPDATE SET "
+            "last_scrape_completed_at="
+            "excluded.last_scrape_completed_at, "
+            "source_generation_id=excluded.source_generation_id",
+            (kind, scope, lang, completed_at, source_generation_id),
+        )
+        self._conn.commit()
+
+    def get_freshness_row(
+        self, kind: str, scope: str, lang: str,
+    ) -> DbFreshnessRecord | None:
+        """Point-read a single freshness row. Returns None if the
+        triple has no row (first-run — caller treats as STALE per
+        fresh_definition rule (1))."""
+        row = self._conn.execute(
+            "SELECT kind, scope, lang, live_count, live_updated_at, "
+            "live_probed_at, probe_error, local_count, "
+            "local_counted_at, last_scrape_completed_at, "
+            "source_generation_id FROM db_freshness "
+            "WHERE kind=? AND scope=? AND lang=?",
+            (kind, scope, lang),
+        ).fetchone()
+        if row is None:
+            return None
+        return DbFreshnessRecord(*row)
+
+    def iter_freshness_rows(self):
+        """Full-scan iterator over db_freshness. Cheap in practice —
+        the table stays under ~100 rows (one per mapped
+        category × slug × lang triple). Consumers: FreshnessRunner.
+        stale_buckets(), the check-freshness CLI JSON report."""
+        for row in self._conn.execute(
+            "SELECT kind, scope, lang, live_count, live_updated_at, "
+            "live_probed_at, probe_error, local_count, "
+            "local_counted_at, last_scrape_completed_at, "
+            "source_generation_id FROM db_freshness"
+        ).fetchall():
+            yield DbFreshnessRecord(*row)
 
     def close(self) -> None:
         self._conn.close()

@@ -124,6 +124,101 @@ ALL_COURTS: list[str] = [
 ALL_LANGS: tuple[str, ...] = ("en", "tc")
 
 
+def _filter_fresh_case_buckets(
+    output: Path,
+    court_list: list[str],
+    langs: tuple[str, ...],
+) -> tuple[list[str], tuple[str, ...]]:
+    """Drop (court, lang) triples marked FRESH in db_freshness.
+
+    Consumers: the four scrape subcommands under ``--skip-if-fresh``.
+    Kept side-effect-free (read-only on db_freshness) so a no-scrape
+    outcome doesn't leave stray writes.
+
+    Semantics — encoded from the design's ``fresh_definition`` rule:
+
+      * A bucket with no db_freshness row (first-run) → NOT FRESH
+        → keep in the scrape scope.
+      * A bucket with ``probe_error IS NOT NULL`` → NOT FRESH.
+      * The scrape command takes courts × langs; this helper returns
+        the surviving court list AND the surviving lang tuple. If
+        ALL (court, lang) pairs pass through the filter we keep the
+        original court+lang split so downstream fan-out is unchanged.
+        If some pairs are fresh but others aren't, we drop entire
+        court rows whose every lang is fresh — otherwise the scrape's
+        court/lang product would over-scrape a fresh (court, other-lang)
+        pair. This is a conservative simplification for the initial
+        wiring; a more targeted per-pair filter needs BulkScraper to
+        accept a set of (court, lang) tuples instead of a court list
+        × lang tuple product.
+    """
+    from .checkpoint import CheckpointDB
+    from .freshness import _fresh
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        return court_list, langs
+    db = CheckpointDB(str(db_path))
+    try:
+        surviving_courts: list[str] = []
+        for court in court_list:
+            all_fresh = True
+            for lang in langs:
+                rec = db.get_freshness_row("cases", court, lang)
+                if rec is None or not _fresh(rec):
+                    all_fresh = False
+                    break
+            if all_fresh:
+                click.echo(
+                    f"skip-if-fresh: dropping {court} — all langs fresh",
+                )
+            else:
+                surviving_courts.append(court)
+        return surviving_courts, langs
+    finally:
+        db.close()
+
+
+def _filter_fresh_hopt_buckets(
+    output: Path,
+    abbrs: tuple[str, ...],
+    langs: tuple[str, ...],
+    kind: str = "hopt",
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Sister of :func:`_filter_fresh_case_buckets` for hopt/legis/ukpc.
+
+    ``kind`` selects the checkpoint dispatch — 'hopt' for the treaty
+    family (bacpg / bahkg / hktmc / hktml / hkts + ukpc) and 'legis'
+    for the ord / reg / instrument family. Same conservative
+    per-abbr filter: drop an abbr only if EVERY lang for it is fresh.
+    """
+    from .checkpoint import CheckpointDB
+    from .freshness import _fresh
+
+    db_path = output / ".checkpoint.db"
+    if not db_path.exists():
+        return abbrs, langs
+    db = CheckpointDB(str(db_path))
+    try:
+        surviving: list[str] = []
+        for abbr in abbrs:
+            all_fresh = True
+            for lang in langs:
+                rec = db.get_freshness_row(kind, abbr, lang)
+                if rec is None or not _fresh(rec):
+                    all_fresh = False
+                    break
+            if all_fresh:
+                click.echo(
+                    f"skip-if-fresh: dropping {abbr} — all langs fresh",
+                )
+            else:
+                surviving.append(abbr)
+        return tuple(surviving), langs
+    finally:
+        db.close()
+
+
 from dataclasses import dataclass, field as _dc_field  # noqa: E402
 
 
@@ -261,6 +356,16 @@ BULK_FORMATS = {"html", "txt", "json"}
     default=False,
     help="Skip structured event logging to <output>/events.jsonl (storage-constrained runs).",
 )
+@click.option(
+    "--skip-if-fresh",
+    is_flag=True,
+    default=False,
+    help=(
+        "Consult db_freshness before enumerating and drop (court, lang) "
+        "buckets already marked FRESH. Opt-in: default OFF preserves "
+        "the current full-scrape semantic for explicit invocations."
+    ),
+)
 def scrape(
     output: Path,
     formats: tuple[str, ...],
@@ -278,6 +383,7 @@ def scrape(
     enum_max_age: int,
     save_enum_responses: bool,
     no_events: bool,
+    skip_if_fresh: bool,
 ) -> None:
     """Bulk scrape judgments from HKLII courts.
 
@@ -307,6 +413,14 @@ def scrape(
 
     court_list = courts.split(",") if courts else DEFAULT_COURTS
     langs: tuple[str, ...] = ("en", "tc") if lang == "both" else (lang,)
+
+    if skip_if_fresh:
+        court_list, langs = _filter_fresh_case_buckets(
+            output, court_list, langs,
+        )
+        if not court_list:
+            click.echo("skip-if-fresh: every requested bucket is fresh.")
+            return
 
     asyncio.run(_run_scrape(ScrapeConfig(
         output=output,
@@ -1047,11 +1161,45 @@ async def _run_scrape(config: ScrapeConfig) -> None:
             )
             result = await _download_with_progress(scraper, target)
             click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
+        # Freshness ledger close-out: every (court, lang) bucket we
+        # just swept gets its last_scrape_completed_at bumped so
+        # ``_fresh`` can flip the bucket to FRESH on the next probe.
+        # Without this, --skip-if-fresh never skips and hklii check-
+        # freshness can never exit 0 — see adversarial D2 finding #1.
+        # Placed inside the try so a preflight failure doesn't reach
+        # it; placed OUTSIDE the ``stats['pending'] == 0`` branch so
+        # a full-scrape run with no pending queue (already downloaded
+        # everything) still marks the buckets fresh.
+        _mark_case_buckets_scraped(db, court_list, langs)
     finally:
         if events is not None:
             await events.aclose()
         await pool.close()
         db.close()
+
+
+def _mark_case_buckets_scraped(
+    db, court_list: list[str], langs: tuple[str, ...],
+) -> None:
+    """Bump ``last_scrape_completed_at`` on every (court, lang) pair
+    just swept. Called by ``_run_scrape`` at clean-completion.
+
+    Extracted so scrape / update-scrape share a single call site — if
+    a future scrape helper needs to skip specific buckets (e.g. one
+    that failed enum), it can call this helper with the surviving
+    list rather than duplicating the freshness wiring.
+
+    Kept small and side-effect-focused: no wire cost, purely a
+    db_freshness UPSERT per (court, lang). Errors are caller-visible
+    because ``mark_bucket_scraped`` raises rather than swallows.
+    """
+    import time as _time
+    now = int(_time.time())
+    for court in court_list:
+        for lang in langs:
+            db.mark_bucket_scraped(
+                "cases", court, lang, completed_at=now,
+            )
 
 
 _print_lock = asyncio.Lock()
@@ -1325,9 +1473,13 @@ async def _run_recheck_html(
 )
 @click.option(
     "--lang",
-    type=click.Choice(["en", "tc", "both"]),
-    default="both",
-    help="Language(s) to enumerate. Default: both.",
+    type=click.Choice(["en", "tc", "sc", "all"]),
+    default="all",
+    help=(
+        "Language(s) to enumerate. Default: all — HKLII serves EN, "
+        "TC AND SC for the trilingual legis slugs (ord / reg / "
+        "instrument). Pass a specific lang to narrow the sweep."
+    ),
 )
 @click.option(
     "--limit",
@@ -1347,6 +1499,15 @@ async def _run_recheck_html(
     default=False,
     help="Skip structured event logging.",
 )
+@click.option(
+    "--skip-if-fresh",
+    is_flag=True,
+    default=False,
+    help=(
+        "Consult db_freshness before enumerating and drop (capType, "
+        "lang) buckets already marked FRESH. Default OFF."
+    ),
+)
 def scrape_legis(
     output: Path,
     proxies: tuple[str, ...],
@@ -1356,6 +1517,7 @@ def scrape_legis(
     limit: int | None,
     yes: bool,
     no_events: bool,
+    skip_if_fresh: bool,
 ) -> None:
     """Backup HKLII legislation — ordinances, regulations, instruments.
 
@@ -1387,7 +1549,15 @@ def scrape_legis(
         s.strip() for s in (abbr_str or ",".join(LEGIS_CAP_TYPES)).split(",")
         if s.strip()
     )
-    langs = LEGIS_LANGS if lang == "both" else (lang,)
+    langs = LEGIS_LANGS if lang == "all" else (lang,)
+
+    if skip_if_fresh:
+        cap_types, langs = _filter_fresh_hopt_buckets(
+            output, cap_types, langs, kind="legis",
+        )
+        if not cap_types:
+            click.echo("skip-if-fresh: every requested capType is fresh.")
+            return
 
     asyncio.run(_run_scrape_legis(
         output=output,
@@ -1477,6 +1647,17 @@ async def _run_scrape_legis(
                 f"Failed: {result.failed}."
             )
             click.echo(f"By capType: {db.legis_stats_by_abbr()}")
+        # Freshness ledger close-out — see the equivalent block in
+        # _run_scrape (finding #1). Marks every (cap_type, lang) pair
+        # so the freshness gate can eventually flip these buckets
+        # FRESH.
+        import time as _time
+        now = int(_time.time())
+        for cap_type in cap_types:
+            for lang in langs:
+                db.mark_bucket_scraped(
+                    "legis", cap_type, lang, completed_at=now,
+                )
     finally:
         if events is not None:
             await events.aclose()
@@ -2290,6 +2471,15 @@ async def _translations_with_progress(runner, target: int):
     default=False,
     help="Skip structured event logging.",
 )
+@click.option(
+    "--skip-if-fresh",
+    is_flag=True,
+    default=False,
+    help=(
+        "Consult db_freshness before enumerating and drop (abbr, lang) "
+        "buckets already marked FRESH. Default OFF."
+    ),
+)
 def scrape_hopt(
     output: Path,
     proxies: tuple[str, ...],
@@ -2299,6 +2489,7 @@ def scrape_hopt(
     limit: int | None,
     yes: bool,
     no_events: bool,
+    skip_if_fresh: bool,
 ) -> None:
     """Backup HKLII HOPT databases — treaties, gazettes, consultation papers.
 
@@ -2324,6 +2515,13 @@ def scrape_hopt(
         if s.strip()
     )
     langs = HOPT_LANGS if lang == "both" else (lang,)
+    if skip_if_fresh:
+        abbrs, langs = _filter_fresh_hopt_buckets(
+            output, abbrs, langs, kind="hopt",
+        )
+        if not abbrs:
+            click.echo("skip-if-fresh: every requested abbr is fresh.")
+            return
     asyncio.run(_run_scrape_hopt(
         output=output, proxies=list(proxies), direct=direct,
         abbrs=abbrs, langs=langs, limit=limit, no_events=no_events,
@@ -2392,6 +2590,14 @@ async def _run_scrape_hopt(
                 f"Failed: {result.failed}."
             )
             click.echo(f"By abbr: {db.hopt_stats_by_abbr()}")
+        # Freshness ledger close-out — see finding #1.
+        import time as _time
+        now = int(_time.time())
+        for abbr in abbrs:
+            for lang in langs:
+                db.mark_bucket_scraped(
+                    "hopt", abbr, lang, completed_at=now,
+                )
     finally:
         if events is not None:
             await events.aclose()
@@ -2425,6 +2631,243 @@ async def _hopt_with_progress(runner, target: int):
                 ok=stats.downloaded, fail=stats.failed,
             )
         return await runner.fetch_pending(on_progress=on_progress)
+
+
+@main.command("scrape-ukpc")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB + ukpc artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "tc", "both"]),
+    default="en",
+    help=(
+        "Language(s) to enumerate. Default: en (UKPC is EN-only per "
+        "/databases; --lang both stays best-effort in case HKLII "
+        "later ships a TC translation)."
+    ),
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N document fetches (smoke test).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Re-fetch and overwrite already-downloaded rows. Default: skip "
+        "any (year, num) already at status='downloaded' in the cases "
+        "table (idempotent resume)."
+    ),
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+@click.option(
+    "--skip-if-fresh",
+    is_flag=True,
+    default=False,
+    help=(
+        "Consult db_freshness before enumerating; short-circuit if "
+        "every requested lang for ukpc is FRESH. Default OFF."
+    ),
+)
+def scrape_ukpc(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    lang: str,
+    limit: int | None,
+    force: bool,
+    yes: bool,
+    no_events: bool,
+    skip_if_fresh: bool,
+) -> None:
+    """Scrape HKLII UKPC — Privy Council judgments (hopt-C family).
+
+    UKPC lives on the ``gethoptfiles?dbcat=C`` enumeration endpoint and
+    ``getother`` fetch endpoint — a distinct wire family from the 12
+    case-family courts in ``ALL_COURTS``. Judgments land at
+    ``output/ukpc/YYYY/ukpc_YYYY_NUM.{html,txt,json}`` (case-family
+    layout so the viewer's render pipeline treats UKPC identically) and
+    are written to the cases table at ``court='ukpc'``,
+    ``status='downloaded'`` immediately — never sit at 'pending'
+    because ``BulkScraper.claim_pending()`` is unscoped and would hit
+    the wrong endpoint family.
+
+    \b
+    Examples:
+      hklii scrape-ukpc --proxy http://127.0.0.1:8888
+      hklii scrape-ukpc --direct --yes --limit 5
+      hklii scrape-ukpc --force -p ...  # re-fetch even if downloaded
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    from .ukpc import HOPT_C_LANGS
+    langs = HOPT_C_LANGS if lang == "both" else (lang,)
+    if skip_if_fresh:
+        # UKPC is stored under kind='cases' with scope='ukpc' — its rows
+        # live in the cases table (see ukpc.py). Reuse the case-family
+        # helper on a synthetic one-court list so freshness dispatch
+        # follows the checkpoint kind for reads.
+        surviving, langs = _filter_fresh_case_buckets(
+            output, ["ukpc"], langs,
+        )
+        if not surviving:
+            click.echo("skip-if-fresh: ukpc is fresh — nothing to do.")
+            return
+    asyncio.run(_run_scrape_ukpc(
+        output=output, proxies=list(proxies), direct=direct,
+        langs=langs, limit=limit, force=force, no_events=no_events,
+    ))
+
+
+async def _run_scrape_ukpc(
+    output: Path, proxies: list[str], direct: bool,
+    langs: tuple[str, ...],
+    limit: int | None, force: bool = False, no_events: bool = False,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .events import StructuredEventLogger
+    from .proxy_pool import ProxyPool
+    from .ukpc import UkpcRunner
+
+    output.mkdir(parents=True, exist_ok=True)
+    db_path = output / ".checkpoint.db"
+    db = CheckpointDB(str(db_path))
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight."
+                )
+            workers = max(1, len(result.healthy_proxies))
+
+        runner = UkpcRunner(
+            get=pool.get, checkpoint=db, output_dir=output,
+            langs=langs, workers=workers, limit=limit, force=force,
+        )
+
+        # Pre-count already-downloaded UKPC rows so the operator can
+        # tell "skipped resume" from "nothing to fetch" in the final
+        # summary line.
+        pre_count = db._conn.execute(
+            "SELECT COUNT(*) FROM cases "
+            "WHERE court='ukpc' AND status='downloaded'"
+        ).fetchone()[0]
+        click.echo(
+            f"Enumerating ukpc langs={list(langs)} "
+            f"(pre-existing downloaded rows: {pre_count})..."
+        )
+
+        outcome = await _ukpc_with_progress(runner)
+        click.echo(
+            f"\nDone. Downloaded: {outcome.downloaded}, "
+            f"Failed: {outcome.failed}."
+        )
+        total_count = db._conn.execute(
+            "SELECT COUNT(*) FROM cases "
+            "WHERE court='ukpc' AND status='downloaded'"
+        ).fetchone()[0]
+        click.echo(f"UKPC rows now in cases table: {total_count}")
+        # Freshness ledger close-out — see finding #1. UKPC rows live
+        # in the cases table so kind='cases' matches its DatabaseMatrix
+        # classification (see freshness.classify's cases-ukpc branch).
+        #
+        # Iterate ``outcome.langs_enumerated`` — the langs whose
+        # ``gethoptfiles`` enum actually completed — rather than the
+        # user-passed ``langs`` tuple. UKPC's TC endpoint 500's at
+        # HKLII today, so passing ``--lang both`` would previously
+        # stamp ``cases/ukpc/tc.last_scrape_completed_at`` even though
+        # no wire read confirmed the state; the freshness ledger then
+        # treated tc as "swept" on the next evaluation, hiding a
+        # phantom row. See docs/freshness-sanity-check.md for the
+        # 2026-07-08 retro.
+        import time as _time
+        now = int(_time.time())
+        for lang in outcome.langs_enumerated:
+            db.mark_bucket_scraped(
+                "cases", "ukpc", lang, completed_at=now,
+            )
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+        db.close()
+
+
+async def _ukpc_with_progress(runner):
+    """Rich progress bar around ``UkpcRunner.run``. Total is unknown
+    up-front (enum happens inside ``run``), so total=None → indeterminate
+    bar that just shows ok/fail counters + elapsed."""
+    from rich.progress import (
+        Progress, TextColumn, BarColumn,
+        TaskProgressColumn,
+        TimeElapsedColumn,
+    )
+    with Progress(
+        TextColumn("[bold blue]ukpc"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[ok]}"),
+        TextColumn("[red]fail {task.fields[fail]}"),
+        TimeElapsedColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "ukpc", total=None, ok=0, fail=0,
+        )
+
+        def on_progress(stats):
+            progress.update(
+                task_id,
+                ok=stats.downloaded, fail=stats.failed,
+            )
+
+        return await runner.run(on_progress=on_progress)
 
 
 async def _legis_history_with_progress(runner, target: int):
@@ -2502,6 +2945,7 @@ _UPDATE_PROFILES = ("daily", "weekly", "monthly", "quarterly", "custom")
               help="Row count for validate sampling (default 2000; 0 = full corpus).")
 @click.option("--yes-narrow", is_flag=True, default=False,
               help="Required guard to allow --recent-days < 2.")
+@click.option("--include-freshness-check/--no-freshness-check", default=None)
 @click.option("--include-scrape/--no-scrape", default=None)
 @click.option("--include-recheck-html/--no-recheck-html", default=None)
 @click.option("--include-generate-html/--no-generate-html", default=None)
@@ -2509,6 +2953,7 @@ _UPDATE_PROFILES = ("daily", "weekly", "monthly", "quarterly", "custom")
 @click.option("--include-enrich/--no-enrich", default=None)
 @click.option("--include-canary/--no-canary", default=None)
 @click.option("--include-hopt/--no-hopt", default=None)
+@click.option("--include-ukpc/--no-ukpc", default=None)
 @click.option("--include-legis/--no-legis", default=None)
 @click.option("--include-legis-history/--no-legis-history", default=None)
 @click.option("--include-relatedcaps/--no-relatedcaps", default=None)
@@ -2536,6 +2981,7 @@ def update_command(
     canary_divergence_threshold: int | None,
     validate_sample: int | None,
     yes_narrow: bool,
+    include_freshness_check: bool | None,
     include_scrape: bool | None,
     include_recheck_html: bool | None,
     include_generate_html: bool | None,
@@ -2543,6 +2989,7 @@ def update_command(
     include_enrich: bool | None,
     include_canary: bool | None,
     include_hopt: bool | None,
+    include_ukpc: bool | None,
     include_legis: bool | None,
     include_legis_history: bool | None,
     include_relatedcaps: bool | None,
@@ -2591,6 +3038,7 @@ def update_command(
             enrich_retry_limit=enrich_retry_limit,
             canary_divergence_threshold=canary_divergence_threshold,
             validate_sample=validate_sample,
+            include_freshness_check=include_freshness_check,
             include_scrape=include_scrape,
             include_recheck_html=include_recheck_html,
             include_generate_html=include_generate_html,
@@ -2598,6 +3046,7 @@ def update_command(
             include_enrich=include_enrich,
             include_canary=include_canary,
             include_hopt=include_hopt,
+            include_ukpc=include_ukpc,
             include_legis=include_legis,
             include_legis_history=include_legis_history,
             include_relatedcaps=include_relatedcaps,
@@ -2677,7 +3126,9 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
     for step in plan:
         click.echo(f"→ {step.name}")
         try:
-            if step.name == "scrape":
+            if step.name == "check_freshness":
+                await _run_update_check_freshness(runner, step, no_events)
+            elif step.name == "scrape":
                 await _run_update_scrape(runner, step, no_events)
             elif step.name == "recheck_html":
                 await _run_recheck_html(
@@ -2710,24 +3161,98 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
             elif step.name == "coverage_canary":
                 await _run_coverage_canary(runner, step, no_events)
             elif step.name == "scrape_hopt":
-                await _run_scrape_hopt(
-                    output=runner.output,
-                    proxies=runner.proxies,
-                    direct=runner.direct,
-                    abbrs=("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
-                    langs=("en", "tc"),
-                    limit=None, no_events=no_events,
+                # Consult db_freshness the same way _run_update_scrape
+                # does for case-family. Freshness-check is on by default
+                # for every profile that has scrape_hopt in its plan;
+                # if it was disabled (custom profile without
+                # include_freshness_check), the filter helper falls
+                # through and returns the full input untouched.
+                hopt_abbrs, hopt_langs = _filter_fresh_hopt_buckets(
+                    runner.output,
+                    ("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
+                    ("en", "tc"),
+                    kind="hopt",
+                ) if runner.settings.get("include_freshness_check") else (
+                    ("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
+                    ("en", "tc"),
                 )
+                if not hopt_abbrs:
+                    click.echo(
+                        "  update scrape_hopt: every abbr FRESH — "
+                        "skipping (freshness-scoped)."
+                    )
+                else:
+                    await _run_scrape_hopt(
+                        output=runner.output,
+                        proxies=runner.proxies,
+                        direct=runner.direct,
+                        abbrs=hopt_abbrs,
+                        langs=hopt_langs,
+                        limit=None, no_events=no_events,
+                    )
+            elif step.name == "scrape_ukpc":
+                # UKPC is EN-only per /databases (2026-07-08). The
+                # runner's TC enum is best-effort and no-ops with a
+                # WARNING log if HKLII still 500s on that endpoint.
+                # Freshness dispatch: UKPC lives under kind='cases'
+                # (see _CATEGORY_TO_KIND) so ``_filter_fresh_case_buckets``
+                # is the right dispatcher — not the hopt one.
+                from .ukpc import HOPT_C_LANGS
+                if runner.settings.get("include_freshness_check"):
+                    # UKPC is EN-only per /databases; freshness only
+                    # tracks 'en'. Pass ("en",) so all_fresh isn't
+                    # falsified by a TC row that was never expected
+                    # to exist. The scrape helper's own runner still
+                    # attempts both langs and no-ops on TC 500.
+                    ukpc_courts, _ = _filter_fresh_case_buckets(
+                        runner.output, ["ukpc"], ("en",),
+                    )
+                else:
+                    ukpc_courts = ["ukpc"]
+                if not ukpc_courts:
+                    click.echo(
+                        "  update scrape_ukpc: ukpc FRESH — "
+                        "skipping (freshness-scoped)."
+                    )
+                else:
+                    await _run_scrape_ukpc(
+                        output=runner.output,
+                        proxies=runner.proxies,
+                        direct=runner.direct,
+                        langs=HOPT_C_LANGS,
+                        limit=None, force=False, no_events=no_events,
+                    )
             elif step.name == "scrape_legis":
-                await _run_scrape_legis(
-                    output=runner.output,
-                    proxies=runner.proxies,
-                    direct=runner.direct,
-                    cap_types=("ord", "reg", "instrument"),
-                    langs=("en", "tc"),
-                    limit=None,
-                    no_events=no_events,
-                )
+                # LEGIS_LANGS is the source of truth for lang coverage.
+                # As of 2026-07-08 it's (en, tc, sc) — HKLII serves SC
+                # for the three trilingual legis slugs.
+                from .legis import LEGIS_LANGS
+                if runner.settings.get("include_freshness_check"):
+                    legis_types, legis_langs = _filter_fresh_hopt_buckets(
+                        runner.output,
+                        ("ord", "reg", "instrument"),
+                        LEGIS_LANGS,
+                        kind="legis",
+                    )
+                else:
+                    legis_types, legis_langs = (
+                        ("ord", "reg", "instrument"), LEGIS_LANGS,
+                    )
+                if not legis_types:
+                    click.echo(
+                        "  update scrape_legis: every cap_type FRESH — "
+                        "skipping (freshness-scoped)."
+                    )
+                else:
+                    await _run_scrape_legis(
+                        output=runner.output,
+                        proxies=runner.proxies,
+                        direct=runner.direct,
+                        cap_types=legis_types,
+                        langs=legis_langs,
+                        limit=None,
+                        no_events=no_events,
+                    )
             elif step.name == "backfill_legis_history":
                 await _run_backfill_legis_history(
                     output=runner.output,
@@ -2802,7 +3327,23 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
 async def _run_update_scrape(runner, step, no_events: bool) -> None:
     """Delegate to the same helper as `hklii scrape`, threading through
     the narrow-window kwargs from the plan as a single EnumWindow value
-    object so the four coupled fields can't drift apart at hop layers."""
+    object so the four coupled fields can't drift apart at hop layers.
+
+    Freshness-aware scoping (adversarial D2 finding #2): the freshness
+    step runs FIRST in the plan (when include_freshness_check is on),
+    populating db_freshness with wire counts + probe status + local
+    counts. Before dispatching the scrape, consult db_freshness and
+    drop any court whose EN AND TC are both FRESH — the ~28 probe
+    cost was spent to answer exactly this question. If every court is
+    fresh, skip the scrape entirely rather than burning enum + fetch
+    on nothing.
+
+    The freshness step's absence (include_freshness_check=False) is
+    respected: without a check_freshness step ahead of us, db_freshness
+    is stale/empty, and we default back to the original full
+    ALL_COURTS × en/tc sweep. This preserves the pre-D2 behaviour for
+    profiles that opt out.
+    """
     kw = step.kwargs
     window = EnumWindow(
         min_date_text=kw.get("min_date"),
@@ -2810,17 +3351,29 @@ async def _run_update_scrape(runner, step, no_events: bool) -> None:
         sort=kw.get("sort"),
         items_per_page=kw.get("items_per_page") or 10_000,
     )
+    court_list = list(ALL_COURTS)
+    langs: tuple[str, ...] = ("en", "tc")
+    if runner.settings.get("include_freshness_check"):
+        court_list, langs = _filter_fresh_case_buckets(
+            runner.output, court_list, langs,
+        )
+        if not court_list:
+            click.echo(
+                "  update scrape: every case bucket is FRESH — "
+                "skipping (freshness-scoped)."
+            )
+            return
     await _run_scrape(ScrapeConfig(
         output=runner.output,
         fmt_set={"html", "json", "txt", "doc"} if kw.get("allow_doc") else {"html", "json", "txt"},
         proxies=runner.proxies,
         direct=runner.direct,
-        court_list=ALL_COURTS,
+        court_list=court_list,
         limit=None,
         resume=False,
         with_summaries=kw.get("with_summaries", True),
         with_appeal_history=kw.get("with_appeal_history", True),
-        langs=("en", "tc"),
+        langs=langs,
         retry_failed=False,
         enum_max_age=0,
         save_enum_responses=False,
@@ -2981,6 +3534,268 @@ async def _run_coverage_canary(runner, step, no_events: bool) -> None:
             f"{escalation_failures} of {len(divergent)} coverage_canary "
             "escalation(s) failed — see stderr above"
         )
+
+
+async def _run_update_check_freshness(
+    runner, step, no_events: bool,
+) -> None:
+    """`check_freshness` step handler for the update dispatcher.
+
+    Opens the CheckpointDB + ProxyPool, loads the /databases matrix
+    fixture, runs :class:`FreshnessRunner.probe_all`, then computes
+    stale + first-run buckets for a one-line summary. The pool + DB
+    lifecycle mirrors ``_run_coverage_canary``'s nested-finally
+    discipline — a raise from pool.close() must not skip db.close()
+    or the checkpoint lock fd leaks and cascades to every subsequent
+    step.
+
+    Does NOT scope downstream scrape steps here — that's the
+    dispatcher's job in a follow-up wiring pass. This handler
+    populates db_freshness so the SUBSEQUENT scrape steps can read
+    it. Kept small on purpose so the freshness data flow is one-file
+    to read.
+    """
+    from .checkpoint import CheckpointDB
+    from .discovery import load_default_matrix
+    from .freshness import FreshnessRunner
+    from .proxy_pool import ProxyPool
+
+    db_path = runner.output / ".checkpoint.db"
+    runner.output.mkdir(parents=True, exist_ok=True)
+    db = CheckpointDB(str(db_path))
+    pool = None
+    try:
+        if runner.direct:
+            pool = ProxyPool(proxy_urls=[], direct=True)
+        else:
+            pool = ProxyPool(proxy_urls=runner.proxies)
+            await pool.preflight()
+        matrix = load_default_matrix()
+        freshness = FreshnessRunner(
+            get=pool.get, checkpoint=db, matrix=matrix,
+            output_dir=runner.output,
+        )
+        outcomes = await freshness.probe_all()
+        stale = freshness.stale_buckets()
+        first_run = freshness.first_run_missing()
+        healthy = sum(1 for o in outcomes if o.ok)
+        click.echo(
+            f"  check_freshness: probed={len(outcomes)} healthy={healthy} "
+            f"stale={len(stale)} first_run={len(first_run)}"
+        )
+    finally:
+        try:
+            if pool is not None:
+                await pool.close()
+        finally:
+            db.close()
+
+
+@main.command("check-freshness")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit stale-bucket report as JSON on stdout.",
+)
+@click.option(
+    "--text",
+    "as_text",
+    is_flag=True,
+    default=False,
+    help="Emit stale-bucket report as human-readable text on stdout.",
+)
+@click.option(
+    "--report",
+    "as_report",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the full fill-in-blanks Markdown table (English + Chinese "
+        "names, local/live counts + updated per lang) rather than the "
+        "stale-buckets summary."
+    ),
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+def check_freshness(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    as_json: bool,
+    as_text: bool,
+    as_report: bool,
+    yes: bool,
+    no_events: bool,
+) -> None:
+    """Probe every mapped HKLII slug × lang bucket and report freshness.
+
+    Runs the D2 freshness gate against the /databases fixture matrix,
+    upserts wire columns into db_freshness, recomputes local_count for
+    each bucket, and prints either:
+
+    - the STALE-buckets summary (default),
+    - a JSON payload (``--json``), or
+    - the full fill-in-blanks Markdown table (``--report``).
+
+    Exits 0 iff every bucket is FRESH — cron scripts can chain
+    ``hklii check-freshness && ...`` to gate on a healthy corpus.
+    ``--report`` always exits 0 — it's a rendering mode, not a gate.
+
+    \b
+    Examples:
+      hklii check-freshness --proxy http://127.0.0.1:8888
+      hklii check-freshness --direct --yes --json
+      hklii check-freshness --proxy http://127.0.0.1:8888 --report
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    modes = [as_json, as_text, as_report]
+    if sum(1 for m in modes if m) > 1:
+        raise click.UsageError(
+            "--json, --text, and --report are mutually exclusive.",
+        )
+    if direct and not yes:
+        click.confirm(
+            "Probing without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    asyncio.run(_run_check_freshness(
+        output=output, proxies=list(proxies), direct=direct,
+        as_json=as_json, as_report=as_report, no_events=no_events,
+    ))
+
+
+async def _run_check_freshness(
+    output: Path,
+    proxies: list[str],
+    direct: bool,
+    as_json: bool,
+    no_events: bool,
+    as_report: bool = False,
+) -> None:
+    """Standalone check-freshness runner. Same pool/DB lifecycle as
+    the update-step handler; separate so operators can invoke either
+    surface without the other being loaded.
+
+    Prints a one-line summary + a per-stale-bucket table in text mode,
+    or a JSON object with schema
+    ``{stale: [...], first_run: [...], probed: int, healthy: int}``
+    in --json mode. Exits nonzero (via ``click.exceptions.Exit``) iff
+    any bucket is stale so a shell chain can escalate.
+    """
+    import json as _json
+
+    from .checkpoint import CheckpointDB
+    from .discovery import load_default_matrix
+    from .events import StructuredEventLogger
+    from .freshness import FreshnessRunner, render_report_markdown
+    from .proxy_pool import ProxyPool
+
+    output.mkdir(parents=True, exist_ok=True)
+    db_path = output / ".checkpoint.db"
+    db = CheckpointDB(str(db_path))
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...", err=True)
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}", err=True)
+            click.echo(
+                f"Healthy proxies: {len(result.healthy_proxies)}", err=True,
+            )
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight."
+                )
+        matrix = load_default_matrix()
+        freshness = FreshnessRunner(
+            get=pool.get, checkpoint=db, matrix=matrix,
+            output_dir=output,
+        )
+        outcomes = await freshness.probe_all()
+        stale = freshness.stale_buckets()
+        first_run = freshness.first_run_missing()
+        healthy = sum(1 for o in outcomes if o.ok)
+
+        if as_report:
+            # Full markdown table — no stale gate, always exit 0.
+            rows = list(db.iter_freshness_rows())
+            click.echo(render_report_markdown(rows=rows, matrix=matrix))
+            return
+        if as_json:
+            payload = {
+                "probed": len(outcomes),
+                "healthy": healthy,
+                "stale": [
+                    {"kind": r.kind, "scope": r.scope, "lang": r.lang}
+                    for r in stale
+                ],
+                "first_run": [
+                    {"kind": r.kind, "scope": r.scope, "lang": r.lang}
+                    for r in first_run
+                ],
+            }
+            click.echo(_json.dumps(payload, sort_keys=True))
+        else:
+            # Human table — stderr is used for progress noise above so
+            # the table on stdout can still be piped/redirected cleanly
+            # by an operator who ran without --json.
+            click.echo(
+                f"check-freshness: probed={len(outcomes)} "
+                f"healthy={healthy} stale={len(stale)} "
+                f"first_run={len(first_run)}"
+            )
+            for r in stale:
+                click.echo(f"  STALE   {r.kind}/{r.scope}/{r.lang}")
+            for r in first_run:
+                click.echo(f"  FIRST-RUN {r.kind}/{r.scope}/{r.lang}")
+
+        # Nonzero exit iff any stale — cron chains can gate on this.
+        # First-run buckets are ALSO stale for scrape-scoping (per
+        # first_run_semantics rule 1), so include them in the exit test.
+        if stale or first_run:
+            raise click.exceptions.Exit(code=1)
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+        db.close()
 
 
 def _reset_relatedcap_fetches_via_checkpoint(output: Path) -> None:

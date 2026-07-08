@@ -48,6 +48,7 @@ class Step:
 # Human-readable estimate of wire cost per step, keyed by step name.
 # Used by `format_plan()` for dry-run output; never read for logic.
 _STEP_EST: dict[str, str] = {
+    "check_freshness": "~28 (metadata-only probes; every mapped triple)",
     "scrape": "~26 enum + N new-case fetches",
     "recheck_html": "~5-20 per queue depth",
     "generate_html": "0 (local LibreOffice/pandoc)",
@@ -55,6 +56,7 @@ _STEP_EST: dict[str, str] = {
     "enrich": "~10-50 (capped at retry_limit)",
     "coverage_canary": "~13 (13 dbs × EN only, getmetacase)",
     "scrape_hopt": "~10 enum + new-row fetches",
+    "scrape_ukpc": "~2 enum + N new-row fetches (idempotent skip)",
     "scrape_legis": "~6 enum + new-row fetches",
     "backfill_legis_history": "~500 (missing capversions)",
     "backfill_case_translations": "~50 for newly bilingual cases",
@@ -78,6 +80,11 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        # D2 freshness gate (~28 metadata-only probes) — replaces the
+        # counts-only canary as the drift-detection signal. Kept ON for
+        # every cadence including daily because it's cheap and its
+        # WHOLE POINT is to run on the schedule the canary used to.
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -89,6 +96,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         # (~5 calls/day for new bilingual cases) → keep it daily.
         "include_backfill_translations": True,
         "include_hopt": False,
+        "include_ukpc": False,
         "include_legis": False,
         "include_legis_history": False,
         "include_relatedcaps": False,
@@ -104,6 +112,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -112,6 +121,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_canary": True,
         "include_backfill_translations": True,
         "include_hopt": True,
+        "include_ukpc": True,
         "include_legis": True,
         "include_legis_history": False,
         "include_relatedcaps": False,
@@ -127,6 +137,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -134,6 +145,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_enrich": True,
         "include_canary": True,
         "include_hopt": True,
+        "include_ukpc": True,
         "include_legis": True,
         "include_legis_history": True,
         # `scrape_relatedcaps` deliberately excluded from monthly — the
@@ -154,6 +166,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -161,6 +174,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_enrich": True,
         "include_canary": True,
         "include_hopt": True,
+        "include_ukpc": True,
         "include_legis": True,
         "include_legis_history": True,
         "include_relatedcaps": True,
@@ -179,6 +193,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": False,
         "include_scrape": False,
         "include_recheck_html": False,
         "include_generate_html": False,
@@ -186,6 +201,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_enrich": False,
         "include_canary": False,
         "include_hopt": False,
+        "include_ukpc": False,
         "include_legis": False,
         "include_legis_history": False,
         "include_relatedcaps": False,
@@ -223,6 +239,7 @@ class UpdateRunner:
         canary_divergence_threshold: int | None = None,
         validate_sample: int | None = None,
         # Boolean --include-*/--no-* overrides — None keeps profile default.
+        include_freshness_check: bool | None = None,
         include_scrape: bool | None = None,
         include_recheck_html: bool | None = None,
         include_generate_html: bool | None = None,
@@ -230,6 +247,7 @@ class UpdateRunner:
         include_enrich: bool | None = None,
         include_canary: bool | None = None,
         include_hopt: bool | None = None,
+        include_ukpc: bool | None = None,
         include_legis: bool | None = None,
         include_legis_history: bool | None = None,
         include_relatedcaps: bool | None = None,
@@ -264,6 +282,7 @@ class UpdateRunner:
             "enrich_retry_limit": enrich_retry_limit,
             "canary_divergence_threshold": canary_divergence_threshold,
             "validate_sample": validate_sample,
+            "include_freshness_check": include_freshness_check,
             "include_scrape": include_scrape,
             "include_recheck_html": include_recheck_html,
             "include_generate_html": include_generate_html,
@@ -271,6 +290,7 @@ class UpdateRunner:
             "include_enrich": include_enrich,
             "include_canary": include_canary,
             "include_hopt": include_hopt,
+            "include_ukpc": include_ukpc,
             "include_legis": include_legis,
             "include_legis_history": include_legis_history,
             "include_relatedcaps": include_relatedcaps,
@@ -332,6 +352,16 @@ class UpdateRunner:
         min_date, max_date = self._date_window(today=today)
         steps: list[Step] = []
 
+        # Freshness gate runs FIRST — the dispatcher consults
+        # db_freshness after this step to scope downstream scrape
+        # buckets. Ordering matters: a post-hoc probe would tell us
+        # what we DID scrape, not what we SHOULD scrape.
+        if s.get("include_freshness_check"):
+            steps.append(Step(
+                name="check_freshness",
+                kwargs={},
+            ))
+
         if s.get("include_scrape"):
             steps.append(Step(
                 name="scrape",
@@ -386,6 +416,12 @@ class UpdateRunner:
         if s.get("include_hopt"):
             steps.append(Step(
                 name="scrape_hopt",
+                kwargs={},
+            ))
+
+        if s.get("include_ukpc"):
+            steps.append(Step(
+                name="scrape_ukpc",
                 kwargs={},
             ))
 
