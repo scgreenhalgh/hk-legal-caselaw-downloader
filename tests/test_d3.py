@@ -328,6 +328,30 @@ class TestD3PdfUrl:
         family = next(f for f in D3_FAMILIES if f.slug == "hkiac")
         assert pdf_url(family, {"pdf": ""}) is None
 
+    @pytest.mark.parametrize(
+        "bad_body",
+        [
+            None,       # HKLII returns JSON `null`
+            [],         # unexpected list-shaped body
+            "string",   # unexpected string
+            42,         # unexpected number
+        ],
+    )
+    def test_non_dict_metadata_returns_none_not_attribute_error(
+        self, bad_body,
+    ):
+        """A malformed hop-1 body must not crash the worker.
+
+        HKLII can rarely return JSON `null` or a list where a dict is
+        expected. pdf_url must degrade to "no second hop" rather than
+        raising AttributeError which _fetch_row won't catch and
+        fetch_pending only catches D3FetchError from.
+        """
+        from hklii_downloader.d3 import D3_FAMILIES, pdf_url
+
+        family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+        assert pdf_url(family, bad_body) is None
+
 
 class TestD3SaveHtml:
     """save_d3_html — shape-B slugs, one JSON sidecar per row."""
