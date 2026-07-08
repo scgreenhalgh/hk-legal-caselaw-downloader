@@ -371,30 +371,33 @@ class TestRecomputeLocalCount:
         with pytest.raises(ValueError, match="kind"):
             db.recompute_local_count("other-unknown", "hkiac", "en")
 
-    def test_cases_tc_bucket_includes_bilingual_collapsed_rows(self):
-        """Regression pin for adversarial D2 finding #4: the bilingual
-        UPSERT rule in upsert_case collapses en+tc entries to lang='en'
-        so a naive ``WHERE court=? AND lang='tc'`` count treats them as
-        NOT present in the TC bucket, forever mismatching HKLII's
-        getmetacase?lang=tc count (which includes bilingual cases with
-        a TC rendering).
+    def test_cases_tc_bucket_needs_sidecar_count_for_parity(self):
+        """Bilingual UPSERT rule collapses en+tc entries to lang='en',
+        so ``recompute_local_count("cases", scope, "tc")`` without a
+        ``sidecar_count`` returns naive-tc-only.
 
-        Setup mirrors the finding text:
-          * 1 bilingual case — upsert once as en, once as tc
-            → row stored with lang='en' due to the collapse rule
-          * 1 en-only case → row stored with lang='en'
-          * 1 tc-only case → row stored with lang='tc'
+        The prior OR compensation (``lang IN ('tc', 'en')``) tried to
+        cover the bilingual case by counting every row, but that
+        over-counts by en-only rows and permanently blocks parity for
+        every court with any en-only content — live probe on 2026-07-08
+        confirmed the compensation returned 39170 for hkca/tc against a
+        live count of 9830. The right split is:
 
-        Bilingual coverage from HKLII's perspective (both en + tc
-        renderings exist) applies to case 1 and case 3. Pre-fix,
-        ``recompute_local_count("cases", "hkcfa", "tc")`` returned 1
-        (only the tc-only row). Post-fix it must count the bilingual
-        entry — otherwise every hkcfa/tc probe is permanent-stale and
-        the freshness gate wastes wire on a full re-scrape every day.
+            live_tc  = bilingual + tc-only    (HKLII's getmetacase?lang=tc)
+            local_tc = bilingual + tc-only
+
+        We identify the bilingual count from disk via ``*.tc.json``
+        sidecars — one exists for every bilingual case (upsert
+        ``case_translations.py`` writes them alongside the en primary).
+        The caller (``FreshnessRunner``) walks the disk and passes the
+        count via ``sidecar_count``; the DB layer stays filesystem-free.
+
+        Setup mirrors the old test: 1 bilingual + 1 en-only + 1 tc-only
+        under hkcfa. The bilingual case has a ``.tc.json`` sidecar on
+        disk (represented here as ``sidecar_count=1``).
         """
         db = CheckpointDB(":memory:")
-        # Case 1: bilingual — two upserts, second is silently collapsed
-        # to lang='en' by upsert_case's CASE expression.
+        # Case 1: bilingual — two upserts, second collapses to lang='en'.
         db.upsert_case(
             "hkcfa", 2026, 1, "N1", "T", "2026-01-01", lang="en",
         )
@@ -416,35 +419,26 @@ class TestRecomputeLocalCount:
         db.claim_pending()
         db.mark_downloaded("hkcfa", 2026, 3, ["html"])
 
-        # Sanity: verify the collapse happened as the setup assumes —
-        # otherwise a change to upsert_case's rule would silently break
-        # this test's premise.
+        # Sanity: verify the collapse happened as the setup assumes.
         row1_lang = db._conn.execute(
             "SELECT lang FROM cases WHERE court='hkcfa' AND year=2026 "
             "AND number=1",
         ).fetchone()[0]
-        assert row1_lang == "en", (
-            "bilingual case did not collapse to lang='en' — test premise "
-            "is broken; upsert_case's CASE expression must have changed"
-        )
+        assert row1_lang == "en"
 
-        # EN bucket unchanged post-fix: counts bilingual + en-only.
+        # EN bucket unchanged: counts bilingual (collapsed to en) + en-only.
         assert db.recompute_local_count("cases", "hkcfa", "en") == 2
 
-        # TC bucket MUST include the bilingual row now — otherwise
-        # HKLII's getmetacase?lang=tc count of 2 (bilingual + tc-only)
-        # can never match our local, and the bucket stays permanent-
-        # stale. The count also happens to include the en-only row
-        # (schema doesn't distinguish bilingual-collapsed-to-en from
-        # true en-only), so this is a slight over-count when en-only
-        # rows exist. That still fails safe (STALE, not FRESH), which
-        # is a strict improvement over the pre-fix behaviour where TC
-        # never had a hope of parity for any bilingual court.
-        assert db.recompute_local_count("cases", "hkcfa", "tc") >= 2, (
-            "TC local_count still excludes the bilingual row — the "
-            "collapse-blind-spot fix did not land. See "
-            "adversarial D2 finding #4."
-        )
+        # TC without sidecar_count — naive: 1 tc-only row.
+        # Post-fix, this is the DETERMINISTIC value; the caller adds the
+        # sidecar count on top for the parity comparison.
+        assert db.recompute_local_count("cases", "hkcfa", "tc") == 1
+
+        # TC WITH sidecar_count — exact parity with getmetacase?lang=tc:
+        # 1 tc-only + 1 bilingual (one .tc.json exists) = 2.
+        assert db.recompute_local_count(
+            "cases", "hkcfa", "tc", sidecar_count=1,
+        ) == 2
 
 
 class TestMarkBucketScraped:
