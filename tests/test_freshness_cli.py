@@ -906,7 +906,7 @@ class TestScrapeRunnerMarksBuckets:
                 "scrape-legis",
                 "-p", "http://localhost:8888",
                 "-o", str(out),
-                "--cap-type", "ord",
+                "--abbr", "ord",
                 "--lang", "en",
             ])
         assert result.exit_code == 0, result.output
