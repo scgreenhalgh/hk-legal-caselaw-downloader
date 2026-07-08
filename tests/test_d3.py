@@ -522,3 +522,88 @@ class TestD3ExtractPdfText:
         from hklii_downloader.d3 import _try_pdftotext
 
         assert _try_pdftotext(b"%PDF-1.4") is None
+
+
+class TestD3RunnerEnumerate:
+    """D3Runner.enumerate_all — mock-get replay of a real probe fixture."""
+
+    async def test_upserts_hopt_documents_for_one_slug_one_lang(
+        self, tmp_path,
+    ):
+        import httpx
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            page = {
+                "totalfiles": 2,
+                "files": [
+                    {
+                        "title": "Companies Ordinance(32)",
+                        "path": "/en/legis/histlaw/1964/1/",
+                        "neutral": "[1964] HKHistLaws 1",
+                        "date": "1964-01-01",
+                    },
+                    {
+                        "title": "Official Languages Ordinance(5)",
+                        "path": "/en/legis/histlaw/1964/3/",
+                        "neutral": "[1964] HKHistLaws 3",
+                        "date": "1964-01-01",
+                    },
+                ],
+            }
+
+            async def mock_get(url, **kw):
+                return httpx.Response(
+                    200, json=page,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            upserted = await runner.enumerate_all()
+
+            assert upserted == 2
+            stats = db.hopt_stats_by_abbr()
+            assert stats.get("histlaw", {}).get("pending", 0) == 2
+            assert "en" in runner.langs_enumerated.get("histlaw", set())
+        finally:
+            db.close()
+
+    async def test_empty_totalfiles_still_marks_lang_enumerated(
+        self, tmp_path,
+    ):
+        """En-only slug: TC bucket returns totalfiles=0 — mark it read
+        so freshness gate flips FRESH with local=live=0.
+        """
+        import httpx
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            empty_page = {"totalfiles": 0, "files": []}
+
+            async def mock_get(url, **kw):
+                return httpx.Response(
+                    200, json=empty_page,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("tc",),
+            )
+
+            upserted = await runner.enumerate_all()
+
+            assert upserted == 0
+            assert "tc" in runner.langs_enumerated.get("histlaw", set())
+        finally:
+            db.close()
