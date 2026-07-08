@@ -41,6 +41,15 @@
 > `pcpdaab`) ship a `pdf` URL — `histlaw` on hklii.hk, `hkiac` and
 > `pcpdaab` on external source-org hosts. See `docs/d3-runner-design.md`
 > for the response shapes and the D3 runner plan.
+>
+> **Follow-up 2026-07-09** — HTML slugs (hklrccp/hklrcr/pcpdc) fully
+> scraped: 1,128 rows across en+tc+sc, all buckets FRESH. PDF slugs
+> uncovered further HKLII-side issues: histlaw + pcpdaab `/static/`
+> PDFs are HTML placeholders (real content lives at HKU library and
+> pcpd.org.hk respectively — need source-org resolvers); hkiac's
+> `hkiac.org` URLs universally 404 after HKIAC restructured (`hkiac`
+> disabled at family-spec level, rows removed from checkpoint DB).
+> See `memory/d3-live-wire-findings.md`.
 
 Every content-populated database listed at `https://www.hklii.hk/databases`
 is now on local disk. The 9 databases listed there with zero content

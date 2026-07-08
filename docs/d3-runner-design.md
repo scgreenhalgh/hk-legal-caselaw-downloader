@@ -1,19 +1,27 @@
 # D3 Runner Architecture — Design (task 23)
 
+> **Update 2026-07-09** — hkiac disabled (`enabled=False` in `D3_FAMILIES`).
+> hkiac.org restructured; every PDF URL in HKLII's metadata now 404s
+> including the category page. See `memory/d3-live-wire-findings.md`.
+> The CLI, dispatcher, and runner default to `ACTIVE_D3_FAMILIES` which
+> excludes disabled slugs. `hkiac` rows deleted from `hopt_documents`
+> in the same commit; `db_freshness` row preserved (STALE) so a future
+> HKLII fix will show up in the ledger.
+
 ## Context
 
 Six HKLII slugs remain unmapped after D2 (live counts from `db_freshness`
 as of 2026-07-08 D2 probe):
 
-| slug     | dbcat | fetch endpoint  | content | EN    | TC  | SC  |
-|----------|-------|-----------------|---------|------:|----:|----:|
-| histlaw  | H     | `gethistlaw`    | PDF     | 3,836 |   0 |   0 |
-| pcpdaab  | O     | `getother`      | PDF     |   368 | 368 |   0 |
-| hkiac    | O     | `getother`      | PDF     |   190 |   0 |   0 |
-| pcpdc    | O     | `getother`      | HTML    |   165 | 165 | 165 |
-| hklrcr   | O     | `getother`      | HTML    |   137 | 137 | 137 |
-| hklrccp  | O     | `getother`      | HTML    |    78 |  72 |  72 |
-| pd       | P     | (n/a)           | —       |     0 |   0 |   0 |
+| slug     | dbcat | fetch endpoint  | content | EN    | TC  | SC  | 2026-07-09 status |
+|----------|-------|-----------------|---------|------:|----:|----:|-------------------|
+| histlaw  | H     | `gethistlaw`    | PDF     | 3,836 |   0 |   0 | enabled — PDFs return HTML placeholder, real archive at HKU library; needs resolver |
+| pcpdaab  | O     | `getother`      | PDF     |   368 | 368 |   0 | enabled — same SPA-shell issue; source likely pcpd.org.hk |
+| hkiac    | O     | `getother`      | PDF     |   190 |   0 |   0 | **DISABLED** — hkiac.org restructured, every URL 404s |
+| pcpdc    | O     | `getother`      | HTML    |   165 | 165 | 165 | ✅ 495/495 scraped |
+| hklrcr   | O     | `getother`      | HTML    |   137 | 137 | 137 | ✅ 411/411 scraped |
+| hklrccp  | O     | `getother`      | HTML    |    78 |  72 |  72 | ✅ 222/222 scraped |
+| pd       | P     | (n/a)           | —       |     0 |   0 |   0 | not in D3_FAMILIES (empty at HKLII) |
 
 **Scale note.** `histlaw` is 5× larger than the biggest existing HOPT DB
 (`hkts` = 266 rows). Enum will paginate meaningfully — see resume /
