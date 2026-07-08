@@ -57,6 +57,43 @@ class DatabaseMatrix:
     other: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
+# Frozen ground truth for the /databases matrix. See the D1 session
+# close (2026-07-08) — refreshing is a manual Playwright step. Kept in
+# tests/fixtures/ rather than src/ so packaging stays clean; discovery
+# code walks up from __file__ to find it. The fallback (empty matrix)
+# only trips when the fixture is missing entirely — every consumer that
+# depends on a non-empty matrix (FreshnessRunner, drift-guard tests)
+# raises loudly on the empty case.
+_DEFAULT_MATRIX_FIXTURE = "databases_page_rendered_2026-07-08.html"
+
+
+def load_default_matrix() -> DatabaseMatrix:
+    """Load the checked-in ``/databases`` fixture as a
+    :class:`DatabaseMatrix`.
+
+    Callers (``FreshnessRunner``, ``hklii check-freshness``,
+    ``hklii update``'s freshness step) rely on the fixture as the
+    authoritative slug × lang list until D3 ships a live-render step.
+    A missing fixture raises FileNotFoundError so an operator who
+    accidentally shipped without ``tests/fixtures/`` sees a clear
+    signal instead of a silently-empty matrix.
+    """
+    # Walk up from this file to the repo root, then into tests/fixtures.
+    # Deliberately dev-mode-friendly — we're not packaging the fixture as
+    # data yet because D3 will replace the whole approach.
+    from pathlib import Path
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "tests" / "fixtures" / _DEFAULT_MATRIX_FIXTURE
+        if candidate.is_file():
+            return parse_databases_matrix(candidate.read_text())
+    raise FileNotFoundError(
+        f"Cannot find fixture {_DEFAULT_MATRIX_FIXTURE!r} beneath any "
+        f"ancestor of {here}. Refresh via a Playwright render of "
+        "https://www.hklii.hk/databases and drop into tests/fixtures/."
+    )
+
+
 def parse_databases_matrix(html: str) -> DatabaseMatrix:
     """Parse the rendered ``/databases`` HTML into a
     :class:`DatabaseMatrix`.

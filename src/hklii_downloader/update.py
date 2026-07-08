@@ -48,6 +48,7 @@ class Step:
 # Human-readable estimate of wire cost per step, keyed by step name.
 # Used by `format_plan()` for dry-run output; never read for logic.
 _STEP_EST: dict[str, str] = {
+    "check_freshness": "~28 (metadata-only probes; every mapped triple)",
     "scrape": "~26 enum + N new-case fetches",
     "recheck_html": "~5-20 per queue depth",
     "generate_html": "0 (local LibreOffice/pandoc)",
@@ -79,6 +80,11 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        # D2 freshness gate (~28 metadata-only probes) — replaces the
+        # counts-only canary as the drift-detection signal. Kept ON for
+        # every cadence including daily because it's cheap and its
+        # WHOLE POINT is to run on the schedule the canary used to.
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -106,6 +112,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -130,6 +137,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -158,6 +166,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": True,
         "include_scrape": True,
         "include_recheck_html": True,
         "include_generate_html": True,
@@ -184,6 +193,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "enrich_retry_limit": 100,
         "validate_sample": 2000,
         "canary_divergence_threshold": 5,
+        "include_freshness_check": False,
         "include_scrape": False,
         "include_recheck_html": False,
         "include_generate_html": False,
@@ -229,6 +239,7 @@ class UpdateRunner:
         canary_divergence_threshold: int | None = None,
         validate_sample: int | None = None,
         # Boolean --include-*/--no-* overrides — None keeps profile default.
+        include_freshness_check: bool | None = None,
         include_scrape: bool | None = None,
         include_recheck_html: bool | None = None,
         include_generate_html: bool | None = None,
@@ -271,6 +282,7 @@ class UpdateRunner:
             "enrich_retry_limit": enrich_retry_limit,
             "canary_divergence_threshold": canary_divergence_threshold,
             "validate_sample": validate_sample,
+            "include_freshness_check": include_freshness_check,
             "include_scrape": include_scrape,
             "include_recheck_html": include_recheck_html,
             "include_generate_html": include_generate_html,
@@ -339,6 +351,16 @@ class UpdateRunner:
         s = self.settings
         min_date, max_date = self._date_window(today=today)
         steps: list[Step] = []
+
+        # Freshness gate runs FIRST — the dispatcher consults
+        # db_freshness after this step to scope downstream scrape
+        # buckets. Ordering matters: a post-hoc probe would tell us
+        # what we DID scrape, not what we SHOULD scrape.
+        if s.get("include_freshness_check"):
+            steps.append(Step(
+                name="check_freshness",
+                kwargs={},
+            ))
 
         if s.get("include_scrape"):
             steps.append(Step(
