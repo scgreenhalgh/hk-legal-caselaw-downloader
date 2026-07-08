@@ -75,9 +75,19 @@ class UkpcJudgment:
     content_html: str
 
 
-# Match /<year>/<num>/ from the "path" field in gethoptfiles.
-# getother's path field is e.g. "/1997/40/" (no lang or abbr prefix).
-_PATH_RE = re.compile(r"^/(\d{4})/(\d+)/?$")
+# Match the "path" field returned by ``gethoptfiles?dbcat=C``. Two
+# shapes are known live (as of 2026-07-08 probe via 20-proxy pool):
+#
+#   /en/cases/ukpc/1997/40      ← what LIVE gethoptfiles returns
+#   /1997/40/                   ← what ``getother``'s path field is
+#
+# The prior version pinned this to the bare shape only, which caused
+# every one of the 242 UKPC entries to be silently skipped during
+# ``parse_hopt_c_listing`` — Downloaded=0, Failed=0 with no error.
+# Accepting both keeps the parser robust if HKLII ever swaps the two.
+_PATH_RE = re.compile(
+    r"^(?:/(?:en|tc)/cases/[a-z]+)?/(\d{4})/(\d+)/?$"
+)
 
 
 def gethoptfiles_c_url(
