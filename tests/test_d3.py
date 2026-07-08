@@ -1255,6 +1255,134 @@ class TestD3RunnerFetchFailures:
             db.close()
 
 
+class TestD3RunnerAbbrScoping:
+    """C1 + H4 — cross-runner isolation via abbr-scoped queue operations.
+
+    D3Runner must NEVER touch pending rows outside its own family set,
+    even though hopt_documents is shared with HoptRunner and other D3
+    runs on different --slug subsets. Corrupting a foreign row by
+    marking it failed with 'unknown family' is a permanent data loss
+    because upsert_hopt_document preserves status on conflict.
+    """
+
+    async def test_does_not_touch_hopt_family_pending_rows(self, tmp_path):
+        """Precondition: pending bahkg row (HoptRunner state).
+        Action: D3Runner.fetch_pending with default D3_FAMILIES.
+        Postcondition: bahkg row still 'pending', no wire call fired.
+        """
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="bahkg", year=2020, num=12, lang="en",
+                title="T", neutral=None, doc_date=None,
+            )
+
+            call_count = {"n": 0}
+
+            async def mock_get(url, **kw):
+                call_count["n"] += 1
+                raise AssertionError(f"unexpected wire call to {url}")
+
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=D3_FAMILIES, langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 0
+            assert result.failed == 0
+            assert call_count["n"] == 0
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents WHERE abbr='bahkg'"
+            ).fetchone()
+            assert row[0] == "pending"
+            assert row[1] is None
+        finally:
+            db.close()
+
+    async def test_does_not_touch_other_d3_slug_pending_rows(self, tmp_path):
+        """Precondition: pending histlaw row (from a prior partial D3 run).
+        Action: D3Runner.fetch_pending scoped to --slug hklrccp only.
+        Postcondition: histlaw row still 'pending', not marked failed.
+        """
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="histlaw", year=1964, num=1, lang="en",
+                title="T", neutral=None, doc_date=None,
+            )
+
+            async def mock_get(url, **kw):
+                raise AssertionError(f"unexpected wire call to {url}")
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.failed == 0
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents WHERE abbr='histlaw'"
+            ).fetchone()
+            assert row[0] == "pending"
+            assert row[1] is None
+        finally:
+            db.close()
+
+    async def test_does_not_release_in_progress_hopt_family_rows(
+        self, tmp_path,
+    ):
+        """release_in_progress_hopt must be abbr-scoped too.
+
+        Precondition: bahkg row stuck at 'in_progress' from a HoptRunner crash.
+        Action: D3Runner.fetch_pending (called even when no D3 rows pending).
+        Postcondition: bahkg row still 'in_progress' — HoptRunner recovers it,
+        not D3Runner.
+        """
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="bahkg", year=2020, num=12, lang="en",
+                title="T", neutral=None, doc_date=None,
+            )
+            # Force the row to in_progress (as if a HoptRunner worker
+            # claimed it and crashed).
+            db._conn.execute(
+                "UPDATE hopt_documents SET status='in_progress' "
+                "WHERE abbr='bahkg' AND year=2020 AND num=12 AND lang='en'"
+            )
+            db._conn.commit()
+
+            async def mock_get(url, **kw):
+                raise AssertionError(f"unexpected wire call to {url}")
+
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=D3_FAMILIES, langs=("en",),
+            )
+            await runner.fetch_pending()
+
+            row = db._conn.execute(
+                "SELECT status FROM hopt_documents WHERE abbr='bahkg'"
+            ).fetchone()
+            assert row[0] == "in_progress"
+        finally:
+            db.close()
+
+
 class TestD3RunnerRun:
     """D3Runner.run — enumerate + fetch composed; result surface."""
 
