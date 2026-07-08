@@ -1149,11 +1149,45 @@ async def _run_scrape(config: ScrapeConfig) -> None:
             )
             result = await _download_with_progress(scraper, target)
             click.echo(f"\nDone. Downloaded: {result.downloaded}, Failed: {result.failed}")
+        # Freshness ledger close-out: every (court, lang) bucket we
+        # just swept gets its last_scrape_completed_at bumped so
+        # ``_fresh`` can flip the bucket to FRESH on the next probe.
+        # Without this, --skip-if-fresh never skips and hklii check-
+        # freshness can never exit 0 — see adversarial D2 finding #1.
+        # Placed inside the try so a preflight failure doesn't reach
+        # it; placed OUTSIDE the ``stats['pending'] == 0`` branch so
+        # a full-scrape run with no pending queue (already downloaded
+        # everything) still marks the buckets fresh.
+        _mark_case_buckets_scraped(db, court_list, langs)
     finally:
         if events is not None:
             await events.aclose()
         await pool.close()
         db.close()
+
+
+def _mark_case_buckets_scraped(
+    db, court_list: list[str], langs: tuple[str, ...],
+) -> None:
+    """Bump ``last_scrape_completed_at`` on every (court, lang) pair
+    just swept. Called by ``_run_scrape`` at clean-completion.
+
+    Extracted so scrape / update-scrape share a single call site — if
+    a future scrape helper needs to skip specific buckets (e.g. one
+    that failed enum), it can call this helper with the surviving
+    list rather than duplicating the freshness wiring.
+
+    Kept small and side-effect-focused: no wire cost, purely a
+    db_freshness UPSERT per (court, lang). Errors are caller-visible
+    because ``mark_bucket_scraped`` raises rather than swallows.
+    """
+    import time as _time
+    now = int(_time.time())
+    for court in court_list:
+        for lang in langs:
+            db.mark_bucket_scraped(
+                "cases", court, lang, completed_at=now,
+            )
 
 
 _print_lock = asyncio.Lock()
@@ -1597,6 +1631,17 @@ async def _run_scrape_legis(
                 f"Failed: {result.failed}."
             )
             click.echo(f"By capType: {db.legis_stats_by_abbr()}")
+        # Freshness ledger close-out — see the equivalent block in
+        # _run_scrape (finding #1). Marks every (cap_type, lang) pair
+        # so the freshness gate can eventually flip these buckets
+        # FRESH.
+        import time as _time
+        now = int(_time.time())
+        for cap_type in cap_types:
+            for lang in langs:
+                db.mark_bucket_scraped(
+                    "legis", cap_type, lang, completed_at=now,
+                )
     finally:
         if events is not None:
             await events.aclose()
@@ -2529,6 +2574,14 @@ async def _run_scrape_hopt(
                 f"Failed: {result.failed}."
             )
             click.echo(f"By abbr: {db.hopt_stats_by_abbr()}")
+        # Freshness ledger close-out — see finding #1.
+        import time as _time
+        now = int(_time.time())
+        for abbr in abbrs:
+            for lang in langs:
+                db.mark_bucket_scraped(
+                    "hopt", abbr, lang, completed_at=now,
+                )
     finally:
         if events is not None:
             await events.aclose()
@@ -2745,6 +2798,15 @@ async def _run_scrape_ukpc(
             "WHERE court='ukpc' AND status='downloaded'"
         ).fetchone()[0]
         click.echo(f"UKPC rows now in cases table: {total_count}")
+        # Freshness ledger close-out — see finding #1. UKPC rows live
+        # in the cases table so kind='cases' matches its DatabaseMatrix
+        # classification (see freshness.classify's cases-ukpc branch).
+        import time as _time
+        now = int(_time.time())
+        for lang in langs:
+            db.mark_bucket_scraped(
+                "cases", "ukpc", lang, completed_at=now,
+            )
     finally:
         if events is not None:
             await events.aclose()
