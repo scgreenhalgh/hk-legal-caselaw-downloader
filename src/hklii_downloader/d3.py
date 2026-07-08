@@ -20,6 +20,10 @@ and unmotivated.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlencode
+
+_BASE_URL = "https://www.hklii.hk"
+_DEFAULT_PAGE_SIZE = 300
 
 
 @dataclass(frozen=True)
@@ -45,3 +49,18 @@ D3_LANGS: tuple[str, ...] = ("en", "tc", "sc")
 
 def wire_abbr(family: D3Family) -> str:
     return family.wire_abbr
+
+
+def gethoptfiles_url(
+    family: D3Family, lang: str, page: int, items_per_page: int,
+    sort: str = "-date",
+) -> str:
+    qs = urlencode({
+        "dbcat": family.dbcat,
+        "abbr": family.slug,
+        "lang": lang,
+        "itemsPerPage": items_per_page,
+        "page": page,
+        "sort": sort,
+    })
+    return f"{_BASE_URL}/api/gethoptfiles?{qs}"
