@@ -727,3 +727,252 @@ class TestCheckFreshnessFixtureIntegration:
             "stale list is empty even though no bucket has "
             "last_scrape_completed_at set"
         )
+
+
+class TestScrapeRunnerMarksBuckets:
+    """Regression pins for adversarial D2 finding #1: every scrape
+    runner (BulkScraper, HoptRunner, LegisRunner, UkpcRunner) must
+    call ``CheckpointDB.mark_bucket_scraped`` for each (kind, scope,
+    lang) it swept, so ``_fresh`` rule (e) can eventually flip a
+    bucket to FRESH.
+
+    Pre-fix, no scrape runner touched mark_bucket_scraped anywhere —
+    ``grep -rn mark_bucket_scraped src/`` returned only the module
+    definition + the FreshnessRunner delegator. In production
+    ``last_scrape_completed_at`` stayed NULL forever, every bucket
+    always failed rule (e), ``hklii check-freshness`` could not exit
+    0, and any cron script chained ``check-freshness && ...`` chain-
+    failed every run. This suite proves the wire lands.
+    """
+
+    def test_scrape_marks_case_buckets_on_clean_completion(
+        self, tmp_path,
+    ):
+        """After ``_run_scrape`` completes cleanly for court_list ×
+        langs, every (cases, court, lang) triple must have a
+        ``last_scrape_completed_at`` set in ``db_freshness``. Without
+        this the freshness gate never flips FRESH.
+        """
+        from unittest.mock import patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import main
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.scraper import ScrapeResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        async def noop_enumerate(self, courts, langs=("en", "tc")):
+            return 0
+
+        async def noop_download_all(self, on_progress=None):
+            return ScrapeResult(downloaded=0, failed=0)
+
+        with patch(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight,
+        ), patch(
+            "hklii_downloader.scraper.BulkScraper.enumerate", noop_enumerate,
+        ), patch(
+            "hklii_downloader.scraper.BulkScraper.download_all",
+            noop_download_all,
+        ):
+            result = CliRunner().invoke(main, [
+                "scrape",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--courts", "hkcfa",
+                "--lang", "en",
+            ])
+        assert result.exit_code == 0, result.output
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            rec = db.get_freshness_row("cases", "hkcfa", "en")
+        finally:
+            db.close()
+        assert rec is not None, (
+            "no db_freshness row for cases/hkcfa/en after scrape — "
+            "mark_bucket_scraped is not wired into the scrape "
+            "runner. See finding #1."
+        )
+        assert rec.last_scrape_completed_at is not None, (
+            "db_freshness row exists but last_scrape_completed_at is "
+            "NULL — scrape completed without touching the freshness "
+            "ledger. _fresh rule (e) will keep every bucket STALE. "
+            "See finding #1."
+        )
+
+    def test_scrape_hopt_marks_hopt_buckets_on_clean_completion(
+        self, tmp_path,
+    ):
+        """Same wiring for scrape-hopt: HoptRunner must flag each
+        (hopt, abbr, lang) bucket after ``fetch_pending`` completes."""
+        from unittest.mock import patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import main
+        from hklii_downloader.hopt import HoptRunResult
+        from hklii_downloader.proxy_pool import PreflightResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        async def noop_enumerate_all(self):
+            return 0
+
+        async def noop_fetch_pending(self, on_progress=None):
+            return HoptRunResult(downloaded=0, failed=0)
+
+        with patch(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight,
+        ), patch(
+            "hklii_downloader.hopt.HoptRunner.enumerate_all", noop_enumerate_all,
+        ), patch(
+            "hklii_downloader.hopt.HoptRunner.fetch_pending", noop_fetch_pending,
+        ):
+            result = CliRunner().invoke(main, [
+                "scrape-hopt",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--abbr", "hkts",
+                "--lang", "en",
+            ])
+        assert result.exit_code == 0, result.output
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            rec = db.get_freshness_row("hopt", "hkts", "en")
+        finally:
+            db.close()
+        assert rec is not None, (
+            "no db_freshness row for hopt/hkts/en after scrape-hopt — "
+            "wire missing. See finding #1."
+        )
+        assert rec.last_scrape_completed_at is not None, (
+            "hopt/hkts/en db_freshness row has NULL "
+            "last_scrape_completed_at. See finding #1."
+        )
+
+    def test_scrape_legis_marks_legis_buckets_on_clean_completion(
+        self, tmp_path,
+    ):
+        """scrape-legis wiring — LegisRunner marks (legis, cap_type,
+        lang) buckets after fetch_pending completes."""
+        from unittest.mock import patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import main
+        from hklii_downloader.legis import LegisRunResult
+        from hklii_downloader.proxy_pool import PreflightResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        async def noop_enumerate_all(self):
+            return 0
+
+        async def noop_fetch_pending(self, on_progress=None):
+            return LegisRunResult(downloaded=0, failed=0)
+
+        with patch(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight,
+        ), patch(
+            "hklii_downloader.legis.LegisRunner.enumerate_all",
+            noop_enumerate_all,
+        ), patch(
+            "hklii_downloader.legis.LegisRunner.fetch_pending",
+            noop_fetch_pending,
+        ):
+            result = CliRunner().invoke(main, [
+                "scrape-legis",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--cap-type", "ord",
+                "--lang", "en",
+            ])
+        assert result.exit_code == 0, result.output
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            rec = db.get_freshness_row("legis", "ord", "en")
+        finally:
+            db.close()
+        assert rec is not None, (
+            "no db_freshness row for legis/ord/en after scrape-legis — "
+            "wire missing. See finding #1."
+        )
+        assert rec.last_scrape_completed_at is not None, (
+            "legis/ord/en db_freshness row has NULL "
+            "last_scrape_completed_at. See finding #1."
+        )
+
+    def test_scrape_ukpc_marks_ukpc_bucket_on_clean_completion(
+        self, tmp_path,
+    ):
+        """scrape-ukpc wiring — UkpcRunner marks (cases, ukpc, lang)
+        buckets after run() completes. UKPC lives at kind='cases'
+        because its rows live in the cases table (see ukpc.py)."""
+        from unittest.mock import patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import main
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.ukpc import UkpcRunResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        async def noop_run(self, on_progress=None):
+            return UkpcRunResult(downloaded=0, failed=0)
+
+        with patch(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight,
+        ), patch(
+            "hklii_downloader.ukpc.UkpcRunner.run", noop_run,
+        ):
+            result = CliRunner().invoke(main, [
+                "scrape-ukpc",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--lang", "en",
+            ])
+        assert result.exit_code == 0, result.output
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            rec = db.get_freshness_row("cases", "ukpc", "en")
+        finally:
+            db.close()
+        assert rec is not None, (
+            "no db_freshness row for cases/ukpc/en after scrape-ukpc — "
+            "wire missing. See finding #1."
+        )
+        assert rec.last_scrape_completed_at is not None, (
+            "cases/ukpc/en db_freshness row has NULL "
+            "last_scrape_completed_at. See finding #1."
+        )
