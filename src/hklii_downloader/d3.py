@@ -64,3 +64,13 @@ def gethoptfiles_url(
         "sort": sort,
     })
     return f"{_BASE_URL}/api/gethoptfiles?{qs}"
+
+
+def fetch_url(family: D3Family, year: int, num: int, lang: str) -> str:
+    qs = urlencode({
+        "lang": lang,
+        "abbr": wire_abbr(family),
+        "year": year,
+        "num": num,
+    })
+    return f"{_BASE_URL}/api/{family.fetch_endpoint}?{qs}"
