@@ -382,6 +382,137 @@ class TestUpdateDispatchFreshnessStep:
         )
 
 
+class TestUpdateScrapeConsumesFreshnessResult:
+    """Regression pins for adversarial D2 finding #2:
+    ``_run_update_check_freshness`` populates db_freshness, but
+    ``_run_update_scrape`` hardcoded ``court_list=ALL_COURTS`` and
+    ignored what the freshness step wrote. Net effect on every
+    ``hklii update -p daily`` etc: ~28 wire probes wasted, then the
+    scrape rescans every court × en/tc regardless.
+
+    The fix reads db_freshness right before the scrape step and
+    filters (court, lang) buckets whose ``_fresh`` returns True.
+    Verified two ways: (a) an all-fresh state skips ``_run_scrape``
+    entirely, (b) a partly-stale state passes a REDUCED court_list to
+    ``_run_scrape``.
+    """
+
+    def _seed_fresh(self, db, kind, scope, lang):
+        """Same _seed_fresh as TestSkipIfFreshFilterHelpers — puts
+        the (kind, scope, lang) triple into a state _fresh() accepts."""
+        db.upsert_freshness_probe(
+            kind, scope, lang,
+            live_count=100, live_updated_at="2026-07-07",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        db._conn.execute(
+            "UPDATE db_freshness SET local_count=100, local_counted_at=? "
+            "WHERE kind=? AND scope=? AND lang=?",
+            (1_720_000_100, kind, scope, lang),
+        )
+        db._conn.commit()
+        db.mark_bucket_scraped(
+            kind, scope, lang,
+            completed_at=_hkt_ts_at("2026-07-08"),
+        )
+
+    def test_update_scrape_skips_run_when_every_case_bucket_is_fresh(
+        self, tmp_path,
+    ):
+        """If db_freshness marks every ALL_COURTS × en/tc pair FRESH,
+        ``_run_update_scrape`` must NOT invoke ``_run_scrape``. The
+        prior implementation wasted every probe by scraping anyway."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import ALL_COURTS, _run_update_scrape
+        from hklii_downloader.update import Step, UpdateRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        for court in ALL_COURTS:
+            for lang in ("en", "tc"):
+                self._seed_fresh(db, "cases", court, lang)
+        db.close()
+
+        runner = UpdateRunner(
+            profile="daily", output=tmp_path, proxies=["p"],
+        )
+        step = Step(name="scrape", kwargs={
+            "recent_days": 30, "items_per_page": 500,
+            "min_date": None, "max_date": None, "sort": None,
+            "allow_doc": True,
+            "with_summaries": True, "with_appeal_history": True,
+        })
+
+        with patch(
+            "hklii_downloader.cli._run_scrape",
+            new=AsyncMock(),
+        ) as m_run_scrape:
+            asyncio.run(_run_update_scrape(
+                runner, step, no_events=True,
+            ))
+
+        assert m_run_scrape.await_count == 0, (
+            "_run_update_scrape invoked _run_scrape even though every "
+            "case bucket in db_freshness is FRESH — the update run "
+            "burned probe cost on check_freshness for nothing. See "
+            "finding #2."
+        )
+
+    def test_update_scrape_narrows_court_list_when_some_are_fresh(
+        self, tmp_path,
+    ):
+        """Half the courts fresh, half stale → ``_run_scrape`` runs
+        but with a court_list that DROPS the fresh ones. Pins the
+        wire between db_freshness and the ScrapeConfig."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import ALL_COURTS, _run_update_scrape
+        from hklii_downloader.update import Step, UpdateRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        # Mark the first 6 courts fresh; leave the rest first-run so
+        # they'll be treated as stale by _filter_fresh_case_buckets.
+        fresh_courts = ALL_COURTS[:6]
+        stale_courts = ALL_COURTS[6:]
+        for court in fresh_courts:
+            for lang in ("en", "tc"):
+                self._seed_fresh(db, "cases", court, lang)
+        db.close()
+
+        runner = UpdateRunner(
+            profile="daily", output=tmp_path, proxies=["p"],
+        )
+        step = Step(name="scrape", kwargs={
+            "recent_days": 30, "items_per_page": 500,
+            "min_date": None, "max_date": None, "sort": None,
+            "allow_doc": True,
+            "with_summaries": True, "with_appeal_history": True,
+        })
+
+        with patch(
+            "hklii_downloader.cli._run_scrape",
+            new=AsyncMock(),
+        ) as m_run_scrape:
+            asyncio.run(_run_update_scrape(
+                runner, step, no_events=True,
+            ))
+
+        assert m_run_scrape.await_count == 1, (
+            "_run_update_scrape should have invoked _run_scrape once "
+            "for the stale-bucket half"
+        )
+        cfg = m_run_scrape.await_args.args[0]
+        assert set(cfg.court_list) == set(stale_courts), (
+            "court_list passed to _run_scrape includes fresh courts — "
+            "the freshness-based scoping did not land. Got: "
+            f"{sorted(cfg.court_list)}. Expected: {sorted(stale_courts)}."
+        )
+
+
 # -------- --skip-if-fresh on scrape / scrape-hopt / scrape-ukpc / scrape-legis
 
 class TestScrapeSkipIfFreshFlag:
