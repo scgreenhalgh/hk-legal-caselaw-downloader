@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlencode
 
-from .atomic_write import atomic_write_text
+from .atomic_write import atomic_write_bytes, atomic_write_text
 
 _log = logging.getLogger("hklii_downloader.d3")
 
@@ -131,6 +131,37 @@ def save_d3_html(
         json.dumps(response, ensure_ascii=False, indent=2),
     )
     return ["json"]
+
+
+def save_d3_pdf(
+    output_dir: Path, family: D3Family,
+    year: int, num: int, lang: str,
+    metadata: dict, pdf_bytes: bytes,
+    extracted_text: str | None,
+) -> list[str]:
+    """Shape-A/C save — metadata JSON + PDF binary + optional .txt sidecar.
+
+    The metadata JSON is written verbatim so a future audit can compare
+    the mirrored ``.pdf`` against the ``pdf`` field's original URL
+    (important for cross-origin hkiac / pcpdaab rows). Extracted text
+    is best-effort; a missing ``.txt`` sidecar does not degrade the
+    row's ``downloaded`` status because the binary IS the source of
+    truth.
+    """
+    base = _row_dir(output_dir, family, year, num)
+    stem = _stem(family, year, num, lang)
+
+    atomic_write_text(
+        base / f"{stem}.json",
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+    )
+    atomic_write_bytes(base / f"{stem}.pdf", pdf_bytes)
+
+    formats = ["json", "pdf"]
+    if extracted_text is not None:
+        atomic_write_text(base / f"{stem}.txt", extracted_text)
+        formats.append("txt")
+    return formats
 
 
 def pdf_url(family: D3Family, response: dict) -> str | None:
