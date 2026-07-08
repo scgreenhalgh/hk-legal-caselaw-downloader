@@ -56,18 +56,27 @@ class D3Family:
     enabled: bool = True
 
 
-# hkiac.org has restructured — every PDF URL in HKLII's getother
-# metadata (2001-2021 UDRP decisions) returns 404 as of 2026-07-09,
-# and the category page itself 404s so no obvious replacement pattern
-# exists. Disabled at family-spec level; if HKLII updates the metadata
-# or HKIAC republishes under a discoverable path, flip this back to
-# True. See `memory/d3-live-wire-findings.md`.
+# Three PDF slugs are disabled because HKLII's `pdf` URLs are broken:
+#
+# * histlaw   — /static/en/histlaw/*.pdf serves the SPA HTML placeholder
+#               (200 text/html, ~2.7 kB). Real archive at HKU library
+#               (oelawhk.lib.hku.hk). Needs a resolver.
+# * pcpdaab   — same SPA-HTML issue. Real source is pcpd.org.hk
+#               (/english/enforcement/decisions/decisions.html).
+# * hkiac     — hkiac.org restructured 2026-07-09; every URL in HKLII's
+#               metadata (2001-2021 UDRP decisions) 404s, category page
+#               also 404s. Provenance only unless HKIAC republishes.
+#
+# The disabled families stay in D3_FAMILIES for provenance (freshness
+# ledger continues to probe and track the STALE state). ACTIVE_D3_FAMILIES
+# is the runtime default at every callsite. See
+# `memory/d3-live-wire-findings.md`.
 D3_FAMILIES: tuple[D3Family, ...] = (
-    D3Family("histlaw", "H", "gethistlaw", "hkhistlaws", "pdf"),
+    D3Family("histlaw", "H", "gethistlaw", "hkhistlaws", "pdf", enabled=False),
     D3Family("hkiac", "O", "getother", "hkiac", "pdf", enabled=False),
     D3Family("hklrccp", "O", "getother", "hklrccp", "html"),
     D3Family("hklrcr", "O", "getother", "hklrcr", "html"),
-    D3Family("pcpdaab", "O", "getother", "pcpdaab", "pdf"),
+    D3Family("pcpdaab", "O", "getother", "pcpdaab", "pdf", enabled=False),
     D3Family("pcpdc", "O", "getother", "pcpdc", "html"),
 )
 
