@@ -55,6 +55,7 @@ _STEP_EST: dict[str, str] = {
     "enrich": "~10-50 (capped at retry_limit)",
     "coverage_canary": "~13 (13 dbs × EN only, getmetacase)",
     "scrape_hopt": "~10 enum + new-row fetches",
+    "scrape_ukpc": "~2 enum + N new-row fetches (idempotent skip)",
     "scrape_legis": "~6 enum + new-row fetches",
     "backfill_legis_history": "~500 (missing capversions)",
     "backfill_case_translations": "~50 for newly bilingual cases",
@@ -89,6 +90,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         # (~5 calls/day for new bilingual cases) → keep it daily.
         "include_backfill_translations": True,
         "include_hopt": False,
+        "include_ukpc": False,
         "include_legis": False,
         "include_legis_history": False,
         "include_relatedcaps": False,
@@ -112,6 +114,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_canary": True,
         "include_backfill_translations": True,
         "include_hopt": True,
+        "include_ukpc": True,
         "include_legis": True,
         "include_legis_history": False,
         "include_relatedcaps": False,
@@ -134,6 +137,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_enrich": True,
         "include_canary": True,
         "include_hopt": True,
+        "include_ukpc": True,
         "include_legis": True,
         "include_legis_history": True,
         # `scrape_relatedcaps` deliberately excluded from monthly — the
@@ -161,6 +165,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_enrich": True,
         "include_canary": True,
         "include_hopt": True,
+        "include_ukpc": True,
         "include_legis": True,
         "include_legis_history": True,
         "include_relatedcaps": True,
@@ -186,6 +191,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_enrich": False,
         "include_canary": False,
         "include_hopt": False,
+        "include_ukpc": False,
         "include_legis": False,
         "include_legis_history": False,
         "include_relatedcaps": False,
@@ -230,6 +236,7 @@ class UpdateRunner:
         include_enrich: bool | None = None,
         include_canary: bool | None = None,
         include_hopt: bool | None = None,
+        include_ukpc: bool | None = None,
         include_legis: bool | None = None,
         include_legis_history: bool | None = None,
         include_relatedcaps: bool | None = None,
@@ -271,6 +278,7 @@ class UpdateRunner:
             "include_enrich": include_enrich,
             "include_canary": include_canary,
             "include_hopt": include_hopt,
+            "include_ukpc": include_ukpc,
             "include_legis": include_legis,
             "include_legis_history": include_legis_history,
             "include_relatedcaps": include_relatedcaps,
@@ -386,6 +394,12 @@ class UpdateRunner:
         if s.get("include_hopt"):
             steps.append(Step(
                 name="scrape_hopt",
+                kwargs={},
+            ))
+
+        if s.get("include_ukpc"):
+            steps.append(Step(
+                name="scrape_ukpc",
                 kwargs={},
             ))
 

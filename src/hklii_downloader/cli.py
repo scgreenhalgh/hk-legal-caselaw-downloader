@@ -2694,6 +2694,7 @@ _UPDATE_PROFILES = ("daily", "weekly", "monthly", "quarterly", "custom")
 @click.option("--include-enrich/--no-enrich", default=None)
 @click.option("--include-canary/--no-canary", default=None)
 @click.option("--include-hopt/--no-hopt", default=None)
+@click.option("--include-ukpc/--no-ukpc", default=None)
 @click.option("--include-legis/--no-legis", default=None)
 @click.option("--include-legis-history/--no-legis-history", default=None)
 @click.option("--include-relatedcaps/--no-relatedcaps", default=None)
@@ -2728,6 +2729,7 @@ def update_command(
     include_enrich: bool | None,
     include_canary: bool | None,
     include_hopt: bool | None,
+    include_ukpc: bool | None,
     include_legis: bool | None,
     include_legis_history: bool | None,
     include_relatedcaps: bool | None,
@@ -2783,6 +2785,7 @@ def update_command(
             include_enrich=include_enrich,
             include_canary=include_canary,
             include_hopt=include_hopt,
+            include_ukpc=include_ukpc,
             include_legis=include_legis,
             include_legis_history=include_legis_history,
             include_relatedcaps=include_relatedcaps,
@@ -2902,6 +2905,18 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
                     abbrs=("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
                     langs=("en", "tc"),
                     limit=None, no_events=no_events,
+                )
+            elif step.name == "scrape_ukpc":
+                # UKPC is EN-only per /databases (2026-07-08). The
+                # runner's TC enum is best-effort and no-ops with a
+                # WARNING log if HKLII still 500s on that endpoint.
+                from .ukpc import HOPT_C_LANGS
+                await _run_scrape_ukpc(
+                    output=runner.output,
+                    proxies=runner.proxies,
+                    direct=runner.direct,
+                    langs=HOPT_C_LANGS,
+                    limit=None, force=False, no_events=no_events,
                 )
             elif step.name == "scrape_legis":
                 await _run_scrape_legis(
