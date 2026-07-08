@@ -3135,36 +3135,94 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
             elif step.name == "coverage_canary":
                 await _run_coverage_canary(runner, step, no_events)
             elif step.name == "scrape_hopt":
-                await _run_scrape_hopt(
-                    output=runner.output,
-                    proxies=runner.proxies,
-                    direct=runner.direct,
-                    abbrs=("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
-                    langs=("en", "tc"),
-                    limit=None, no_events=no_events,
+                # Consult db_freshness the same way _run_update_scrape
+                # does for case-family. Freshness-check is on by default
+                # for every profile that has scrape_hopt in its plan;
+                # if it was disabled (custom profile without
+                # include_freshness_check), the filter helper falls
+                # through and returns the full input untouched.
+                hopt_abbrs, hopt_langs = _filter_fresh_hopt_buckets(
+                    runner.output,
+                    ("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
+                    ("en", "tc"),
+                    kind="hopt",
+                ) if runner.settings.get("include_freshness_check") else (
+                    ("bacpg", "bahkg", "hktmc", "hktml", "hkts"),
+                    ("en", "tc"),
                 )
+                if not hopt_abbrs:
+                    click.echo(
+                        "  update scrape_hopt: every abbr FRESH — "
+                        "skipping (freshness-scoped)."
+                    )
+                else:
+                    await _run_scrape_hopt(
+                        output=runner.output,
+                        proxies=runner.proxies,
+                        direct=runner.direct,
+                        abbrs=hopt_abbrs,
+                        langs=hopt_langs,
+                        limit=None, no_events=no_events,
+                    )
             elif step.name == "scrape_ukpc":
                 # UKPC is EN-only per /databases (2026-07-08). The
                 # runner's TC enum is best-effort and no-ops with a
                 # WARNING log if HKLII still 500s on that endpoint.
+                # Freshness dispatch: UKPC lives under kind='cases'
+                # (see _CATEGORY_TO_KIND) so ``_filter_fresh_case_buckets``
+                # is the right dispatcher — not the hopt one.
                 from .ukpc import HOPT_C_LANGS
-                await _run_scrape_ukpc(
-                    output=runner.output,
-                    proxies=runner.proxies,
-                    direct=runner.direct,
-                    langs=HOPT_C_LANGS,
-                    limit=None, force=False, no_events=no_events,
-                )
+                if runner.settings.get("include_freshness_check"):
+                    # UKPC is EN-only per /databases; freshness only
+                    # tracks 'en'. Pass ("en",) so all_fresh isn't
+                    # falsified by a TC row that was never expected
+                    # to exist. The scrape helper's own runner still
+                    # attempts both langs and no-ops on TC 500.
+                    ukpc_courts, _ = _filter_fresh_case_buckets(
+                        runner.output, ["ukpc"], ("en",),
+                    )
+                else:
+                    ukpc_courts = ["ukpc"]
+                if not ukpc_courts:
+                    click.echo(
+                        "  update scrape_ukpc: ukpc FRESH — "
+                        "skipping (freshness-scoped)."
+                    )
+                else:
+                    await _run_scrape_ukpc(
+                        output=runner.output,
+                        proxies=runner.proxies,
+                        direct=runner.direct,
+                        langs=HOPT_C_LANGS,
+                        limit=None, force=False, no_events=no_events,
+                    )
             elif step.name == "scrape_legis":
-                await _run_scrape_legis(
-                    output=runner.output,
-                    proxies=runner.proxies,
-                    direct=runner.direct,
-                    cap_types=("ord", "reg", "instrument"),
-                    langs=("en", "tc"),
-                    limit=None,
-                    no_events=no_events,
-                )
+                if runner.settings.get("include_freshness_check"):
+                    legis_types, legis_langs = _filter_fresh_hopt_buckets(
+                        runner.output,
+                        ("ord", "reg", "instrument"),
+                        ("en", "tc"),
+                        kind="legis",
+                    )
+                else:
+                    legis_types, legis_langs = (
+                        ("ord", "reg", "instrument"), ("en", "tc"),
+                    )
+                if not legis_types:
+                    click.echo(
+                        "  update scrape_legis: every cap_type FRESH — "
+                        "skipping (freshness-scoped)."
+                    )
+                else:
+                    await _run_scrape_legis(
+                        output=runner.output,
+                        proxies=runner.proxies,
+                        direct=runner.direct,
+                        cap_types=legis_types,
+                        langs=legis_langs,
+                        limit=None,
+                        no_events=no_events,
+                    )
             elif step.name == "backfill_legis_history":
                 await _run_backfill_legis_history(
                     output=runner.output,

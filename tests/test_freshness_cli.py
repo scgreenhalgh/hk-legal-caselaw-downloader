@@ -559,7 +559,7 @@ class TestUpdateHoptLegisUkpcConsumeFreshness:
 
         runner = UpdateRunner(
             profile="custom", output=tmp_path, proxies=["p"],
-            include_hopt=True,
+            include_hopt=True, include_freshness_check=True,
         )
         # Patch plan() so only the scrape_hopt step runs — keeps assertion
         # focused on the branch under test.
@@ -592,7 +592,7 @@ class TestUpdateHoptLegisUkpcConsumeFreshness:
 
         runner = UpdateRunner(
             profile="custom", output=tmp_path, proxies=["p"],
-            include_legis=True,
+            include_legis=True, include_freshness_check=True,
         )
         with patch.object(runner, "plan", return_value=[Step(name="scrape_legis")]):
             with patch(
@@ -618,7 +618,7 @@ class TestUpdateHoptLegisUkpcConsumeFreshness:
 
         runner = UpdateRunner(
             profile="custom", output=tmp_path, proxies=["p"],
-            include_ukpc=True,
+            include_ukpc=True, include_freshness_check=True,
         )
         with patch.object(runner, "plan", return_value=[Step(name="scrape_ukpc")]):
             with patch(
@@ -648,7 +648,7 @@ class TestUpdateHoptLegisUkpcConsumeFreshness:
 
         runner = UpdateRunner(
             profile="custom", output=tmp_path, proxies=["p"],
-            include_hopt=True,
+            include_hopt=True, include_freshness_check=True,
         )
         with patch.object(runner, "plan", return_value=[Step(name="scrape_hopt")]):
             with patch(
