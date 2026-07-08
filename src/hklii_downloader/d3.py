@@ -24,9 +24,11 @@ import logging
 import re
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
+from typing import AsyncIterator, Callable
 from urllib.parse import urlencode
 
 from .atomic_write import atomic_write_bytes, atomic_write_text
@@ -60,6 +62,10 @@ D3_FAMILIES: tuple[D3Family, ...] = (
 )
 
 D3_LANGS: tuple[str, ...] = ("en", "tc", "sc")
+
+
+class D3FetchError(RuntimeError):
+    """Wire failure (non-200, non-JSON body, etc.)."""
 
 
 def wire_abbr(family: D3Family) -> str:
@@ -228,6 +234,109 @@ def save_d3_pdf(
         atomic_write_text(base / f"{stem}.txt", extracted_text)
         formats.append("txt")
     return formats
+
+
+async def enumerate_pages(
+    get: Callable, family: D3Family, lang: str,
+    page_size: int = _DEFAULT_PAGE_SIZE,
+) -> AsyncIterator[D3Entry]:
+    """Iterate over ``gethoptfiles`` pages for one (family, lang) pair.
+
+    Yields each :class:`D3Entry` in order. Raises :class:`D3FetchError`
+    on any non-200; malformed paths are dropped by
+    :func:`parse_files_response` with a visible skip-log.
+    """
+    page = 1
+    seen = 0
+    total: int | None = None
+    while True:
+        url = gethoptfiles_url(
+            family, lang=lang, page=page, items_per_page=page_size,
+        )
+        resp = await get(url)
+        if resp.status_code != 200:
+            raise D3FetchError(
+                f"gethoptfiles HTTP {resp.status_code} for "
+                f"{family.slug} lang={lang} page={page}"
+            )
+        parsed = parse_files_response(resp.json())
+        if total is None:
+            total = parsed.total
+        for entry in parsed.entries:
+            yield entry
+            seen += 1
+        if not parsed.entries or seen >= total:
+            return
+        page += 1
+
+
+class D3Runner:
+    """Two-phase runner: ``enumerate_all`` → ``fetch_pending``.
+
+    Rows land in ``hopt_documents`` keyed by ``family.slug`` so the
+    D2 freshness ledger (kind='hopt', scope=slug) auto-inherits with
+    zero schema change.
+
+    ``langs_enumerated`` records which (slug, lang) pairs completed
+    enumeration without a wire error, including buckets that returned
+    ``totalfiles=0`` (empty-but-read). The CLI reads this to scope
+    ``mark_bucket_scraped`` so an en-only slug's TC bucket flips
+    FRESH with ``local=live=0``.
+    """
+
+    def __init__(
+        self,
+        get: Callable,
+        checkpoint,
+        output_dir: Path,
+        families: tuple[D3Family, ...] = D3_FAMILIES,
+        langs: tuple[str, ...] = D3_LANGS,
+        workers: int = 4,
+        limit: int | None = None,
+    ) -> None:
+        self._get = get
+        self._checkpoint = checkpoint
+        self._output_dir = Path(output_dir)
+        self._families = families
+        self._langs = langs
+        self._workers = max(1, workers)
+        self._limit = limit
+        self.langs_enumerated: dict[str, set[str]] = {}
+
+    async def enumerate_all(self) -> int:
+        upserted = 0
+        now = int(time.time())
+        for family in self._families:
+            for lang in self._langs:
+                _log.info(
+                    "enumerating d3 slug=%s lang=%s",
+                    family.slug, lang,
+                )
+                try:
+                    async for entry in enumerate_pages(
+                        self._get, family, lang,
+                    ):
+                        self._checkpoint.upsert_hopt_document(
+                            abbr=family.slug,
+                            year=entry.year,
+                            num=entry.num,
+                            lang=lang,
+                            title=entry.title,
+                            neutral=entry.neutral,
+                            doc_date=entry.date,
+                            last_seen_at=now,
+                        )
+                        upserted += 1
+                except D3FetchError as exc:
+                    _log.error(
+                        "d3.enumerate_all: %s/%s failed — %s",
+                        family.slug, lang, exc,
+                    )
+                    continue
+                self.langs_enumerated.setdefault(
+                    family.slug, set(),
+                ).add(lang)
+        return upserted
 
 
 def pdf_url(family: D3Family, response: dict) -> str | None:
