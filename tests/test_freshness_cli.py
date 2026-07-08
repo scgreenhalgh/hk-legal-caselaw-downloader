@@ -513,6 +513,159 @@ class TestUpdateScrapeConsumesFreshnessResult:
         )
 
 
+class TestUpdateHoptLegisUkpcConsumeFreshness:
+    """Followup gap: ``_run_update_scrape`` respects db_freshness for
+    the case-family scrape step, but the ``scrape_hopt`` / ``scrape_legis``
+    / ``scrape_ukpc`` branches in ``_dispatch_update_plan`` hardcoded
+    their arg lists and never consulted freshness. Result: on every
+    ``hklii update --profile weekly`` (and monthly/quarterly), those
+    three steps burn a full sweep even when their buckets are already
+    FRESH per the check_freshness probe run at the start of the plan.
+
+    These regressions pin: (a) all-fresh state skips the helper, (b)
+    partly-stale state passes a REDUCED abbrs/cap_types tuple.
+    """
+
+    def _seed_fresh(self, db, kind, scope, lang):
+        db.upsert_freshness_probe(
+            kind, scope, lang,
+            live_count=100, live_updated_at="2026-07-07",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        db._conn.execute(
+            "UPDATE db_freshness SET local_count=100, local_counted_at=? "
+            "WHERE kind=? AND scope=? AND lang=?",
+            (1_720_000_100, kind, scope, lang),
+        )
+        db._conn.commit()
+        db.mark_bucket_scraped(
+            kind, scope, lang,
+            completed_at=_hkt_ts_at("2026-07-08"),
+        )
+
+    def test_scrape_hopt_step_skips_when_every_abbr_fresh(self, tmp_path):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _dispatch_update_plan
+        from hklii_downloader.update import Step, UpdateRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        for abbr in ("bacpg", "bahkg", "hktmc", "hktml", "hkts"):
+            for lang in ("en", "tc"):
+                self._seed_fresh(db, "hopt", abbr, lang)
+        db.close()
+
+        runner = UpdateRunner(
+            profile="custom", output=tmp_path, proxies=["p"],
+            include_hopt=True,
+        )
+        # Patch plan() so only the scrape_hopt step runs — keeps assertion
+        # focused on the branch under test.
+        with patch.object(runner, "plan", return_value=[Step(name="scrape_hopt")]):
+            with patch(
+                "hklii_downloader.cli._run_scrape_hopt",
+                new=AsyncMock(),
+            ) as m_run_hopt:
+                asyncio.run(_dispatch_update_plan(runner, no_events=True))
+
+        assert m_run_hopt.await_count == 0, (
+            "_run_scrape_hopt invoked even though every hopt abbr in "
+            "db_freshness is FRESH — the update-dispatcher hopt branch "
+            "never consulted db_freshness."
+        )
+
+    def test_scrape_legis_step_skips_when_every_cap_type_fresh(self, tmp_path):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _dispatch_update_plan
+        from hklii_downloader.update import Step, UpdateRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        for cap_type in ("ord", "reg", "instrument"):
+            for lang in ("en", "tc"):
+                self._seed_fresh(db, "legis", cap_type, lang)
+        db.close()
+
+        runner = UpdateRunner(
+            profile="custom", output=tmp_path, proxies=["p"],
+            include_legis=True,
+        )
+        with patch.object(runner, "plan", return_value=[Step(name="scrape_legis")]):
+            with patch(
+                "hklii_downloader.cli._run_scrape_legis",
+                new=AsyncMock(),
+            ) as m_run_legis:
+                asyncio.run(_dispatch_update_plan(runner, no_events=True))
+
+        assert m_run_legis.await_count == 0
+
+    def test_scrape_ukpc_step_skips_when_ukpc_fresh(self, tmp_path):
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _dispatch_update_plan
+        from hklii_downloader.update import Step, UpdateRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        # UKPC is EN-only per /databases; freshness only tracks 'en'.
+        self._seed_fresh(db, "cases", "ukpc", "en")
+        db.close()
+
+        runner = UpdateRunner(
+            profile="custom", output=tmp_path, proxies=["p"],
+            include_ukpc=True,
+        )
+        with patch.object(runner, "plan", return_value=[Step(name="scrape_ukpc")]):
+            with patch(
+                "hklii_downloader.cli._run_scrape_ukpc",
+                new=AsyncMock(),
+            ) as m_run_ukpc:
+                asyncio.run(_dispatch_update_plan(runner, no_events=True))
+
+        assert m_run_ukpc.await_count == 0
+
+    def test_scrape_hopt_step_narrows_abbrs_when_partial_fresh(self, tmp_path):
+        """Two abbrs fresh, three stale → the hopt scrape runs with
+        only the stale abbrs. Pins the reduced-list wire."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _dispatch_update_plan
+        from hklii_downloader.update import Step, UpdateRunner
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        for abbr in ("bacpg", "bahkg"):
+            for lang in ("en", "tc"):
+                self._seed_fresh(db, "hopt", abbr, lang)
+        # hktmc / hktml / hkts left first-run → treated as stale.
+        db.close()
+
+        runner = UpdateRunner(
+            profile="custom", output=tmp_path, proxies=["p"],
+            include_hopt=True,
+        )
+        with patch.object(runner, "plan", return_value=[Step(name="scrape_hopt")]):
+            with patch(
+                "hklii_downloader.cli._run_scrape_hopt",
+                new=AsyncMock(),
+            ) as m_run_hopt:
+                asyncio.run(_dispatch_update_plan(runner, no_events=True))
+
+        assert m_run_hopt.await_count == 1
+        # Called with abbrs=("hktmc","hktml","hkts") — fresh abbrs dropped.
+        call_abbrs = m_run_hopt.await_args.kwargs.get("abbrs")
+        assert set(call_abbrs) == {"hktmc", "hktml", "hkts"}, (
+            f"hopt scrape called with abbrs={call_abbrs}; expected only "
+            "stale slugs. Freshness-based scoping did not land."
+        )
+
+
 # -------- --skip-if-fresh on scrape / scrape-hopt / scrape-ukpc / scrape-legis
 
 class TestScrapeSkipIfFreshFlag:
