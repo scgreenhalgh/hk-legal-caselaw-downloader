@@ -41,6 +41,13 @@ class TestUpdateRegistration:
         result = CliRunner().invoke(main, ["update", "--help"])
         assert "--profile" in result.output, result.output
 
+    def test_update_help_lists_include_ukpc_flag(self):
+        """--include-ukpc / --no-ukpc — required so the operator can
+        opt into a UKPC-only refresh outside the weekly cadence."""
+        from hklii_downloader.cli import main
+        result = CliRunner().invoke(main, ["update", "--help"])
+        assert "--include-ukpc" in result.output, result.output
+
     def test_update_requires_proxy_or_direct(self):
         from hklii_downloader.cli import main
         result = CliRunner().invoke(main, ["update", "-o", "./nope"])
@@ -137,6 +144,64 @@ class TestUpdateRunnerProfilePlans:
         names = [s.name for s in runner.plan()]
         assert "scrape_hopt" in names
         assert "scrape_legis" in names
+
+    def test_daily_excludes_ukpc(self, tmp_path):
+        """Daily default is EN case-family scrape only; UKPC (hopt-C)
+        picks up on weekly rhythm alongside scrape_hopt/scrape_legis
+        because the UKPC listing changes rarely (~1 record/month)."""
+        from hklii_downloader.update import UpdateRunner
+        runner = UpdateRunner(
+            profile="daily", output=tmp_path, proxies=["p"],
+            now=_fake_now("2026-07-06T02:00:00"),
+        )
+        names = [s.name for s in runner.plan()]
+        assert "scrape_ukpc" not in names
+
+    def test_weekly_adds_ukpc(self, tmp_path):
+        """UKPC integration slot — same cadence as hopt/legis."""
+        from hklii_downloader.update import UpdateRunner
+        runner = UpdateRunner(
+            profile="weekly", output=tmp_path, proxies=["p"],
+            now=_fake_now("2026-07-06T02:00:00"),
+        )
+        names = [s.name for s in runner.plan()]
+        assert "scrape_ukpc" in names
+
+    def test_monthly_and_quarterly_include_ukpc(self, tmp_path):
+        """Both cadences inherit the ukpc slot from weekly semantics."""
+        from hklii_downloader.update import UpdateRunner
+        for prof in ("monthly", "quarterly"):
+            runner = UpdateRunner(
+                profile=prof, output=tmp_path, proxies=["p"],
+                now=_fake_now("2026-07-06T02:00:00"),
+            )
+            names = [s.name for s in runner.plan()]
+            assert "scrape_ukpc" in names, (
+                f"{prof} plan missing scrape_ukpc: {names}"
+            )
+
+    def test_include_ukpc_override_adds_step_on_daily(self, tmp_path):
+        """Explicit --include-ukpc reaches the plan even under daily
+        default (which otherwise excludes it)."""
+        from hklii_downloader.update import UpdateRunner
+        runner = UpdateRunner(
+            profile="daily", output=tmp_path, proxies=["p"],
+            include_ukpc=True,
+            now=_fake_now("2026-07-06T02:00:00"),
+        )
+        names = [s.name for s in runner.plan()]
+        assert "scrape_ukpc" in names
+
+    def test_no_ukpc_override_removes_step_on_weekly(self, tmp_path):
+        """Explicit --no-ukpc suppresses the step even on weekly."""
+        from hklii_downloader.update import UpdateRunner
+        runner = UpdateRunner(
+            profile="weekly", output=tmp_path, proxies=["p"],
+            include_ukpc=False,
+            now=_fake_now("2026-07-06T02:00:00"),
+        )
+        names = [s.name for s in runner.plan()]
+        assert "scrape_ukpc" not in names
 
     def test_monthly_adds_translations_history_validate_but_not_relatedcaps(
         self, tmp_path,
