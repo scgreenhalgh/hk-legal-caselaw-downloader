@@ -19,9 +19,12 @@ and unmotivated.
 """
 from __future__ import annotations
 
+import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlencode
+
+_log = logging.getLogger("hklii_downloader.d3")
 
 _BASE_URL = "https://www.hklii.hk"
 _DEFAULT_PAGE_SIZE = 300
@@ -79,3 +82,56 @@ def fetch_url(family: D3Family, year: int, num: int, lang: str) -> str:
         "num": num,
     })
     return f"{_BASE_URL}/api/{family.fetch_endpoint}?{qs}"
+
+
+@dataclass
+class D3Entry:
+    year: int
+    num: int
+    title: str
+    neutral: str | None = None
+    date: str | None = None
+
+
+@dataclass
+class D3Listing:
+    total: int
+    entries: list[D3Entry] = field(default_factory=list)
+
+
+def parse_files_response(body: dict) -> D3Listing:
+    """Parse a ``gethoptfiles`` JSON response into a :class:`D3Listing`.
+
+    Malformed paths are counted and reported at INFO — the count-visible
+    skip pattern from ``review-patterns`` (silent skips break coverage
+    audits). ``nd`` year rows are counted the same way; the regex
+    accepts them defensively but the parser drops them so
+    :attr:`D3Entry.year` stays ``int``.
+    """
+    total = body.get("totalfiles", 0)
+    entries: list[D3Entry] = []
+    skipped = 0
+    for f in body.get("files", []):
+        path = f.get("path") or ""
+        m = _PATH_RE.match(path)
+        if not m:
+            skipped += 1
+            continue
+        year_raw = m.group(1)
+        if year_raw == "nd":
+            skipped += 1
+            continue
+        entries.append(D3Entry(
+            year=int(year_raw),
+            num=int(m.group(2)),
+            title=f.get("title", ""),
+            neutral=f.get("neutral"),
+            date=f.get("date"),
+        ))
+    if skipped:
+        _log.info(
+            "d3.parse_files_response: skipped %d entry/entries with "
+            "malformed or unsupported path",
+            skipped,
+        )
+    return D3Listing(total=total, entries=entries)
