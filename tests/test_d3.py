@@ -894,3 +894,107 @@ class TestD3RunnerFetchFailures:
             assert "non-JSON" in error or "JSONDecodeError" in error
         finally:
             db.close()
+
+
+class TestD3RunnerRun:
+    """D3Runner.run — enumerate + fetch composed; result surface."""
+
+    async def test_run_composes_enumerate_and_fetch(self, tmp_path):
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            listing = {
+                "totalfiles": 1,
+                "files": [
+                    {
+                        "title": "T",
+                        "path": "/en/other/hklrccp/2020/2",
+                        "neutral": "[2020] HKLRCCP 2",
+                        "date": "2020-12-01",
+                    },
+                ],
+            }
+            metadata = {"content": "<h3>x</h3>"}
+
+            async def mock_get(url, **kw):
+                if "gethoptfiles" in url:
+                    return httpx.Response(
+                        200, json=listing,
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(
+                    200, json=metadata,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.run()
+
+            assert result.downloaded == 1
+            assert result.failed == 0
+            assert result.langs_enumerated == {"hklrccp": {"en"}}
+        finally:
+            db.close()
+
+    async def test_langs_enumerated_excludes_wire_failed_langs(
+        self, tmp_path,
+    ):
+        """One (slug, lang) enum 500s — that pair must NOT flip FRESH."""
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            en_page = {
+                "totalfiles": 1,
+                "files": [
+                    {
+                        "title": "T",
+                        "path": "/en/other/hklrccp/2020/2",
+                        "neutral": "[2020] HKLRCCP 2",
+                        "date": "2020-12-01",
+                    },
+                ],
+            }
+            metadata = {"content": "<p>ok</p>"}
+
+            async def mock_get(url, **kw):
+                if "gethoptfiles" in url and "lang=en" in url:
+                    return httpx.Response(
+                        200, json=en_page,
+                        request=httpx.Request("GET", url),
+                    )
+                if "gethoptfiles" in url and "lang=tc" in url:
+                    # TC enum wire-fails
+                    return httpx.Response(
+                        500, text="internal error",
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(
+                    200, json=metadata,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en", "tc"),
+            )
+
+            result = await runner.run()
+
+            assert result.langs_enumerated == {"hklrccp": {"en"}}
+            assert "tc" not in result.langs_enumerated.get("hklrccp", set())
+        finally:
+            db.close()
