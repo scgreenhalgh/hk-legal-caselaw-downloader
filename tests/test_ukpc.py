@@ -13,11 +13,14 @@ from pathlib import Path
 import httpx
 import pytest
 
+from hklii_downloader.checkpoint import CheckpointDB
 from hklii_downloader.ukpc import (
     HOPT_C_COURTS,
     HOPT_C_LANGS,
     UkpcFetchError,
     UkpcJudgment,
+    UkpcRunner,
+    UkpcRunResult,
     enumerate_hopt_c_court,
     fetch_one_hopt_c_judgment,
     getother_url,
@@ -291,3 +294,238 @@ class TestFetchOne:
 
         with pytest.raises(UkpcFetchError, match="empty content"):
             await fetch_one_hopt_c_judgment(_get, "ukpc", 1997, 40, "en")
+
+
+def _wire_stub(entries_by_lang, content="<p>real body</p>"):
+    """Return an async _get that answers gethoptfiles + getother.
+
+    ``entries_by_lang`` is ``{lang: [(year, num, neutral, date, title), ...]}``.
+    Every getother call returns the same ``content`` HTML.
+    """
+
+    async def _get(url, **kw):
+        if "gethoptfiles" in url:
+            # UPPERCASE per gethoptfiles_c_url; extract to key entries.
+            lang_upper = url.split("lang=")[1].split("&")[0]
+            lang = lang_upper.lower()
+            entries = entries_by_lang.get(lang, [])
+            files = [
+                {"path": f"/{y}/{n}/", "neutral": neu,
+                 "date": d, "title": t}
+                for (y, n, neu, d, t) in entries
+            ]
+            return httpx.Response(200, json={
+                "totalfiles": len(files), "files": files,
+            }, request=httpx.Request("GET", url))
+        if "getother" in url:
+            # Parse year/num from URL so the returned neutral/date match
+            # the caller's request (so save_ukpc_local hits the right stem).
+            year = int(url.split("year=")[1].split("&")[0])
+            num = int(url.split("num=")[1].split("&")[0])
+            return httpx.Response(200, json={
+                "id": year * 100 + num, "title": f"case {year}/{num}",
+                "neutral": f"[{year}] UKPC {num}", "date": f"{year}-01-01",
+                "content": content,
+            }, request=httpx.Request("GET", url))
+        raise AssertionError(f"unexpected URL: {url}")
+
+    return _get
+
+
+class TestUkpcRunnerCasesTable:
+    """UkpcRunner writes ``cases`` table rows the viewer / cases-family
+    indexer can pick up unchanged. Single-pass runner: enumerate → fetch
+    → save → dual-write cases-table row at status='downloaded'.
+
+    Cases-table dual-write is the requirement flagged in the 2026-07-08
+    session close: UKPC belongs in the same cases table as hkcfa/hkca/…
+    so the viewer's court indexer surfaces it with no code change.
+
+    Rows must NEVER sit at status='pending' in cases — BulkScraper's
+    unscoped ``claim_pending()`` would otherwise pick them up and hit
+    ``getjudgment`` (WRONG endpoint family) on every subsequent
+    ``hklii scrape`` run.
+    """
+
+    async def test_single_entry_dual_writes_cases_row(self, tmp_path: Path):
+        get = _wire_stub({"en": [(1997, 40, "[1997] UKPC 40",
+                                  "1997-07-29", "Yuen v. Golf Club")]})
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            runner = UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en",), workers=1,
+            )
+            result = await runner.run()
+
+            assert isinstance(result, UkpcRunResult)
+            assert result.downloaded == 1
+            assert result.failed == 0
+
+            # File landed at case-family layout under output/ukpc/YYYY/
+            assert (tmp_path / "ukpc" / "1997"
+                    / "ukpc_1997_40.html").exists()
+            assert (tmp_path / "ukpc" / "1997"
+                    / "ukpc_1997_40.json").exists()
+
+            # cases table row: court='ukpc', status='downloaded'
+            row = db._conn.execute(
+                "SELECT court, year, number, lang, status, neutral, title "
+                "FROM cases "
+                "WHERE court='ukpc' AND year=1997 AND number=40"
+            ).fetchone()
+            assert row is not None, "cases row missing for ukpc/1997/40"
+            court, year, number, lang, status, neutral, title = row
+            assert court == "ukpc"
+            assert year == 1997
+            assert number == 40
+            assert lang == "en"
+            assert status == "downloaded", (
+                "UKPC rows must land at status='downloaded' — a 'pending' "
+                "row would be picked up by BulkScraper.claim_pending() "
+                "which uses the wrong endpoint family for ukpc."
+            )
+            assert neutral == "[1997] UKPC 40"
+            assert title.startswith("case ") or title.startswith("Yuen ")
+        finally:
+            db.close()
+
+    async def test_multi_entry_all_written(self, tmp_path: Path):
+        """A 3-entry enum produces 3 cases rows + 3 file sets."""
+        get = _wire_stub({"en": [
+            (1997, 40, "[1997] UKPC 40", "1997-07-29", "a"),
+            (1997, 41, "[1997] UKPC 41", "1997-07-30", "b"),
+            (1998, 12, "[1998] UKPC 12", "1998-03-01", "c"),
+        ]})
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            runner = UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en",), workers=3,
+            )
+            result = await runner.run()
+            assert result.downloaded == 3
+            assert result.failed == 0
+            rows = db._conn.execute(
+                "SELECT year, number FROM cases "
+                "WHERE court='ukpc' AND status='downloaded' "
+                "ORDER BY year, number"
+            ).fetchall()
+            assert rows == [(1997, 40), (1997, 41), (1998, 12)]
+        finally:
+            db.close()
+
+    async def test_resume_skips_already_downloaded(self, tmp_path: Path):
+        """Second run over the same corpus is a no-op — no re-fetch."""
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            # First pass: fetch 1997/40 cleanly
+            get1 = _wire_stub({"en": [(1997, 40, "[1997] UKPC 40",
+                                       "1997-07-29", "a")]})
+            r1 = await UkpcRunner(
+                get=get1, checkpoint=db, output_dir=tmp_path,
+                langs=("en",), workers=1,
+            ).run()
+            assert r1.downloaded == 1
+
+            # Second pass: same corpus, tracker counts fetches
+            fetch_calls: list[str] = []
+
+            async def get2(url, **kw):
+                if "getother" in url:
+                    fetch_calls.append(url)
+                return await get1(url, **kw)
+
+            r2 = await UkpcRunner(
+                get=get2, checkpoint=db, output_dir=tmp_path,
+                langs=("en",), workers=1,
+            ).run()
+            # No re-fetch — the already-downloaded row was skipped
+            assert fetch_calls == []
+            # Runner counts skips distinctly from downloads
+            assert r2.downloaded == 0
+            assert r2.failed == 0
+        finally:
+            db.close()
+
+    async def test_getother_failure_marks_failed_counter(
+        self, tmp_path: Path,
+    ):
+        """A getother 500 counts as failed, does NOT insert a cases row,
+        and does NOT hang the runner."""
+
+        async def get(url, **kw):
+            if "gethoptfiles" in url:
+                return httpx.Response(200, json={
+                    "totalfiles": 1,
+                    "files": [{"path": "/1997/40/", "neutral": "n",
+                               "date": "1997-07-29", "title": "t"}],
+                }, request=httpx.Request("GET", url))
+            return httpx.Response(500, text="err",
+                                  request=httpx.Request("GET", url))
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            r = await UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en",), workers=1,
+            ).run()
+            assert r.downloaded == 0
+            assert r.failed == 1
+            # No cases row inserted for a failed fetch — otherwise a
+            # BulkScraper.claim_pending() sweep would pick it up.
+            row = db._conn.execute(
+                "SELECT COUNT(*) FROM cases WHERE court='ukpc'"
+            ).fetchone()
+            assert row[0] == 0
+        finally:
+            db.close()
+
+    async def test_limit_caps_run(self, tmp_path: Path):
+        """`limit=2` stops the runner after 2 successful fetches even if
+        the enumeration returned more entries."""
+        get = _wire_stub({"en": [
+            (1997, 40, "[1997] UKPC 40", "1997-07-29", "a"),
+            (1997, 41, "[1997] UKPC 41", "1997-07-30", "b"),
+            (1998, 12, "[1998] UKPC 12", "1998-03-01", "c"),
+        ]})
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            r = await UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en",), workers=1, limit=2,
+            ).run()
+            assert r.downloaded == 2
+            count = db._conn.execute(
+                "SELECT COUNT(*) FROM cases WHERE court='ukpc'"
+            ).fetchone()[0]
+            assert count == 2
+        finally:
+            db.close()
+
+
+class TestScrapeUkpcSubcommand:
+    """`hklii scrape-ukpc` — CLI entry point, mirrors `scrape-hopt`."""
+
+    def test_subcommand_registered(self):
+        from click.testing import CliRunner
+
+        from hklii_downloader.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape-ukpc", "--help"])
+        assert result.exit_code == 0, result.output
+        assert "ukpc" in result.output.lower()
+
+    def test_subcommand_requires_proxy_or_direct(self):
+        from click.testing import CliRunner
+
+        from hklii_downloader.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["scrape-ukpc"])
+        assert result.exit_code != 0
+        assert (
+            "proxy" in result.output.lower()
+            or "--direct" in result.output.lower()
+        )

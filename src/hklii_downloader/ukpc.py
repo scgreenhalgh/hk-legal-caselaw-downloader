@@ -257,3 +257,37 @@ async def fetch_one_hopt_c_judgment(
             f"getother/{abbr}/{year}/{num}/{lang} → HTTP {resp.status_code}"
         )
     return parse_getother_response(abbr, year, num, lang, resp.json())
+
+
+@dataclass
+class UkpcRunResult:
+    downloaded: int = 0
+    failed: int = 0
+
+
+class UkpcRunner:
+    """Stub — replaced by the implementation in the next commit."""
+
+    def __init__(
+        self,
+        get: Callable,
+        checkpoint,
+        output_dir: Path,
+        langs: tuple[str, ...] = HOPT_C_LANGS,
+        workers: int = 4,
+        limit: int | None = None,
+        force: bool = False,
+    ) -> None:
+        self._get = get
+        self._checkpoint = checkpoint
+        self._output_dir = Path(output_dir)
+        self._langs = langs
+        self._workers = max(1, workers)
+        self._limit = limit
+        self._force = force
+
+    async def run(
+        self,
+        on_progress: Callable[[UkpcRunResult], None] | None = None,
+    ) -> UkpcRunResult:
+        return UkpcRunResult()
