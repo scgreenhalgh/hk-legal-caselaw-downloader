@@ -22,7 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field
+from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -131,6 +134,69 @@ def save_d3_html(
         json.dumps(response, ensure_ascii=False, indent=2),
     )
     return ["json"]
+
+
+_PDFTOTEXT_TIMEOUT_SEC = 30
+
+
+def _try_pdftotext(pdf_bytes: bytes) -> str | None:
+    """Return extracted text via the poppler `pdftotext` binary, or None.
+
+    Fails soft on: missing binary, non-zero exit, timeout, non-UTF-8
+    output that can't be re-decoded with replacement. Only positive
+    outcome is a genuinely decoded string.
+    """
+    if shutil.which("pdftotext") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-layout", "-", "-"],
+            input=pdf_bytes,
+            capture_output=True,
+            timeout=_PDFTOTEXT_TIMEOUT_SEC,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        _log.info("d3._try_pdftotext: subprocess failed (%s)", exc)
+        return None
+    if result.returncode != 0:
+        _log.info(
+            "d3._try_pdftotext: pdftotext exited %d (%s)",
+            result.returncode,
+            result.stderr[:200] if result.stderr else "",
+        )
+        return None
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _try_pypdf(pdf_bytes: bytes) -> str | None:
+    """Return extracted text via pypdf, or None if pypdf unavailable / fails."""
+    try:
+        import pypdf
+    except ImportError:
+        return None
+    try:
+        reader = pypdf.PdfReader(BytesIO(pdf_bytes))
+        pages = [p.extract_text() or "" for p in reader.pages]
+        text = "\n".join(pages).strip()
+        return text or None
+    except Exception as exc:
+        _log.info("d3._try_pypdf: extraction failed (%s)", exc)
+        return None
+
+
+def extract_pdf_text(pdf_bytes: bytes) -> str | None:
+    """Best-effort text extraction: pdftotext preferred, pypdf fallback.
+
+    Row status does NOT depend on this — a None return leaves the row
+    `downloaded` with `formats=["json","pdf"]` and no `.txt` sidecar.
+    A backfill CLI can regenerate `.txt` later once the extractor
+    changes.
+    """
+    text = _try_pdftotext(pdf_bytes)
+    if text is not None:
+        return text
+    return _try_pypdf(pdf_bytes)
 
 
 def save_d3_pdf(
