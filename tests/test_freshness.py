@@ -152,17 +152,50 @@ class TestDispatchUrl:
             f"?dbcat=other&abbr={slug}&lang={lang}"
         )
 
-    @pytest.mark.parametrize("category,slug", [
-        ("other-unknown", "hkiac"),
-        ("other-unknown", "pd"),
-        ("other-unknown", "pcpdaab"),
-        ("legis-histlaw", "histlaw"),
+    @pytest.mark.parametrize("slug", [
+        "hkiac", "hklrccp", "hklrcr", "pcpdaab", "pcpdc",
     ])
-    def test_returns_none_for_unmapped_categories(self, category, slug):
-        """Unmapped slugs are D3 backlog. dispatch_url returns None so
-        the runner can distinguish "not yet in scope" from "probe failed"
-        — the former MUST NOT create a db_freshness row."""
-        assert dispatch_url(category, slug, "en") is None
+    @pytest.mark.parametrize("lang", _LANGS)
+    def test_other_o_slugs_hit_getmetahopt_dbcat_O(self, slug, lang):
+        """The 5 dbcat=O 'other' bucket slugs.
+
+        Playwright network capture on ``/en/other/hkiac/`` (2026-07-08)
+        showed the endpoint shape ``getmetahopt?dbcat=O&abbr=<slug>``.
+        Curl probes confirmed real per-DB counts for all 5:
+        hkiac(78), hklrccp(78), hklrcr(137), pcpdaab(368), pcpdc(165).
+        pcpdc/hklrccp/hklrcr are trilingual per the /databases matrix.
+        """
+        url = dispatch_url("other-O", slug, lang)
+        assert url == (
+            f"https://www.hklii.hk/api/getmetahopt"
+            f"?dbcat=O&abbr={slug}&lang={lang}"
+        )
+
+    @pytest.mark.parametrize("lang", _LANGS)
+    def test_pd_uses_dbcat_P(self, lang):
+        """Practice Directions is the sole ``dbcat=P`` slug (probed
+        2026-07-08 via /en/other/pd/ network capture). getmetahopt
+        returns count=0 across every lang right now — HKLII appears
+        to have zeroed out this DB pending a re-ingest — but the URL
+        contract still holds so a future non-zero probe flows through
+        the same wiring.
+        """
+        url = dispatch_url("other-P", "pd", lang)
+        assert url == (
+            f"https://www.hklii.hk/api/getmetahopt"
+            f"?dbcat=P&abbr=pd&lang={lang}"
+        )
+
+    @pytest.mark.parametrize("lang", _LANGS)
+    def test_histlaw_uses_dbcat_H(self, lang):
+        """Historical Laws of Hong Kong (2026-07-08 network capture on
+        /en/legis/histlaw/ shows ``getmetahopt?dbcat=H&abbr=histlaw``).
+        """
+        url = dispatch_url("legis-histlaw", "histlaw", lang)
+        assert url == (
+            f"https://www.hklii.hk/api/getmetahopt"
+            f"?dbcat=H&abbr=histlaw&lang={lang}"
+        )
 
 
 # ---------- _fresh --------------------------------------------------------
@@ -443,11 +476,14 @@ class TestProbeAllUrlDispatch:
             "?dbcat=other&abbr=hkts&lang=en",
         ]
 
-    async def test_other_bucket_slugs_are_skipped(self):
-        """other/hkiac etc. are D3 backlog — dispatch_url returns None
-        and probe_all must not hit them. Otherwise every update run
-        would blindly try to scrape hkiac/pd/histlaw which have no
-        runner (first_run_semantics rule 5)."""
+    async def test_other_bucket_slugs_probe_dbcat_O_and_P(self):
+        """Every ``other`` bucket slug listed on /databases now has a
+        mapped endpoint. hkiac / hklrccp / hklrcr / pcpdaab / pcpdc
+        probe via ``getmetahopt?dbcat=O``; pd probes via ``dbcat=P``.
+        Live probe 2026-07-08 confirmed real per-DB counts (78, 78,
+        137, 368, 165 for O slugs; 0 for pd right now — a genuine
+        HKLII zero, not a missing endpoint).
+        """
         matrix = _make_matrix(other={"hkiac": ("en",), "pd": ("en", "tc")})
         db = CheckpointDB(":memory:")
         get = _FakeGet()
@@ -458,11 +494,16 @@ class TestProbeAllUrlDispatch:
             await runner.probe_all()
         finally:
             db.close()
-        assert get.calls == []
+        # 1 en probe for hkiac, 2 for pd (en + tc).
+        assert len(get.calls) == 3
+        assert any("dbcat=O&abbr=hkiac" in c for c in get.calls)
+        assert any("dbcat=P&abbr=pd&lang=en" in c for c in get.calls)
+        assert any("dbcat=P&abbr=pd&lang=tc" in c for c in get.calls)
 
-    async def test_legis_histlaw_is_skipped(self):
-        """histlaw has no known getmeta* endpoint — same D3 gap as
-        other/*. Must skip without probing OR writing a row."""
+    async def test_legis_histlaw_probes_dbcat_H(self):
+        """histlaw now has a known endpoint (dbcat=H per 2026-07-08
+        network capture on /en/legis/histlaw/). Was a D3 gap
+        pre-fix; the freshness runner now surfaces its live count."""
         matrix = _make_matrix(legis={"histlaw": ("en",)})
         db = CheckpointDB(":memory:")
         get = _FakeGet()
@@ -474,8 +515,11 @@ class TestProbeAllUrlDispatch:
             rows = list(db.iter_freshness_rows())
         finally:
             db.close()
-        assert get.calls == []
-        assert rows == []
+        assert get.calls == [
+            "https://www.hklii.hk/api/getmetahopt"
+            "?dbcat=H&abbr=histlaw&lang=en",
+        ]
+        assert len(rows) == 1
 
     async def test_sc_lang_probes_all_three_langs(self):
         """DatabaseMatrix surfaces ``sc`` (Simplified Chinese) for the
@@ -698,12 +742,19 @@ class TestProbeAllPersistence:
         assert row.local_count == 1
 
     async def test_skips_row_write_for_unmapped_triples(self):
-        """other/hkiac probe returns None from dispatch_url — no wire
-        request, no db_freshness row. If a row WERE inserted, the
-        --skip-if-fresh gate would see it and skip a scrape that has
-        never actually run."""
+        """A slug HKLII adds in the future that we haven't classified
+        into O/P falls through to ``other-unknown``. ``dispatch_url``
+        returns None for it — no wire request, no db_freshness row.
+        If a row WERE inserted, the --skip-if-fresh gate would see it
+        and skip a scrape that never actually ran.
+
+        As of 2026-07-08 all of the ``other`` bucket slugs on
+        /databases (hkiac / hklrccp / hklrcr / pcpdaab / pcpdc / pd)
+        are mapped, so this test uses a synthetic ``hkzzz`` slug to
+        exercise the safety-net path.
+        """
         db = CheckpointDB(":memory:")
-        matrix = _make_matrix(other={"hkiac": ("en",)})
+        matrix = _make_matrix(other={"hkzzz": ("en",)})
         runner = FreshnessRunner(
             get=_FakeGet(), checkpoint=db, matrix=matrix,
         )
@@ -1031,14 +1082,19 @@ class TestFirstRunMissing:
         assert missing == []
 
     def test_excludes_unmapped_triples(self):
-        """other/hkiac has no dispatch — it's not an expected triple
-        and MUST NOT surface as 'missing'. Otherwise the update
-        dispatcher would try to scope a scrape to a slug with no
-        runner (first_run_semantics rule 5)."""
+        """A slug that falls through to ``other-unknown`` (safety-net
+        for a future HKLII addition we haven't classified) is not an
+        expected triple and MUST NOT surface as 'missing'. Otherwise
+        the update dispatcher would try to scope a scrape to a slug
+        with no runner (first_run_semantics rule 5).
+
+        As of 2026-07-08 all six live ``other`` bucket slugs are
+        mapped; ``hkzzz`` here is a synthetic unmapped slug.
+        """
         db = CheckpointDB(":memory:")
         matrix = _make_matrix(
             cases={"hkcfa": ("en",)},
-            other={"hkiac": ("en",)},
+            other={"hkzzz": ("en",)},
         )
         runner = FreshnessRunner(
             get=_FakeGet(), checkpoint=db, matrix=matrix,

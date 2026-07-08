@@ -79,20 +79,37 @@ _ACCEPTED_LANGS = frozenset({"en", "tc", "sc"})
 _CATEGORIES = frozenset({
     "cases", "cases-ukpc",
     "legis", "legis-hopt", "legis-histlaw",
-    "other-unknown",
+    "other-O", "other-P", "other-unknown",
 })
 
 # Checkpoint kind per category, or None for categories with no wire
 # endpoint (D3 backlog). UKPC lives at kind='cases' because its rows
 # are stored in the cases table (see ukpc.py + upsert_downloaded_case).
+#
+# legis-histlaw / other-O / other-P are metadata-only tracked at
+# kind='hopt' — no local scrape runner exists yet for these slugs
+# (D3 backlog), so ``recompute_local_count`` returns 0 (no rows in
+# hopt_documents for these abbrs) and buckets sit at permanent-STALE
+# with a clear "we have 0" operator signal until a scraper ships.
 _CATEGORY_TO_KIND = {
     "cases": "cases",
     "cases-ukpc": "cases",
     "legis": "legis",
     "legis-hopt": "hopt",
-    "legis-histlaw": None,
+    "legis-histlaw": "hopt",
+    "other-O": "hopt",
+    "other-P": "hopt",
     "other-unknown": None,
 }
+
+# Slugs on the ``dbcat=P`` endpoint family (currently just Practice
+# Directions). Everything else in the /databases ``other`` bucket
+# routes to ``dbcat=O``. Anything not on either list falls through to
+# ``other-unknown`` — a safety net for a future HKLII addition.
+_OTHER_P_SLUGS = frozenset({"pd"})
+_OTHER_O_SLUGS = frozenset({
+    "hkiac", "hklrccp", "hklrcr", "pcpdaab", "pcpdc",
+})
 
 
 @dataclass(frozen=True)
@@ -138,12 +155,15 @@ def classify(bucket: str, slug: str) -> str | None:
       * ``legis`` bucket → ``legis-histlaw`` for slug=='histlaw';
         ``legis-hopt`` for HOPT abbrs (bacpg/bahkg/hktmc/hktml/hkts);
         else ``legis``
-      * ``other`` bucket → ``other-unknown`` (D3 backlog)
+      * ``other`` bucket → ``other-P`` for slug=='pd';
+        ``other-O`` for the 5 known dbcat=O slugs
+        (hkiac/hklrccp/hklrcr/pcpdaab/pcpdc);
+        else ``other-unknown`` (safety net for future HKLII additions)
 
-    A category that maps to a None kind (``legis-histlaw`` /
-    ``other-unknown``) still classifies successfully — the runner
-    filters at the triple-yield step so ``probe_all`` never sees a
-    triple it can't route.
+    Endpoint URLs for every mapped category live in
+    :func:`dispatch_url`; the only category whose kind is None is
+    ``other-unknown`` so the runner filters unknown slugs at the
+    triple-yield step and no db_freshness row is created for them.
     """
     if bucket == "cases":
         return "cases-ukpc" if slug == "ukpc" else "cases"
@@ -154,6 +174,10 @@ def classify(bucket: str, slug: str) -> str | None:
             return "legis-hopt"
         return "legis"
     if bucket == "other":
+        if slug in _OTHER_P_SLUGS:
+            return "other-P"
+        if slug in _OTHER_O_SLUGS:
+            return "other-O"
         return "other-unknown"
     return None
 
@@ -164,26 +188,38 @@ def dispatch_url(category: str, slug: str, lang: str) -> str | None:
 
     Mapped rows (matches :attr:`.endpoint_dispatch_table` in the design):
 
-      ============  =======================================================
-      category      URL template
-      ============  =======================================================
-      cases         ``getmetacase?caseDb={slug}&lang={lang}``
-      cases-ukpc    ``getmetahopt?dbcat=C&abbr={slug}&lang={lang}``
-      legis         ``getmetalegis?cap_type={slug}&lang={lang}``
-      legis-hopt    ``getmetahopt?dbcat=other&abbr={slug}&lang={lang}``
+      ================  ===================================================
+      category          URL template
+      ================  ===================================================
+      cases             ``getmetacase?caseDb={slug}&lang={lang}``
+      cases-ukpc        ``getmetahopt?dbcat=C&abbr={slug}&lang={lang}``
+      legis             ``getmetalegis?cap_type={slug}&lang={lang}``
+      legis-hopt        ``getmetahopt?dbcat=other&abbr={slug}&lang={lang}``
+      legis-histlaw     ``getmetahopt?dbcat=H&abbr={slug}&lang={lang}``
+      other-O           ``getmetahopt?dbcat=O&abbr={slug}&lang={lang}``
+      other-P           ``getmetahopt?dbcat=P&abbr={slug}&lang={lang}``
+      ================  ===================================================
+
+    dbcat mnemonics (from network capture on the /databases landing
+    pages 2026-07-08):
+
+      C — Case (only ukpc)
+      H — Historical (only histlaw)
+      O — Other (hkiac / hklrccp / hklrcr / pcpdaab / pcpdc)
+      P — Practice directions (only pd)
+      other — treaty / hopt family (bacpg / bahkg / hktmc / hktml / hkts).
+              Yes, ``other`` is a literal string — not a category catch-all.
 
     Legis note: ``getmetalegis`` uses the underscore param name
     ``cap_type`` (all other endpoints use camelCase). CamelCase
     ``capType=…`` silently returns count=0 rather than 400 — a
     classic silent-drift trap. See the 2026-07-08 test-correction
     commit for the live probe.
-      ============  =======================================================
 
-    ``other-unknown`` and ``legis-histlaw`` return None — the D3
-    backlog. A None return is a KNOWN GAP, not a fail-safe stale
-    signal (see :attr:`.first_run_semantics` rule 5): the runner must
-    skip these slugs entirely so an update pass doesn't blindly try
-    to scrape hkiac / pd / histlaw which have no runner.
+    ``other-unknown`` returns None — the D3 fallback for any future
+    HKLII addition whose endpoint we haven't classified yet. The
+    runner filters None-URL triples at the triple-yield step so no
+    db_freshness row is created for them.
     """
     if category == "cases":
         return f"{_BASE}/api/getmetacase?caseDb={slug}&lang={lang}"
@@ -193,6 +229,12 @@ def dispatch_url(category: str, slug: str, lang: str) -> str | None:
         return f"{_BASE}/api/getmetalegis?cap_type={slug}&lang={lang}"
     if category == "legis-hopt":
         return f"{_BASE}/api/getmetahopt?dbcat=other&abbr={slug}&lang={lang}"
+    if category == "legis-histlaw":
+        return f"{_BASE}/api/getmetahopt?dbcat=H&abbr={slug}&lang={lang}"
+    if category == "other-O":
+        return f"{_BASE}/api/getmetahopt?dbcat=O&abbr={slug}&lang={lang}"
+    if category == "other-P":
+        return f"{_BASE}/api/getmetahopt?dbcat=P&abbr={slug}&lang={lang}"
     # legis-histlaw / other-unknown / anything else — no known endpoint.
     return None
 
