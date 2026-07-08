@@ -607,3 +607,149 @@ class TestD3RunnerEnumerate:
             assert "tc" in runner.langs_enumerated.get("histlaw", set())
         finally:
             db.close()
+
+
+class TestD3RunnerFetchHappyPath:
+    """D3Runner.fetch_pending — HTML (shape B) + PDF (shapes A/C) success."""
+
+    async def test_html_slug_single_hop_marks_downloaded(self, tmp_path):
+        import json
+
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="hklrccp", year=2020, num=2, lang="en",
+                title="Outcome Related Fee Structures for Arbitration",
+                neutral="[2020] HKLRCCP 2",
+                doc_date="2020-12-01",
+            )
+
+            metadata = {
+                "id": 5338,
+                "title": "Outcome Related Fee Structures for Arbitration",
+                "neutral": "[2020] HKLRCCP 2",
+                "date": "2020-12-01",
+                "file_type": 1,
+                "content": "<h3>...</h3>",
+            }
+            requested: list[str] = []
+
+            async def mock_get(url, **kw):
+                requested.append(url)
+                return httpx.Response(
+                    200, json=metadata,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 1
+            assert result.failed == 0
+            assert len(requested) == 1
+            assert "/api/getother" in requested[0]
+            saved = (
+                tmp_path / "d3" / "hklrccp" / "2020" / "2"
+                / "hklrccp_2020_2_en.json"
+            )
+            assert saved.exists()
+            stored = json.loads(saved.read_text())
+            assert stored["content"] == "<h3>...</h3>"
+            stats = db.hopt_stats_by_abbr()
+            assert stats["hklrccp"]["downloaded"] == 1
+        finally:
+            db.close()
+
+    async def test_pdf_slug_two_hops_writes_pdf_and_metadata(
+        self, tmp_path, monkeypatch,
+    ):
+        import json
+
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        # Force extract_pdf_text to return a known string so we can
+        # assert on the .txt sidecar without depending on pdftotext.
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pdftotext",
+            lambda b: "Companies Ordinance body",
+        )
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pypdf", lambda b: None,
+        )
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="histlaw", year=1964, num=1, lang="en",
+                title="Companies Ordinance(32)",
+                neutral="[1964] HKHistLaws 1",
+                doc_date="1964-01-01",
+            )
+
+            metadata = {
+                "id": 2148,
+                "title": "Companies Ordinance(32)",
+                "neutral": "[1964] HKHistLaws 1",
+                "date": "1964",
+                "pdf": "/static/en/histlaw/1964/1.pdf",
+                "path": "/1964/1/",
+                "has_translation": False,
+            }
+            pdf_bytes = b"%PDF-1.4\nfake binary body\n"
+            requested: list[str] = []
+
+            async def mock_get(url, **kw):
+                requested.append(url)
+                if "/api/gethistlaw" in url:
+                    return httpx.Response(
+                        200, json=metadata,
+                        request=httpx.Request("GET", url),
+                    )
+                if url == "https://www.hklii.hk/static/en/histlaw/1964/1.pdf":
+                    return httpx.Response(
+                        200, content=pdf_bytes,
+                        request=httpx.Request("GET", url),
+                    )
+                raise AssertionError(f"unexpected url {url}")
+
+            family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 1
+            assert result.failed == 0
+            assert len(requested) == 2
+            assert "/api/gethistlaw" in requested[0]
+            assert requested[1].endswith("/static/en/histlaw/1964/1.pdf")
+            base = tmp_path / "d3" / "histlaw" / "1964" / "1"
+            stored_meta = json.loads(
+                (base / "histlaw_1964_1_en.json").read_text()
+            )
+            assert stored_meta["neutral"] == "[1964] HKHistLaws 1"
+            assert (
+                base / "histlaw_1964_1_en.pdf"
+            ).read_bytes() == pdf_bytes
+            assert (
+                base / "histlaw_1964_1_en.txt"
+            ).read_text() == "Companies Ordinance body"
+            stats = db.hopt_stats_by_abbr()
+            assert stats["histlaw"]["downloaded"] == 1
+        finally:
+            db.close()
