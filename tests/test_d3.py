@@ -998,3 +998,112 @@ class TestD3RunnerRun:
             assert "tc" not in result.langs_enumerated.get("hklrccp", set())
         finally:
             db.close()
+
+
+class TestScrapeD3Cli:
+    """CLI: `hklii scrape-d3` subcommand."""
+
+    def test_help_invocable_and_lists_flags(self):
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+
+        result = CliRunner().invoke(main, ["scrape-d3", "--help"])
+
+        assert result.exit_code == 0
+        for flag in (
+            "--proxy", "--direct", "--slug", "--lang",
+            "--limit", "--skip-if-fresh", "--yes",
+        ):
+            assert flag in result.output, f"missing flag {flag}"
+
+    def test_requires_proxy_or_direct(self):
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+
+        result = CliRunner().invoke(main, ["scrape-d3"])
+
+        assert result.exit_code != 0
+        assert "proxy" in result.output.lower()
+
+    def test_dispatches_to_run_scrape_d3_when_direct(self, tmp_path):
+        """--direct --yes should skip the confirm prompt and call the runner."""
+        from unittest.mock import AsyncMock, patch
+
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+
+        with patch(
+            "hklii_downloader.cli._run_scrape_d3", new=AsyncMock(),
+        ) as mocked:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "scrape-d3",
+                    "-o", str(tmp_path),
+                    "--direct", "--yes",
+                    "--slug", "hklrccp",
+                    "--lang", "en",
+                    "--limit", "1",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mocked.await_count == 1
+        call = mocked.await_args
+        assert call.kwargs["output"] == tmp_path
+        assert call.kwargs["direct"] is True
+        assert "hklrccp" in call.kwargs["slugs"]
+        assert call.kwargs["langs"] == ("en",)
+        assert call.kwargs["limit"] == 1
+
+    def test_skip_if_fresh_short_circuits_when_all_fresh(self, tmp_path):
+        """Every requested (slug, lang) is FRESH → returns without wire call."""
+        from unittest.mock import AsyncMock, patch
+
+        from click.testing import CliRunner
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import main
+        from hklii_downloader.d3 import D3_FAMILIES, D3_LANGS
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            # Seed every (slug, lang) as FRESH under kind='hopt'.
+            import time
+            now = int(time.time())
+            for family in D3_FAMILIES:
+                for lang in D3_LANGS:
+                    db.upsert_freshness_probe(
+                        kind="hopt", scope=family.slug, lang=lang,
+                        live_count=0, live_updated_at="2026-07-08",
+                        live_probed_at=now, probe_error=None,
+                    )
+                    db._conn.execute(
+                        "UPDATE db_freshness "
+                        "SET local_count=0, local_counted_at=? "
+                        "WHERE kind='hopt' AND scope=? AND lang=?",
+                        (now, family.slug, lang),
+                    )
+                    db._conn.commit()
+                    db.mark_bucket_scraped(
+                        kind="hopt", scope=family.slug, lang=lang,
+                        completed_at=now,
+                    )
+        finally:
+            db.close()
+
+        with patch(
+            "hklii_downloader.cli._run_scrape_d3", new=AsyncMock(),
+        ) as mocked:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "scrape-d3",
+                    "-o", str(tmp_path),
+                    "--direct", "--yes",
+                    "--skip-if-fresh",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert mocked.await_count == 0, "runner ran despite all-fresh"
