@@ -1743,6 +1743,22 @@ class CheckpointDB:
         Wire columns and scrape-runner columns are COALESCE-preserved
         on conflict — this writer owns local_count / local_counted_at
         only.
+
+        Bilingual-collapse compensation for kind='cases' + lang='tc':
+        :meth:`upsert_case` collapses every bilingual (en+tc) row to
+        lang='en' via a CASE expression, so a naive ``WHERE lang='tc'``
+        count silently drops all bilingual entries. HKLII's
+        ``getmetacase?lang=tc`` count includes those cases (they have a
+        TC rendering on the wire), so the mismatch would be permanent
+        and every hkcfa/tc probe would false-STALE the bucket forever
+        — burning wire on daily re-scrapes for no gain. We compensate
+        by OR-ing lang='en' into the TC-cases filter: it slightly
+        over-counts by true en-only rows (schema can't distinguish
+        bilingual-collapsed-to-en from en-only), but the over-count
+        still fails safe (STALE, never FRESH), and for courts where
+        en-only is rare parity is finally achievable. Legis / hopt
+        kinds keep the strict per-lang count because those tables
+        have no collapse rule.
         """
         if kind not in _FRESHNESS_KINDS:
             raise ValueError(
@@ -1750,11 +1766,20 @@ class CheckpointDB:
                 f"expected one of {_FRESHNESS_KINDS}"
             )
         table, scope_col = _FRESHNESS_TABLE_BY_KIND[kind]
-        row = self._conn.execute(
-            f"SELECT COUNT(*) FROM {table} "
-            f"WHERE {scope_col}=? AND lang=? AND status='downloaded'",
-            (scope, lang),
-        ).fetchone()
+        if kind == "cases" and lang == "tc":
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM {table} "
+                f"WHERE {scope_col}=? "
+                "AND lang IN ('tc', 'en') "
+                "AND status='downloaded'",
+                (scope,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM {table} "
+                f"WHERE {scope_col}=? AND lang=? AND status='downloaded'",
+                (scope, lang),
+            ).fetchone()
         count = int(row[0]) if row else 0
         now = int(time.time())
         self._conn.execute(
