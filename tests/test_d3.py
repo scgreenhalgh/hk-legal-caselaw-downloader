@@ -1153,3 +1153,124 @@ class TestD3Dispatcher:
         )
         step_names = {s.name for s in runner.plan()}
         assert "scrape_d3" not in step_names
+
+
+class TestD3FreshnessEndToEnd:
+    """Runner run → mark_bucket_scraped → recompute → row flips FRESH."""
+
+    async def test_populated_bucket_flips_to_fresh_after_run(self, tmp_path):
+        import time
+
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+        from hklii_downloader.freshness import _fresh
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            now = int(time.time())
+            # Seed live_count=1 for hklrccp/en so recompute has a target.
+            db.upsert_freshness_probe(
+                kind="hopt", scope="hklrccp", lang="en",
+                live_count=1, live_updated_at="2026-07-08",
+                live_probed_at=now, probe_error=None,
+            )
+
+            listing = {
+                "totalfiles": 1,
+                "files": [
+                    {
+                        "title": "T",
+                        "path": "/en/other/hklrccp/2020/2",
+                        "neutral": "[2020] HKLRCCP 2",
+                        "date": "2020-12-01",
+                    },
+                ],
+            }
+            metadata = {"content": "<h3>x</h3>"}
+
+            async def mock_get(url, **kw):
+                if "gethoptfiles" in url:
+                    return httpx.Response(
+                        200, json=listing,
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(
+                    200, json=metadata,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+            result = await runner.run()
+            assert result.downloaded == 1
+
+            # Simulate the CLI close-out step + freshness recompute.
+            db.mark_bucket_scraped(
+                "hopt", "hklrccp", "en", completed_at=now,
+            )
+            db.recompute_local_count(
+                kind="hopt", scope="hklrccp", lang="en",
+            )
+
+            row = db.get_freshness_row("hopt", "hklrccp", "en")
+            assert row is not None
+            assert row.local_count == 1
+            assert row.last_scrape_completed_at == now
+            assert _fresh(row) is True
+        finally:
+            db.close()
+
+    async def test_empty_bucket_flips_fresh_at_local_equals_live_zero(
+        self, tmp_path,
+    ):
+        """En-only slug's TC bucket: live=0, local=0, still FRESH."""
+        import time
+
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+        from hklii_downloader.freshness import _fresh
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            now = int(time.time())
+            db.upsert_freshness_probe(
+                kind="hopt", scope="histlaw", lang="tc",
+                live_count=0, live_updated_at="2026-07-08",
+                live_probed_at=now, probe_error=None,
+            )
+
+            async def mock_get(url, **kw):
+                return httpx.Response(
+                    200, json={"totalfiles": 0, "files": []},
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("tc",),
+            )
+            result = await runner.run()
+            assert result.downloaded == 0
+
+            db.mark_bucket_scraped(
+                "hopt", "histlaw", "tc", completed_at=now,
+            )
+            db.recompute_local_count(
+                kind="hopt", scope="histlaw", lang="tc",
+            )
+
+            row = db.get_freshness_row("hopt", "histlaw", "tc")
+            assert row is not None
+            assert row.live_count == 0
+            assert row.local_count == 0
+            assert _fresh(row) is True
+        finally:
+            db.close()
