@@ -3142,6 +3142,7 @@ _UPDATE_PROFILES = ("daily", "weekly", "monthly", "quarterly", "custom")
 @click.option("--include-enrich/--no-enrich", default=None)
 @click.option("--include-canary/--no-canary", default=None)
 @click.option("--include-hopt/--no-hopt", default=None)
+@click.option("--include-d3/--no-d3", default=None)
 @click.option("--include-ukpc/--no-ukpc", default=None)
 @click.option("--include-legis/--no-legis", default=None)
 @click.option("--include-legis-history/--no-legis-history", default=None)
@@ -3178,6 +3179,7 @@ def update_command(
     include_enrich: bool | None,
     include_canary: bool | None,
     include_hopt: bool | None,
+    include_d3: bool | None,
     include_ukpc: bool | None,
     include_legis: bool | None,
     include_legis_history: bool | None,
@@ -3235,6 +3237,7 @@ def update_command(
             include_enrich=include_enrich,
             include_canary=include_canary,
             include_hopt=include_hopt,
+            include_d3=include_d3,
             include_ukpc=include_ukpc,
             include_legis=include_legis,
             include_legis_history=include_legis_history,
