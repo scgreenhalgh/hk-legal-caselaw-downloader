@@ -753,3 +753,144 @@ class TestD3RunnerFetchHappyPath:
             assert stats["histlaw"]["downloaded"] == 1
         finally:
             db.close()
+
+
+class TestD3RunnerFetchFailures:
+    """fetch_pending failure paths — mark row failed, error identifies hop."""
+
+    async def test_hop1_404_marks_failed_with_hop_id(self, tmp_path):
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="hklrccp", year=2020, num=2, lang="en",
+                title="x", neutral=None, doc_date=None,
+            )
+
+            async def mock_get(url, **kw):
+                return httpx.Response(
+                    404, text="not found",
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 0
+            assert result.failed == 1
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents WHERE abbr='hklrccp'"
+            ).fetchone()
+            assert row[0] == "failed"
+            error = row[1]
+            assert "hop-1" in error
+            assert "404" in error
+            assert "hklrccp" in error
+        finally:
+            db.close()
+
+    async def test_hop2_404_marks_failed_with_hop_id(
+        self, tmp_path, monkeypatch,
+    ):
+        """Metadata JSON lands, but the PDF URL 404s — must be visible."""
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="histlaw", year=1964, num=1, lang="en",
+                title="x", neutral=None, doc_date=None,
+            )
+
+            metadata = {
+                "pdf": "/static/en/histlaw/1964/1.pdf",
+                "title": "x",
+            }
+
+            async def mock_get(url, **kw):
+                if "/api/gethistlaw" in url:
+                    return httpx.Response(
+                        200, json=metadata,
+                        request=httpx.Request("GET", url),
+                    )
+                if "static" in url:
+                    return httpx.Response(
+                        404, text="not found",
+                        request=httpx.Request("GET", url),
+                    )
+                raise AssertionError(f"unexpected url {url}")
+
+            family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 0
+            assert result.failed == 1
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents WHERE abbr='histlaw'"
+            ).fetchone()
+            assert row[0] == "failed"
+            error = row[1]
+            assert "hop-2" in error
+            assert "404" in error
+            assert "static" in error  # URL is in the error text
+        finally:
+            db.close()
+
+    async def test_hop1_non_json_body_marks_failed(self, tmp_path):
+        """HKLII returned an HTML error page instead of JSON."""
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="hklrccp", year=2020, num=2, lang="en",
+                title="x", neutral=None, doc_date=None,
+            )
+
+            async def mock_get(url, **kw):
+                return httpx.Response(
+                    200,
+                    text="<html>upstream error</html>",
+                    headers={"content-type": "text/html"},
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 0
+            assert result.failed == 1
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents WHERE abbr='hklrccp'"
+            ).fetchone()
+            assert row[0] == "failed"
+            error = row[1]
+            assert "hop-1" in error
+            assert "non-JSON" in error or "JSONDecodeError" in error
+        finally:
+            db.close()
