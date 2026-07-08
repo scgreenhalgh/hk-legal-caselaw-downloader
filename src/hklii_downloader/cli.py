@@ -3239,7 +3239,23 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
 async def _run_update_scrape(runner, step, no_events: bool) -> None:
     """Delegate to the same helper as `hklii scrape`, threading through
     the narrow-window kwargs from the plan as a single EnumWindow value
-    object so the four coupled fields can't drift apart at hop layers."""
+    object so the four coupled fields can't drift apart at hop layers.
+
+    Freshness-aware scoping (adversarial D2 finding #2): the freshness
+    step runs FIRST in the plan (when include_freshness_check is on),
+    populating db_freshness with wire counts + probe status + local
+    counts. Before dispatching the scrape, consult db_freshness and
+    drop any court whose EN AND TC are both FRESH — the ~28 probe
+    cost was spent to answer exactly this question. If every court is
+    fresh, skip the scrape entirely rather than burning enum + fetch
+    on nothing.
+
+    The freshness step's absence (include_freshness_check=False) is
+    respected: without a check_freshness step ahead of us, db_freshness
+    is stale/empty, and we default back to the original full
+    ALL_COURTS × en/tc sweep. This preserves the pre-D2 behaviour for
+    profiles that opt out.
+    """
     kw = step.kwargs
     window = EnumWindow(
         min_date_text=kw.get("min_date"),
@@ -3247,17 +3263,29 @@ async def _run_update_scrape(runner, step, no_events: bool) -> None:
         sort=kw.get("sort"),
         items_per_page=kw.get("items_per_page") or 10_000,
     )
+    court_list = list(ALL_COURTS)
+    langs: tuple[str, ...] = ("en", "tc")
+    if runner.settings.get("include_freshness_check"):
+        court_list, langs = _filter_fresh_case_buckets(
+            runner.output, court_list, langs,
+        )
+        if not court_list:
+            click.echo(
+                "  update scrape: every case bucket is FRESH — "
+                "skipping (freshness-scoped)."
+            )
+            return
     await _run_scrape(ScrapeConfig(
         output=runner.output,
         fmt_set={"html", "json", "txt", "doc"} if kw.get("allow_doc") else {"html", "json", "txt"},
         proxies=runner.proxies,
         direct=runner.direct,
-        court_list=ALL_COURTS,
+        court_list=court_list,
         limit=None,
         resume=False,
         with_summaries=kw.get("with_summaries", True),
         with_appeal_history=kw.get("with_appeal_history", True),
-        langs=("en", "tc"),
+        langs=langs,
         retry_failed=False,
         enum_max_age=0,
         save_enum_responses=False,
