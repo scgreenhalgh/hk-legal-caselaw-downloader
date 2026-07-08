@@ -56,6 +56,7 @@ _STEP_EST: dict[str, str] = {
     "enrich": "~10-50 (capped at retry_limit)",
     "coverage_canary": "~13 (13 dbs × EN only, getmetacase)",
     "scrape_hopt": "~10 enum + new-row fetches",
+    "scrape_d3": "~14 enum + new-row fetches (~10k first run, deltas after)",
     "scrape_ukpc": "~2 enum + N new-row fetches (idempotent skip)",
     "scrape_legis": "~6 enum + new-row fetches",
     "backfill_legis_history": "~500 (missing capversions)",
@@ -103,6 +104,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_validate": False,
         "include_full_reconcile": False,
         "include_orphan_mark": False,
+        "include_d3": False,
     },
     "weekly": {
         "recent_days": 30,
@@ -128,6 +130,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_validate": False,
         "include_full_reconcile": False,
         "include_orphan_mark": False,
+        "include_d3": False,
     },
     "monthly": {
         "recent_days": 90,
@@ -148,6 +151,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_ukpc": True,
         "include_legis": True,
         "include_legis_history": True,
+        "include_d3": True,
         # `scrape_relatedcaps` deliberately excluded from monthly — the
         # ord/reg graph is 100% derivable from the numeric-suffix pattern
         # and hasn't drifted across the last audit. Quarterly still runs
@@ -182,6 +186,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_validate": True,
         "include_full_reconcile": True,
         "include_orphan_mark": True,
+        "include_d3": True,
     },
     "custom": {
         # Custom profile starts with EVERYTHING OFF; caller must explicitly
@@ -209,6 +214,7 @@ PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
         "include_validate": False,
         "include_full_reconcile": False,
         "include_orphan_mark": False,
+        "include_d3": False,
     },
 }
 
@@ -255,6 +261,7 @@ class UpdateRunner:
         include_validate: bool | None = None,
         include_full_reconcile: bool | None = None,
         include_orphan_mark: bool | None = None,
+        include_d3: bool | None = None,
         # Misc
         yes_narrow: bool = False,
         now: Callable[[], datetime] | None = None,
@@ -298,6 +305,7 @@ class UpdateRunner:
             "include_validate": include_validate,
             "include_full_reconcile": include_full_reconcile,
             "include_orphan_mark": include_orphan_mark,
+            "include_d3": include_d3,
         }
         for k, v in overrides.items():
             if v is not None:
@@ -416,6 +424,12 @@ class UpdateRunner:
         if s.get("include_hopt"):
             steps.append(Step(
                 name="scrape_hopt",
+                kwargs={},
+            ))
+
+        if s.get("include_d3"):
+            steps.append(Step(
+                name="scrape_d3",
                 kwargs={},
             ))
 

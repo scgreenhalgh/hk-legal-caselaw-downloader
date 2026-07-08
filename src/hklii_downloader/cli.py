@@ -3375,6 +3375,33 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
                         langs=hopt_langs,
                         limit=None, no_events=no_events,
                     )
+            elif step.name == "scrape_d3":
+                # D3 rows live under kind='hopt' in db_freshness so the
+                # same hopt freshness filter applies — pass the D3
+                # slugs and langs explicitly.
+                from .d3 import D3_FAMILIES, D3_LANGS
+                d3_all_slugs = tuple(f.slug for f in D3_FAMILIES)
+                if runner.settings.get("include_freshness_check"):
+                    d3_slugs, d3_langs = _filter_fresh_hopt_buckets(
+                        runner.output, d3_all_slugs, D3_LANGS,
+                        kind="hopt",
+                    )
+                else:
+                    d3_slugs, d3_langs = d3_all_slugs, D3_LANGS
+                if not d3_slugs:
+                    click.echo(
+                        "  update scrape_d3: every slug FRESH — "
+                        "skipping (freshness-scoped)."
+                    )
+                else:
+                    await _run_scrape_d3(
+                        output=runner.output,
+                        proxies=runner.proxies,
+                        direct=runner.direct,
+                        slugs=d3_slugs,
+                        langs=d3_langs,
+                        limit=None, no_events=no_events,
+                    )
             elif step.name == "scrape_ukpc":
                 # UKPC is EN-only per /databases (2026-07-08). The
                 # runner's TC enum is best-effort and no-ops with a
