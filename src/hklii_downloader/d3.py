@@ -345,6 +345,16 @@ class D3Runner:
                 ).add(lang)
         return upserted
 
+    async def run(self) -> D3RunResult:
+        """Enumerate all (family, lang) pairs then drain pending rows.
+
+        Convenience for callers that don't want to compose the two
+        phases themselves. ``limit`` respects the value passed to
+        ``__init__``.
+        """
+        await self.enumerate_all()
+        return await self.fetch_pending(limit=self._limit)
+
     async def fetch_pending(self, limit: int | None = None) -> D3RunResult:
         """Drain pending rows: metadata JSON, then optional PDF binary.
 
