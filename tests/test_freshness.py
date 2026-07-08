@@ -1243,6 +1243,84 @@ class TestRenderReportMarkdown:
         assert "2143" in table
         assert "2026-07-08" in table
 
+    def test_matching_counts_render_plain(self):
+        """When local == live, the count cell renders as plain
+        ``N / N`` — no bold, no delta. Reader's eye skips over it."""
+        db = CheckpointDB(":memory:")
+        db.upsert_freshness_probe(
+            "cases", "hkcfa", "en",
+            live_count=2143, live_updated_at="2026-07-08",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        db._conn.execute(
+            "UPDATE db_freshness SET local_count=2143 "
+            "WHERE kind='cases' AND scope='hkcfa' AND lang='en'"
+        )
+        db._conn.commit()
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        assert "2143 / 2143" in table
+        # Matching cell must NOT be bold.
+        assert "**2143 / 2143**" not in table
+
+    def test_mismatch_bolded_with_signed_delta(self):
+        """When local != live, the count cell renders bold with a
+        signed delta so a scan of the table picks up drift instantly.
+
+        Convention: ``delta = live - local`` — positive when HKLII is
+        ahead of us (the common case: we need to scrape more).
+        """
+        db = CheckpointDB(":memory:")
+        db.upsert_freshness_probe(
+            "cases", "hkcfa", "en",
+            live_count=2143, live_updated_at="2026-07-08",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        db._conn.execute(
+            "UPDATE db_freshness SET local_count=2138 "
+            "WHERE kind='cases' AND scope='hkcfa' AND lang='en'"
+        )
+        db._conn.commit()
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        assert "**2138 / 2143 (+5)**" in table, (
+            "expected bold mismatch cell with signed delta; got:\n"
+            + table
+        )
+
+    def test_negative_delta_when_local_ahead(self):
+        """If local > live (rare — mid-run HKLII churn or count
+        rollback), delta renders with a leading ``-``."""
+        db = CheckpointDB(":memory:")
+        db.upsert_freshness_probe(
+            "cases", "hkcfa", "en",
+            live_count=2140, live_updated_at="2026-07-08",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        db._conn.execute(
+            "UPDATE db_freshness SET local_count=2143 "
+            "WHERE kind='cases' AND scope='hkcfa' AND lang='en'"
+        )
+        db._conn.commit()
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        assert "**2143 / 2140 (-3)**" in table
+
     def test_missing_rows_show_em_dash(self):
         """A slug with no probe yet shows ``—`` in its cells so a
         reader knows it's unpopulated, not zero."""
