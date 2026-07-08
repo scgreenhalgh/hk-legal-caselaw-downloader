@@ -194,13 +194,31 @@ def _fresh(row: DbFreshnessRecord) -> bool:
       (c) local_count IS NOT NULL,
       (d) live_count == local_count,
       (e) last_scrape_completed_at IS NOT NULL,
-      (f) live_updated_at parses cleanly, and
+      (f) live_updated_at parses cleanly,
       (g) date_of(live_updated_at) <= date_of(last_scrape_completed_at)
-          on the Hong Kong civil calendar.
+          on the Hong Kong civil calendar, and
+      (h) if the upstream date and scrape date are the SAME civil day,
+          the probe must have run AT-OR-BEFORE the scrape completed
+          (``live_probed_at <= last_scrape_completed_at``). This is
+          the same-day-race guard covering the case where HKLII adds
+          content between our scrape end and the next probe, without
+          rolling live_updated_at into the next calendar day.
 
     Any failure → STALE (fail-safe). A wrong semantic assumption in
-    (g) produces at worst a false-STALE (over-scrape) not a false-FRESH
-    — that's the whole point.
+    (g)/(h) produces at worst a false-STALE (over-scrape) not a
+    false-FRESH — that's the whole point.
+
+    Rule (h) motivation (adversarial D2 finding #3): the original
+    ``<=`` rule (g) permitted the pattern where a probe runs today, a
+    scrape completes today, HKLII publishes 4 hours later, and the
+    NEXT probe (tomorrow morning) still reads the same date-granular
+    live_updated_at — flipping the bucket FRESH and hiding the new
+    judgment. Rule (h) tightens the boundary by requiring, on the
+    ambiguous same-day case, that the probe be no more recent than the
+    scrape end. In the normal update flow (probe → scrape in the same
+    session) that condition holds because the probe runs BEFORE the
+    scrape completes. In the stale-probe-relative-to-old-scrape case
+    (the finding #3 race) it fails and the bucket flips STALE.
     """
     if row.probe_error is not None:
         return False
@@ -221,7 +239,19 @@ def _fresh(row: DbFreshnessRecord) -> bool:
     scrape_dt = datetime.fromtimestamp(
         row.last_scrape_completed_at, HKT,
     ).date()
-    return upstream <= scrape_dt
+    if upstream > scrape_dt:
+        return False
+    if upstream == scrape_dt:
+        # Same civil day — apply rule (h). live_probed_at is populated
+        # whenever the probe runs (success or failure); a NULL here
+        # means the probe never fired, but a probe-never-fired row
+        # would have failed rules (a)/(b)/(f) above, so we should not
+        # reach here with live_probed_at == NULL. Fail safe just in case.
+        if row.live_probed_at is None:
+            return False
+        if row.live_probed_at > row.last_scrape_completed_at:
+            return False
+    return True
 
 
 class FreshnessRunner:
