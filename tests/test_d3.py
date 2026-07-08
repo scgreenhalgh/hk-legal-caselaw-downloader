@@ -36,6 +36,35 @@ class TestD3Family:
         family = next(f for f in D3_FAMILIES if f.slug == slug)
         assert wire_abbr(family) == expected_wire_abbr
 
+    def test_hkiac_marked_disabled(self):
+        """hkiac.org URL structure changed 2026-07-09; every referenced
+        DHK-*.pdf 404s, category page 404s. Disabled at family-spec level
+        so scraper/CLI/dispatcher all skip by default.
+        """
+        from hklii_downloader.d3 import D3_FAMILIES
+
+        hkiac = next(f for f in D3_FAMILIES if f.slug == "hkiac")
+        assert hkiac.enabled is False
+
+    def test_all_other_families_enabled(self):
+        """Only hkiac is disabled today. histlaw and pcpdaab are kept
+        enabled (still noisy, still failing) pending a resolver for the
+        real content source; hkiac was explicitly triaged as dead.
+        """
+        from hklii_downloader.d3 import D3_FAMILIES
+
+        for f in D3_FAMILIES:
+            if f.slug == "hkiac":
+                continue
+            assert f.enabled is True, f"{f.slug} unexpectedly disabled"
+
+    def test_active_d3_families_excludes_hkiac(self):
+        from hklii_downloader.d3 import ACTIVE_D3_FAMILIES
+
+        slugs = {f.slug for f in ACTIVE_D3_FAMILIES}
+        assert "hkiac" not in slugs
+        assert slugs == {"histlaw", "hklrccp", "hklrcr", "pcpdaab", "pcpdc"}
+
 
 class TestD3UrlBuilders:
     """URL constructors — listing + fetch."""
