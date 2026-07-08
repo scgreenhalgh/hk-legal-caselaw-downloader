@@ -112,6 +112,13 @@ class D3Listing:
     entries: list[D3Entry] = field(default_factory=list)
 
 
+@dataclass
+class D3RunResult:
+    downloaded: int = 0
+    failed: int = 0
+    langs_enumerated: dict[str, set[str]] = field(default_factory=dict)
+
+
 def _row_dir(output_dir: Path, family: D3Family, year: int, num: int) -> Path:
     base = Path(output_dir) / "d3" / family.slug / str(year) / str(num)
     base.mkdir(parents=True, exist_ok=True)
@@ -337,6 +344,98 @@ class D3Runner:
                     family.slug, set(),
                 ).add(lang)
         return upserted
+
+    async def fetch_pending(self, limit: int | None = None) -> D3RunResult:
+        """Drain pending rows: metadata JSON, then optional PDF binary.
+
+        Rows whose ``abbr`` does not resolve to a known family (someone
+        else wrote them) are marked failed rather than crashing the
+        whole run — one bad row must not block the queue.
+        """
+        self._checkpoint.release_in_progress_hopt()
+        family_by_slug = {f.slug: f for f in self._families}
+        result = D3RunResult(
+            langs_enumerated={
+                slug: set(langs)
+                for slug, langs in self.langs_enumerated.items()
+            },
+        )
+        remaining = limit if limit is not None else -1
+        while remaining != 0:
+            row = self._checkpoint.claim_pending_hopt()
+            if row is None:
+                break
+            family = family_by_slug.get(row.abbr)
+            if family is None:
+                self._checkpoint.mark_hopt_failed(
+                    row.abbr, row.year, row.num, row.lang,
+                    error=f"unknown family for abbr={row.abbr}",
+                )
+                result.failed += 1
+                if remaining > 0:
+                    remaining -= 1
+                continue
+            try:
+                metadata, pdf_bytes = await _fetch_row(
+                    self._get, family, row.year, row.num, row.lang,
+                )
+                if pdf_bytes is None:
+                    formats = save_d3_html(
+                        self._output_dir, family,
+                        row.year, row.num, row.lang, metadata,
+                    )
+                else:
+                    text = extract_pdf_text(pdf_bytes)
+                    formats = save_d3_pdf(
+                        self._output_dir, family,
+                        row.year, row.num, row.lang,
+                        metadata, pdf_bytes, text,
+                    )
+                self._checkpoint.mark_hopt_downloaded(
+                    row.abbr, row.year, row.num, row.lang, formats,
+                )
+                result.downloaded += 1
+            except D3FetchError as exc:
+                self._checkpoint.mark_hopt_failed(
+                    row.abbr, row.year, row.num, row.lang, str(exc),
+                )
+                result.failed += 1
+            if remaining > 0:
+                remaining -= 1
+        return result
+
+
+async def _fetch_row(
+    get: Callable, family: D3Family,
+    year: int, num: int, lang: str,
+) -> tuple[dict, bytes | None]:
+    """Two-hop fetch: metadata JSON, then (if shape A/C) PDF binary.
+
+    Returns ``(metadata, None)`` for HTML slugs. Raises
+    :class:`D3FetchError` on any non-200 or non-JSON metadata body.
+    """
+    meta_url = fetch_url(family, year, num, lang)
+    resp = await get(meta_url)
+    if resp.status_code != 200:
+        raise D3FetchError(
+            f"hop-1 HTTP {resp.status_code} for {meta_url}"
+        )
+    try:
+        metadata = resp.json()
+    except Exception as exc:
+        raise D3FetchError(
+            f"hop-1 non-JSON body for {meta_url}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    binary_url = pdf_url(family, metadata)
+    if binary_url is None:
+        return metadata, None
+    resp = await get(binary_url)
+    if resp.status_code != 200:
+        raise D3FetchError(
+            f"hop-2 HTTP {resp.status_code} for {binary_url}"
+        )
+    return metadata, resp.content
 
 
 def pdf_url(family: D3Family, response: dict) -> str | None:
