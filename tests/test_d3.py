@@ -373,3 +373,82 @@ class TestD3SaveHtml:
         base = tmp_path / "d3" / "pcpdc" / "2020" / "1"
         assert (base / "pcpdc_2020_1_en.json").exists()
         assert (base / "pcpdc_2020_1_tc.json").exists()
+
+
+class TestD3SavePdf:
+    """save_d3_pdf — shape-A/C slugs, two-hop artifacts on disk."""
+
+    def test_writes_json_pdf_and_txt_when_extraction_ok(self, tmp_path):
+        import json
+        from hklii_downloader.d3 import D3_FAMILIES, save_d3_pdf
+
+        family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+        metadata = {
+            "id": 2148,
+            "title": "Companies Ordinance(32)",
+            "neutral": "[1964] HKHistLaws 1",
+            "pdf": "/static/en/histlaw/1964/1.pdf",
+        }
+        pdf_bytes = b"%PDF-1.4\nfake body"
+        text = "Extracted body text"
+
+        formats = save_d3_pdf(
+            tmp_path, family, 1964, 1, "en",
+            metadata, pdf_bytes, text,
+        )
+
+        assert formats == ["json", "pdf", "txt"]
+        base = tmp_path / "d3" / "histlaw" / "1964" / "1"
+        stored_meta = json.loads(
+            (base / "histlaw_1964_1_en.json").read_text()
+        )
+        assert stored_meta["title"] == "Companies Ordinance(32)"
+        assert (base / "histlaw_1964_1_en.pdf").read_bytes() == pdf_bytes
+        assert (base / "histlaw_1964_1_en.txt").read_text() == text
+
+    def test_omits_txt_when_extraction_failed(self, tmp_path):
+        from hklii_downloader.d3 import D3_FAMILIES, save_d3_pdf
+
+        family = next(f for f in D3_FAMILIES if f.slug == "hkiac")
+        formats = save_d3_pdf(
+            tmp_path, family, 2021, 183, "en",
+            {"id": 5400, "title": "Playboy Enterprises"},
+            b"%PDF-1.4\n", None,
+        )
+
+        assert formats == ["json", "pdf"]
+        base = tmp_path / "d3" / "hkiac" / "2021" / "183"
+        assert (base / "hkiac_2021_183_en.json").exists()
+        assert (base / "hkiac_2021_183_en.pdf").exists()
+        assert not (base / "hkiac_2021_183_en.txt").exists()
+
+    def test_external_pdf_url_preserved_in_metadata(self, tmp_path):
+        """Original external `pdf` URL must be grepable after mirror.
+
+        Provenance for cross-origin PDFs (hkiac, pcpdaab) so a future
+        audit can compare the mirrored `.pdf` against the source.
+        """
+        import json
+        from hklii_downloader.d3 import D3_FAMILIES, save_d3_pdf
+
+        family = next(f for f in D3_FAMILIES if f.slug == "hkiac")
+        metadata = {
+            "id": 5400,
+            "pdf": (
+                "https://www.hkiac.org/sites/default/files/"
+                "ck_filebrowser/IP/hk/decision/DHK-2100183.pdf"
+            ),
+        }
+        save_d3_pdf(
+            tmp_path, family, 2021, 183, "en",
+            metadata, b"%PDF", None,
+        )
+
+        stored = json.loads(
+            (tmp_path / "d3" / "hkiac" / "2021" / "183"
+             / "hkiac_2021_183_en.json").read_text()
+        )
+        assert stored["pdf"] == (
+            "https://www.hkiac.org/sites/default/files/"
+            "ck_filebrowser/IP/hk/decision/DHK-2100183.pdf"
+        )
