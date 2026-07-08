@@ -936,6 +936,78 @@ class TestD3RunnerFetchFailures:
         finally:
             db.close()
 
+    async def test_hop2_returns_html_error_page_marks_failed(
+        self, tmp_path,
+    ):
+        """External hosts (hkiac.org, pcpd.org.hk) can serve a 200
+        text/html error page in place of the PDF. Without content-type
+        or %PDF magic validation, that HTML is mirrored as `.pdf` and
+        the row is marked downloaded — a silent archive corruption.
+        """
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="hkiac", year=2021, num=183, lang="en",
+                title="Playboy Enterprises",
+                neutral="[2021] HKIAC 183",
+                doc_date="2021-10-10",
+            )
+
+            metadata = {
+                "pdf": (
+                    "https://www.hkiac.org/sites/default/files/"
+                    "ck_filebrowser/IP/hk/decision/DHK-2100183.pdf"
+                ),
+                "content": "",
+            }
+            html_error = b"<html>Document not available at this time.</html>"
+
+            async def mock_get(url, **kw):
+                if "/api/getother" in url:
+                    return httpx.Response(
+                        200, json=metadata,
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(
+                    200,
+                    content=html_error,
+                    headers={"content-type": "text/html"},
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hkiac")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 0
+            assert result.failed == 1
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents "
+                "WHERE abbr='hkiac'"
+            ).fetchone()
+            assert row[0] == "failed"
+            error = row[1]
+            assert "hop-2" in error
+            assert "PDF" in error or "magic" in error.lower()
+            saved_pdf = (
+                tmp_path / "d3" / "hkiac" / "2021" / "183"
+                / "hkiac_2021_183_en.pdf"
+            )
+            assert not saved_pdf.exists(), (
+                "HTML body was mirrored as .pdf — archive integrity broken"
+            )
+        finally:
+            db.close()
+
     async def test_hop1_non_json_body_marks_failed(self, tmp_path):
         """HKLII returned an HTML error page instead of JSON."""
         import httpx
