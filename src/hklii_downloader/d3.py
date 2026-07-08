@@ -39,7 +39,7 @@ _BASE_URL = "https://www.hklii.hk"
 _DEFAULT_PAGE_SIZE = 300
 
 _PATH_RE = re.compile(
-    r"^/(?:en|tc)/(?:legis|other)/[a-z]+/(nd|\d{4})/(\d+)/?"
+    r"^/(?:en|tc|sc)/(?:legis|other)/[a-z]+/(nd|\d{4})/(\d+)/?"
 )
 
 
