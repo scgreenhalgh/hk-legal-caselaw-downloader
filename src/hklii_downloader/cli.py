@@ -3537,6 +3537,17 @@ async def _run_update_check_freshness(
     help="Emit stale-bucket report as human-readable text on stdout.",
 )
 @click.option(
+    "--report",
+    "as_report",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the full fill-in-blanks Markdown table (English + Chinese "
+        "names, local/live counts + updated per lang) rather than the "
+        "stale-buckets summary."
+    ),
+)
+@click.option(
     "--yes", "-y",
     is_flag=True,
     default=False,
@@ -3554,6 +3565,7 @@ def check_freshness(
     direct: bool,
     as_json: bool,
     as_text: bool,
+    as_report: bool,
     yes: bool,
     no_events: bool,
 ) -> None:
@@ -3561,19 +3573,29 @@ def check_freshness(
 
     Runs the D2 freshness gate against the /databases fixture matrix,
     upserts wire columns into db_freshness, recomputes local_count for
-    each bucket, and prints the STALE-buckets summary. Exits 0 iff every
-    bucket is FRESH — cron scripts can chain
+    each bucket, and prints either:
+
+    - the STALE-buckets summary (default),
+    - a JSON payload (``--json``), or
+    - the full fill-in-blanks Markdown table (``--report``).
+
+    Exits 0 iff every bucket is FRESH — cron scripts can chain
     ``hklii check-freshness && ...`` to gate on a healthy corpus.
+    ``--report`` always exits 0 — it's a rendering mode, not a gate.
 
     \b
     Examples:
       hklii check-freshness --proxy http://127.0.0.1:8888
       hklii check-freshness --direct --yes --json
+      hklii check-freshness --proxy http://127.0.0.1:8888 --report
     """
     if not proxies and not direct:
         raise click.UsageError("Must specify --proxy or --direct.")
-    if as_json and as_text:
-        raise click.UsageError("--json and --text are mutually exclusive.")
+    modes = [as_json, as_text, as_report]
+    if sum(1 for m in modes if m) > 1:
+        raise click.UsageError(
+            "--json, --text, and --report are mutually exclusive.",
+        )
     if direct and not yes:
         click.confirm(
             "Probing without a proxy exposes your IP. Continue?",
@@ -3581,7 +3603,7 @@ def check_freshness(
         )
     asyncio.run(_run_check_freshness(
         output=output, proxies=list(proxies), direct=direct,
-        as_json=as_json, no_events=no_events,
+        as_json=as_json, as_report=as_report, no_events=no_events,
     ))
 
 
@@ -3591,6 +3613,7 @@ async def _run_check_freshness(
     direct: bool,
     as_json: bool,
     no_events: bool,
+    as_report: bool = False,
 ) -> None:
     """Standalone check-freshness runner. Same pool/DB lifecycle as
     the update-step handler; separate so operators can invoke either
@@ -3607,7 +3630,7 @@ async def _run_check_freshness(
     from .checkpoint import CheckpointDB
     from .discovery import load_default_matrix
     from .events import StructuredEventLogger
-    from .freshness import FreshnessRunner
+    from .freshness import FreshnessRunner, render_report_markdown
     from .proxy_pool import ProxyPool
 
     output.mkdir(parents=True, exist_ok=True)
@@ -3642,6 +3665,11 @@ async def _run_check_freshness(
         first_run = freshness.first_run_missing()
         healthy = sum(1 for o in outcomes if o.ok)
 
+        if as_report:
+            # Full markdown table — no stale gate, always exit 0.
+            rows = list(db.iter_freshness_rows())
+            click.echo(render_report_markdown(rows=rows, matrix=matrix))
+            return
         if as_json:
             payload = {
                 "probed": len(outcomes),

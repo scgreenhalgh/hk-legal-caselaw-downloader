@@ -610,11 +610,161 @@ class FreshnessRunner:
         )
 
 
-DB_DISPLAY_NAMES: dict[str, tuple[str, str]] = {}
+#: English + Chinese display names for every slug HKLII lists on
+#: ``/databases``. Source of truth is the /databases anchor text
+#: captured 2026-07-08; parsing them out of the fixture at load-time
+#: would be a nicer story (single source of truth with the matrix)
+#: but is deferred — the /databases skeleton is a Vue SPA and its
+#: display names travel in anchor text that our BS4 parser doesn't
+#: currently store. Keeping this table static means a manual sync
+#: pass when HKLII adds a slug; the drift-guard test in
+#: :mod:`tests.test_freshness` catches the case where
+#: ``DB_DISPLAY_NAMES`` misses a slug the matrix knows about.
+#:
+#: The Chinese column is Traditional Chinese (TC / zh-hant) — HKLII's
+#: primary Chinese variant. Simplified Chinese has no separate display
+#: name (the SPA repeats the TC label with the "另见简体版" hint).
+DB_DISPLAY_NAMES: dict[str, tuple[str, str]] = {
+    # Case-family courts (kind='cases')
+    "hkcfa":  ("Court of Final Appeal", "終審法院"),
+    "hkca":   ("Court of Appeal", "上訴法庭"),
+    "hkcfi":  ("Court of First Instance", "原訟法庭"),
+    "hkct":   ("Competition Tribunal", "競爭事務審裁處"),
+    "hkdc":   ("District Court", "區域法院"),
+    "hkfc":   ("Family Court", "家事法庭"),
+    "hkmagc": ("Magistrates' Courts", "裁判法院"),
+    "hkcrc":  ("Coroner's Court", "死因裁判法庭"),
+    "hklat":  ("Labour Tribunal", "勞資審裁處"),
+    "hkldt":  ("Lands Tribunal", "土地審裁處"),
+    "hkoat":  ("Obscene Articles Tribunal", "淫褻物品審裁處"),
+    "hksct":  ("Small Claims Tribunal", "小額錢債審裁處"),
+    "ukpc":   (
+        "United Kingdom Privy Council Judgments for Hong Kong", "",
+    ),
+    # Legis-native (kind='legis', getmetalegis)
+    "ord":         ("Hong Kong Ordinances", "香港條例"),
+    "reg":         ("Hong Kong Regulations", "香港附屬法例"),
+    "instrument":  ("Hong Kong Constitutional Instruments", "香港憲法文件"),
+    # Historical Laws (kind='hopt' via dbcat=H)
+    "histlaw":     ("Historical Laws of Hong Kong", ""),
+    # HOPT-family treaties (kind='hopt' via dbcat=other)
+    "hktmc": (
+        "Arrangements with the Macao SAR",
+        "香港特別行政區與澳門特別行政區之間的安排",
+    ),
+    "hktml": (
+        "Arrangements with the Mainland",
+        "香港特別行政區與內地之間的安排",
+    ),
+    "bahkg": (
+        "Bilateral Agreements Concluded by the HKSAR Government",
+        "香港特別行政區政府達成的雙邊協定",
+    ),
+    "bacpg": (
+        "Bilateral Agreements Concluded by the Central People's Government",
+        "中央人民政府達成的雙邊協定",
+    ),
+    "hkts":  ("Treaties", "公約"),
+    # /databases "other" bucket
+    "hkiac": ("Hong Kong International Arbitration Centre", ""),
+    "hklrccp": (
+        "Law Reform Commission Consultation Papers",
+        "法律改革委員會諮詢文件",
+    ),
+    "hklrcr": (
+        "Law Reform Commission Reports",
+        "法律改革委員會報告書",
+    ),
+    "pcpdaab": (
+        "Office of the Privacy Commissioner for Personal Data — "
+        "Administrative Appeals Board Decisions",
+        "個人資料私隱專員公署行政上訴委員會裁決",
+    ),
+    "pcpdc": (
+        "Office of the Privacy Commissioner for Personal Data — "
+        "Complaint Case Notes",
+        "個人資料私隱專員公署投訴個案簡述",
+    ),
+    "pd":    ("Practice Directions", "實務指示"),
+}
+
+# Canonical column order for :func:`render_report_markdown`. Every
+# supported lang is present so trilingual slugs share the same header
+# rendering as bilingual ones — the cell is em-dash when a lang isn't
+# in the matrix entry.
+_REPORT_LANGS = ("en", "tc", "sc")
+
+# Matrix bucket → header text ordering. The renderer walks buckets in
+# this order so the operator sees cases first, then legis (heaviest
+# corpus), then the small "other" bucket.
+_REPORT_BUCKETS = ("cases", "legis", "other")
+
+_EM_DASH = "—"
 
 
-def render_report_markdown(rows, matrix) -> str:
-    return ""
+def render_report_markdown(
+    rows: "list[DbFreshnessRecord]",
+    matrix: "DatabaseMatrix",
+) -> str:
+    """Render a Markdown table of the current freshness ledger.
+
+    One row per slug in the matrix; column groups per lang (EN, TC, SC).
+    Each lang group contributes three sub-columns: ``local / live`` count
+    and ``updated`` (the ``live_updated_at`` HKLII surfaces). Slugs
+    whose matrix entry does not include a given lang render em-dashes
+    in that group's cells so the reader can distinguish "we haven't
+    probed" (rows missing entirely) from "HKLII doesn't serve this
+    lang for this slug" (em-dash by lang membership).
+
+    The table is intended for ``hklii check-freshness --report`` output
+    but is a pure function so tests can pin cell content without an
+    end-to-end run.
+    """
+    # Fast lookup: (kind, scope, lang) -> row
+    row_by_key = {(r.kind, r.scope, r.lang): r for r in rows}
+
+    header_cells = ["Slug", "English", "Chinese"]
+    for lang in _REPORT_LANGS:
+        u = lang.upper()
+        header_cells.extend([f"{u} local/live", f"{u} updated"])
+    header = "| " + " | ".join(header_cells) + " |"
+    # Right-align the numeric columns; left-align names.
+    align_cells = ["---", "---", "---"]
+    for _ in _REPORT_LANGS:
+        align_cells.extend(["---:", ":---:"])
+    separator = "| " + " | ".join(align_cells) + " |"
+
+    lines = [header, separator]
+
+    for bucket_name in _REPORT_BUCKETS:
+        bucket = getattr(matrix, bucket_name, {}) or {}
+        for slug, matrix_langs in bucket.items():
+            en_name, zh_name = DB_DISPLAY_NAMES.get(slug, (slug, ""))
+            row_cells = [slug, en_name, zh_name]
+            for lang in _REPORT_LANGS:
+                if lang not in matrix_langs:
+                    row_cells.extend([_EM_DASH, _EM_DASH])
+                    continue
+                # Search across the two possible kinds this slug might
+                # be tracked under (cases/legis have single-kind
+                # dispatch; hopt covers legis-hopt + histlaw + other-*).
+                found = None
+                for kind in ("cases", "legis", "hopt"):
+                    r = row_by_key.get((kind, slug, lang))
+                    if r is not None:
+                        found = r
+                        break
+                if found is None:
+                    row_cells.extend([_EM_DASH, _EM_DASH])
+                    continue
+                local = found.local_count if found.local_count is not None else _EM_DASH
+                live = found.live_count if found.live_count is not None else _EM_DASH
+                updated = found.live_updated_at or _EM_DASH
+                row_cells.append(f"{local} / {live}")
+                row_cells.append(updated)
+            lines.append("| " + " | ".join(str(c) for c in row_cells) + " |")
+
+    return "\n".join(lines)
 
 
 def _rederive_category(kind: str, scope: str) -> str | None:
