@@ -31,6 +31,8 @@ from pathlib import Path
 from typing import AsyncIterator, Callable
 from urllib.parse import urlencode
 
+import httpx
+
 from .atomic_write import atomic_write_bytes, atomic_write_text
 
 _log = logging.getLogger("hklii_downloader.d3")
@@ -251,8 +253,14 @@ async def enumerate_pages(
     """Iterate over ``gethoptfiles`` pages for one (family, lang) pair.
 
     Yields each :class:`D3Entry` in order. Raises :class:`D3FetchError`
-    on any non-200; malformed paths are dropped by
-    :func:`parse_files_response` with a visible skip-log.
+    on any non-200, transport error, or non-JSON body; malformed paths
+    are dropped by :func:`parse_files_response` with a visible skip-log.
+
+    Transport errors (``httpx.RequestError``, ``OSError``) and
+    ``JSONDecodeError`` are wrapped so the caller's
+    ``except D3FetchError`` catches every wire-shape failure — else
+    a transient proxy stall or gunicorn 200-with-HTML body would abort
+    the whole multi-slug enumeration.
     """
     page = 1
     seen = 0
@@ -261,13 +269,28 @@ async def enumerate_pages(
         url = gethoptfiles_url(
             family, lang=lang, page=page, items_per_page=page_size,
         )
-        resp = await get(url)
+        try:
+            resp = await get(url)
+        except (httpx.RequestError, OSError) as exc:
+            raise D3FetchError(
+                f"gethoptfiles transport error for {family.slug} "
+                f"lang={lang} page={page}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
         if resp.status_code != 200:
             raise D3FetchError(
                 f"gethoptfiles HTTP {resp.status_code} for "
                 f"{family.slug} lang={lang} page={page}"
             )
-        parsed = parse_files_response(resp.json())
+        try:
+            body = resp.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise D3FetchError(
+                f"gethoptfiles non-JSON body for {family.slug} "
+                f"lang={lang} page={page}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        parsed = parse_files_response(body)
         if total is None:
             total = parsed.total
         for entry in parsed.entries:
@@ -422,18 +445,27 @@ async def _fetch_row(
 ) -> tuple[dict, bytes | None]:
     """Two-hop fetch: metadata JSON, then (if shape A/C) PDF binary.
 
-    Returns ``(metadata, None)`` for HTML slugs. Raises
-    :class:`D3FetchError` on any non-200 or non-JSON metadata body.
+    Returns ``(metadata, None)`` for HTML slugs. Every wire-shape
+    failure (transport error, non-200, non-JSON, non-PDF body) is
+    converted to :class:`D3FetchError` so the caller's row-scoped
+    ``except D3FetchError`` catches it and continues to the next row
+    instead of aborting the whole batch.
     """
     meta_url = fetch_url(family, year, num, lang)
-    resp = await get(meta_url)
+    try:
+        resp = await get(meta_url)
+    except (httpx.RequestError, OSError) as exc:
+        raise D3FetchError(
+            f"hop-1 transport error for {meta_url}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     if resp.status_code != 200:
         raise D3FetchError(
             f"hop-1 HTTP {resp.status_code} for {meta_url}"
         )
     try:
         metadata = resp.json()
-    except Exception as exc:
+    except (ValueError, json.JSONDecodeError) as exc:
         raise D3FetchError(
             f"hop-1 non-JSON body for {meta_url}: "
             f"{type(exc).__name__}: {exc}"
@@ -441,7 +473,13 @@ async def _fetch_row(
     binary_url = pdf_url(family, metadata)
     if binary_url is None:
         return metadata, None
-    resp = await get(binary_url)
+    try:
+        resp = await get(binary_url)
+    except (httpx.RequestError, OSError) as exc:
+        raise D3FetchError(
+            f"hop-2 transport error for {binary_url}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     if resp.status_code != 200:
         raise D3FetchError(
             f"hop-2 HTTP {resp.status_code} for {binary_url}"
