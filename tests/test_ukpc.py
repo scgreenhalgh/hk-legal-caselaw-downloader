@@ -113,6 +113,53 @@ class TestParseListing:
         assert listing.total == 0
         assert listing.entries == []
 
+    def test_parse_live_shape_with_en_cases_prefix(self):
+        """LIVE gethoptfiles response path shape is
+        ``/en/cases/ukpc/YYYY/NUM`` (probed 2026-07-08 via 20-proxy pool).
+
+        The prior implementation pinned _PATH_RE to the bare ``/YYYY/NUM/``
+        shape mentioned in the module comment — which turned out to be
+        ``getother``'s path field, NOT ``gethoptfiles``'s. Result: every
+        one of the 242 UKPC entries silently skipped as unparseable during
+        the first live scrape attempt; Downloaded=0, Failed=0.
+        """
+        body = {
+            "totalfiles": 2,
+            "files": [
+                {"title": "Yuen v. The Royal Hong Kong Golf Club",
+                 "path": "/en/cases/ukpc/1997/40",
+                 "neutral": "[1997] UKPC 40",
+                 "date": "1997-07-29"},
+                {"title": "CIR v. Cosmotron",
+                 "path": "/en/cases/ukpc/1997/42",
+                 "neutral": "[1997] UKPC 42",
+                 "date": "1997-07-29"},
+            ],
+        }
+        listing = parse_hopt_c_listing(body)
+        assert listing.total == 2
+        assert len(listing.entries) == 2, (
+            "live-shape path silently dropped — parser _PATH_RE too "
+            "strict about the `/YYYY/NUM/` shape."
+        )
+        assert listing.entries[0].year == 1997
+        assert listing.entries[0].num == 40
+        assert listing.entries[0].neutral == "[1997] UKPC 40"
+
+    def test_parse_live_shape_tc_prefix(self):
+        """TC endpoint (if ever populated) would return
+        ``/tc/cases/ukpc/YYYY/NUM`` — accept it too for forward-compat."""
+        body = {
+            "totalfiles": 1,
+            "files": [{"title": "…", "path": "/tc/cases/ukpc/1998/12",
+                       "neutral": "[1998] UKPC 12",
+                       "date": "1998-03-01"}],
+        }
+        listing = parse_hopt_c_listing(body)
+        assert len(listing.entries) == 1
+        assert listing.entries[0].year == 1998
+        assert listing.entries[0].num == 12
+
 
 class TestParseGetother:
     """getother response → UkpcJudgment. Response shape differs from
