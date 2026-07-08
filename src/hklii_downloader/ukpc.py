@@ -276,6 +276,14 @@ async def fetch_one_hopt_c_judgment(
 class UkpcRunResult:
     downloaded: int = 0
     failed: int = 0
+    #: Langs whose ``gethoptfiles`` enum returned a valid response
+    #: (either 200 with entries or 200 with totalfiles=0). Consumed by
+    #: :func:`hklii_downloader.cli._run_scrape_ukpc` to scope
+    #: ``mark_bucket_scraped`` — a lang whose enum 500'd (e.g. UKPC/TC)
+    #: never got a wire read, so stamping ``last_scrape_completed_at``
+    #: for it would create a phantom row that ``freshness._fresh`` later
+    #: treats as a real sweep signal.
+    langs_enumerated: tuple[str, ...] = ()
 
 
 class UkpcRunner:
@@ -334,6 +342,12 @@ class UkpcRunner:
         remaining = {"n": self._limit if self._limit is not None else -1}
 
         pending: list[tuple[int, int, str, UkpcEntry]] = []
+        # Track langs whose enum succeeded (even totalfiles=0 counts —
+        # we confirmed the wire state for that lang). Set at end via
+        # ``result.langs_enumerated``; consumers use it to scope
+        # mark_bucket_scraped so phantom rows don't land for langs
+        # whose enum 500'd.
+        enumerated_langs: list[str] = []
         for lang in self._langs:
             try:
                 entries = await enumerate_hopt_c_court(
@@ -346,6 +360,7 @@ class UkpcRunner:
                     "ukpc enum failed for lang=%s: %s", lang, exc,
                 )
                 continue
+            enumerated_langs.append(lang)
             for e in entries:
                 if (
                     not self._force
@@ -410,4 +425,5 @@ class UkpcRunner:
         await asyncio.gather(
             *[worker() for _ in range(self._workers)]
         )
+        result.langs_enumerated = tuple(enumerated_langs)
         return result

@@ -1232,7 +1232,14 @@ class TestScrapeRunnerMarksBuckets:
             )
 
         async def noop_run(self, on_progress=None):
-            return UkpcRunResult(downloaded=0, failed=0)
+            # After the 2026-07-08 tightening the mark loop consumes
+            # ``langs_enumerated`` — a mock that reports EN swept
+            # cleanly must set it explicitly. Prior to the tightening
+            # this test relied on the mark loop iterating input langs
+            # regardless of run outcome.
+            return UkpcRunResult(
+                downloaded=0, failed=0, langs_enumerated=("en",),
+            )
 
         with patch(
             "hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight,

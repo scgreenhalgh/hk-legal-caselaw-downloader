@@ -2801,9 +2801,19 @@ async def _run_scrape_ukpc(
         # Freshness ledger close-out — see finding #1. UKPC rows live
         # in the cases table so kind='cases' matches its DatabaseMatrix
         # classification (see freshness.classify's cases-ukpc branch).
+        #
+        # Iterate ``outcome.langs_enumerated`` — the langs whose
+        # ``gethoptfiles`` enum actually completed — rather than the
+        # user-passed ``langs`` tuple. UKPC's TC endpoint 500's at
+        # HKLII today, so passing ``--lang both`` would previously
+        # stamp ``cases/ukpc/tc.last_scrape_completed_at`` even though
+        # no wire read confirmed the state; the freshness ledger then
+        # treated tc as "swept" on the next evaluation, hiding a
+        # phantom row. See docs/freshness-sanity-check.md for the
+        # 2026-07-08 retro.
         import time as _time
         now = int(_time.time())
-        for lang in langs:
+        for lang in outcome.langs_enumerated:
             db.mark_bucket_scraped(
                 "cases", "ukpc", lang, completed_at=now,
             )
