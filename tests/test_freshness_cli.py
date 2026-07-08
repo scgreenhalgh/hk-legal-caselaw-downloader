@@ -597,6 +597,66 @@ class TestLoadDefaultMatrix:
         assert direct.other == loaded.other
 
 
+class TestPackagedMatrixFixture:
+    """Regression pins for adversarial D2 finding #5: load_default_matrix()
+    must not depend on tests/fixtures/ because ``tests/`` is not part of
+    the built wheel (only ``src/hklii_downloader`` is — see pyproject.toml
+    ``[tool.hatch.build.targets.wheel] packages``). Any operator who ran
+    ``pip install .`` (non-editable) or installed a wheel from PyPI got a
+    broken ``hklii check-freshness`` and a broken ``hklii update`` with
+    the default freshness step ON — both crash on FileNotFoundError
+    inside the freshness step handler, aborting the entire update run
+    because ``check_freshness`` is emitted at plan index 0.
+    """
+
+    def test_packaged_matrix_fixture_ships_with_wheel(self):
+        """The fixture is inside the installed package tree so it ships
+        with the wheel — checked via importlib.resources.files, the
+        wheel-safe lookup API. If this fails on a clean install, the
+        wheel does not include the fixture and load_default_matrix()
+        cannot resolve it.
+        """
+        from importlib.resources import files
+        pkg_data = files("hklii_downloader") / "data" / "databases_matrix.html"
+        assert pkg_data.is_file(), (
+            f"Packaged fixture missing at {pkg_data}. Move the fixture "
+            "into src/hklii_downloader/data/databases_matrix.html and "
+            "list the data/ subtree under "
+            "[tool.hatch.build.targets.wheel.force-include] so the wheel "
+            "includes it."
+        )
+
+    def test_load_default_matrix_works_without_tests_fixture(
+        self, monkeypatch,
+    ):
+        """Simulate a wheel install: patch the tests/fixtures/ path
+        lookup so it always misses (as it would beyond an editable
+        checkout). ``load_default_matrix()`` must still return a
+        populated matrix by reading the packaged copy under
+        ``src/hklii_downloader/data/``.
+        """
+        from pathlib import Path as _RealPath
+
+        real_is_file = _RealPath.is_file
+
+        def _blocked_is_file(self):
+            # Any lookup path that traverses tests/fixtures/... is treated
+            # as if it doesn't exist — models the wheel-install condition
+            # where the tests directory is not shipped.
+            if "tests/fixtures/databases_page_rendered" in str(self):
+                return False
+            return real_is_file(self)
+
+        monkeypatch.setattr(_RealPath, "is_file", _blocked_is_file)
+        from hklii_downloader.discovery import load_default_matrix
+        matrix = load_default_matrix()
+        assert len(matrix.cases) > 0, (
+            "load_default_matrix returned an empty matrix when the "
+            "tests/fixtures/ path was unreachable — it must fall back "
+            "to the packaged data/ copy under src/hklii_downloader/."
+        )
+
+
 class TestCheckFreshnessFixtureIntegration:
     """End-to-end: the check-freshness subcommand goes through the
     real DatabaseMatrix (from the fixture). Wire the ProxyPool +
