@@ -527,6 +527,61 @@ class TestD3ExtractPdfText:
 
         assert _try_pdftotext(b"%PDF-1.4") is None
 
+    def test_pdftotext_empty_stdout_returns_none_not_empty_string(
+        self, monkeypatch,
+    ):
+        """Image-only PDFs make pdftotext exit 0 with empty stdout.
+
+        Empty must normalize to None so the pypdf fallback runs; otherwise
+        extract_pdf_text returns "" and save_d3_pdf writes an empty .txt
+        sidecar labelled as "text extracted".
+        """
+        import shutil
+        import subprocess
+
+        monkeypatch.setattr(
+            shutil, "which",
+            lambda name: "/usr/bin/pdftotext" if name == "pdftotext" else None,
+        )
+
+        class FakeCompleted:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **k: FakeCompleted(),
+        )
+        from hklii_downloader.d3 import _try_pdftotext
+
+        assert _try_pdftotext(b"%PDF-1.4\nimage-only body") is None
+
+    def test_extract_pdf_text_falls_back_to_pypdf_on_empty_pdftotext(
+        self, monkeypatch,
+    ):
+        """End-to-end: empty pdftotext output triggers pypdf, not a "" return."""
+        called: list[str] = []
+
+        def fake_pdftotext(pdf_bytes):
+            called.append("pdftotext")
+            return None  # After the fix, empty stdout → None.
+
+        def fake_pypdf(pdf_bytes):
+            called.append("pypdf")
+            return "text via pypdf"
+
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pdftotext", fake_pdftotext,
+        )
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pypdf", fake_pypdf,
+        )
+        from hklii_downloader.d3 import extract_pdf_text
+
+        assert extract_pdf_text(b"%PDF") == "text via pypdf"
+        assert called == ["pdftotext", "pypdf"]
+
 
 class TestD3RunnerEnumerate:
     """D3Runner.enumerate_all — mock-get replay of a real probe fixture."""
