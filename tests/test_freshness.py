@@ -557,6 +557,103 @@ class TestProbeAllPersistence:
         assert row is not None
         assert row.local_count == 3
 
+    async def test_cases_tc_local_count_uses_sidecar_walk(self, tmp_path):
+        """probe_all for a cases+tc bucket walks output_dir/{scope}/ for
+        ``*.tc.json`` sidecars and adds that count on top of the naive
+        ``lang='tc'`` count when calling ``recompute_local_count``.
+
+        Why: ``upsert_case`` collapses bilingual (en+tc) rows to
+        lang='en', so the naive TC count only sees tc-only rows and
+        misses the bilingual half of HKLII's ``getmetacase?lang=tc``
+        total. Each bilingual case has one ``.tc.json`` sidecar written
+        by ``case_translations.py``; walking the disk restores parity.
+
+        Setup: hkcfa has 1 tc-only row in the DB plus 3 ``.tc.json``
+        sidecars on disk (representing 3 bilingual cases). Expected
+        local_count = 1 + 3 = 4.
+        """
+        db = CheckpointDB(":memory:")
+        # 1 tc-only row for hkcfa.
+        db.upsert_case(
+            "hkcfa", 2026, 100, "N", "T", "2026-01-01", lang="tc",
+        )
+        db.claim_pending()
+        db.mark_downloaded("hkcfa", 2026, 100, ["html"])
+        # 3 bilingual cases represented by disk-only sidecars.
+        (tmp_path / "hkcfa" / "2026").mkdir(parents=True)
+        for n in (1, 2, 3):
+            (tmp_path / "hkcfa" / "2026" / f"hkcfa_2026_{n}.tc.json").write_text("{}")
+
+        matrix = _make_matrix(cases={"hkcfa": ("tc",)})
+        runner = FreshnessRunner(
+            get=_FakeGet(), checkpoint=db, matrix=matrix,
+            output_dir=tmp_path,
+        )
+        try:
+            await runner.probe_all()
+            row = db.get_freshness_row("cases", "hkcfa", "tc")
+        finally:
+            db.close()
+        assert row is not None
+        assert row.local_count == 4, (
+            "expected 1 tc-only + 3 sidecars; got "
+            f"{row.local_count}. The FreshnessRunner disk walk did not "
+            "run or did not pass sidecar_count to recompute_local_count."
+        )
+
+    async def test_output_dir_none_skips_sidecar_walk(self):
+        """Without ``output_dir`` FreshnessRunner falls back to the
+        naive tc-only count. Existing test callers that never had disk
+        access continue to work unchanged."""
+        db = CheckpointDB(":memory:")
+        db.upsert_case(
+            "hkcfa", 2026, 100, "N", "T", "2026-01-01", lang="tc",
+        )
+        db.claim_pending()
+        db.mark_downloaded("hkcfa", 2026, 100, ["html"])
+        matrix = _make_matrix(cases={"hkcfa": ("tc",)})
+        runner = FreshnessRunner(
+            get=_FakeGet(), checkpoint=db, matrix=matrix,
+        )
+        try:
+            await runner.probe_all()
+            row = db.get_freshness_row("cases", "hkcfa", "tc")
+        finally:
+            db.close()
+        assert row is not None
+        assert row.local_count == 1
+
+    async def test_sidecar_walk_ignored_for_legis_and_hopt_kinds(
+        self, tmp_path,
+    ):
+        """The sidecar walk only fires for ``cases`` + ``tc``. legis
+        and hopt kinds don't have a bilingual collapse rule, so their
+        recompute stays direct even when output_dir is set."""
+        db = CheckpointDB(":memory:")
+        db.upsert_legis_document("ord", "1", "tc", "T")
+        db.claim_pending_legis()
+        db.mark_legis_downloaded(
+            "ord", "1", "tc",
+            latest_vid=99, latest_version_date="2026-01-01",
+            formats=["content"],
+        )
+        # Sidecar for a different kind — must be ignored.
+        (tmp_path / "legis" / "ord" / "1").mkdir(parents=True)
+        (tmp_path / "legis" / "ord" / "1" / "ord_1_tc.tc.json").write_text("{}")
+
+        matrix = _make_matrix(legis={"ord": ("tc",)})
+        runner = FreshnessRunner(
+            get=_FakeGet(), checkpoint=db, matrix=matrix,
+            output_dir=tmp_path,
+        )
+        try:
+            await runner.probe_all()
+            row = db.get_freshness_row("legis", "ord", "tc")
+        finally:
+            db.close()
+        assert row is not None
+        assert row.local_count == 1
+
     async def test_skips_row_write_for_unmapped_triples(self):
         """other/hkiac probe returns None from dispatch_url — no wire
         request, no db_freshness row. If a row WERE inserted, the
