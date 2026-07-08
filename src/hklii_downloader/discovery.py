@@ -58,29 +58,64 @@ class DatabaseMatrix:
 
 
 # Frozen ground truth for the /databases matrix. See the D1 session
-# close (2026-07-08) — refreshing is a manual Playwright step. Kept in
-# tests/fixtures/ rather than src/ so packaging stays clean; discovery
-# code walks up from __file__ to find it. The fallback (empty matrix)
-# only trips when the fixture is missing entirely — every consumer that
-# depends on a non-empty matrix (FreshnessRunner, drift-guard tests)
-# raises loudly on the empty case.
+# close (2026-07-08) — refreshing is a manual Playwright step. Shipped
+# at TWO locations to keep both editable-checkout and wheel installs
+# working:
+#   * ``src/hklii_downloader/data/databases_matrix.html`` — the
+#     authoritative packaged copy. Included in the wheel via
+#     pyproject's package-data config so ``pip install .`` /
+#     ``pip install hklii-downloader`` both ship it.
+#   * ``tests/fixtures/databases_page_rendered_2026-07-08.html`` —
+#     the drift-guard fixture the D1 tests parse directly. Editable
+#     checkouts have both files; wheel installs only have the first.
+# ``load_default_matrix`` prefers the packaged copy so it survives any
+# install shape; the tests/fixtures fallback is retained purely for
+# operators building against an uninstalled checkout with no wheel.
 _DEFAULT_MATRIX_FIXTURE = "databases_page_rendered_2026-07-08.html"
+_PACKAGED_MATRIX_FILENAME = "databases_matrix.html"
 
 
 def load_default_matrix() -> DatabaseMatrix:
-    """Load the checked-in ``/databases`` fixture as a
+    """Load the packaged ``/databases`` fixture as a
     :class:`DatabaseMatrix`.
 
     Callers (``FreshnessRunner``, ``hklii check-freshness``,
     ``hklii update``'s freshness step) rely on the fixture as the
     authoritative slug × lang list until D3 ships a live-render step.
-    A missing fixture raises FileNotFoundError so an operator who
-    accidentally shipped without ``tests/fixtures/`` sees a clear
-    signal instead of a silently-empty matrix.
+
+    Load order:
+      1. ``importlib.resources.files("hklii_downloader") /
+         "data" / "databases_matrix.html"`` — the wheel-safe primary.
+      2. ``<repo>/tests/fixtures/databases_page_rendered_YYYY-MM-DD.html``
+         — dev-mode fallback so a fresh checkout without an installed
+         wheel still resolves. Walks up from ``discovery.py`` to find it.
+
+    Raises ``FileNotFoundError`` if BOTH lookups miss — a clear signal
+    (as opposed to a silently-empty matrix) so an operator who accidentally
+    shipped without the packaged data sees the packaging bug at the CLI
+    surface rather than at scrape-time.
     """
-    # Walk up from this file to the repo root, then into tests/fixtures.
-    # Deliberately dev-mode-friendly — we're not packaging the fixture as
-    # data yet because D3 will replace the whole approach.
+    # Primary: importlib.resources reads the packaged copy inside the
+    # wheel. This is the only lookup that works when hklii_downloader
+    # is pip-installed (non-editable) or a wheel is used directly —
+    # the tests/ directory is never present in that case.
+    try:
+        from importlib.resources import files
+        pkg_data = (
+            files("hklii_downloader") / "data" / _PACKAGED_MATRIX_FILENAME
+        )
+        if pkg_data.is_file():
+            return parse_databases_matrix(pkg_data.read_text())
+    except (ModuleNotFoundError, FileNotFoundError):
+        # importlib.resources may raise on old / unusual install layouts;
+        # fall through to the dev-mode ancestor walk instead of failing.
+        pass
+
+    # Dev-mode fallback: walk up from discovery.py to find
+    # ``tests/fixtures/databases_page_rendered_YYYY-MM-DD.html``. Only
+    # trips inside an editable checkout without the packaged data
+    # subtree (e.g. `git clone && pytest` with no `uv sync`/`pip install
+    # -e .` step) — production installs never reach here.
     from pathlib import Path
     here = Path(__file__).resolve()
     for parent in here.parents:
@@ -88,9 +123,12 @@ def load_default_matrix() -> DatabaseMatrix:
         if candidate.is_file():
             return parse_databases_matrix(candidate.read_text())
     raise FileNotFoundError(
-        f"Cannot find fixture {_DEFAULT_MATRIX_FIXTURE!r} beneath any "
-        f"ancestor of {here}. Refresh via a Playwright render of "
-        "https://www.hklii.hk/databases and drop into tests/fixtures/."
+        f"Cannot find packaged fixture "
+        f"src/hklii_downloader/data/{_PACKAGED_MATRIX_FILENAME} "
+        f"nor tests/fixtures/{_DEFAULT_MATRIX_FIXTURE} beneath any "
+        f"ancestor of {here}. If installing from a wheel, the wheel "
+        "was built without the data/ subtree — check pyproject.toml's "
+        "[tool.hatch.build.targets.wheel.force-include] section."
     )
 
 
