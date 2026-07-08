@@ -274,6 +274,53 @@ class TestFreshPredicate:
         row = _fresh_row(live_updated_at="not-a-date")
         assert _fresh(row) is False
 
+    def test_stale_when_same_day_probe_is_more_recent_than_scrape(self):
+        """Regression pin for adversarial D2 finding #3 (same-day HKLII
+        update race).
+
+        Scenario:
+          * Day 1 09:00 HKT — probe: live_updated_at='2026-07-08',
+            live_probed_at=T_probe1.
+          * Day 1 09:30 HKT — scrape completes:
+            last_scrape_completed_at=T_scrape > T_probe1.
+          * Day 1 14:00 HKT — HKLII publishes a new judgment;
+            live_updated_at still reads '2026-07-08' (server has not
+            rolled to Day 2 yet).
+          * Day 2 09:00 HKT — probe: live_updated_at='2026-07-08'
+            (unchanged), live_probed_at=T_probe2 > T_scrape.
+
+        Under the pre-fix rule ``date(live_updated_at) <= date(
+        last_scrape_completed_at)``, the Day 2 probe finds
+        '2026-07-08' <= '2026-07-08' → FRESH. We skip the scrape, and
+        the new judgment stays invisible until either HKLII rolls
+        live_updated_at forward (uncertain) or the count parity trips
+        (which the bilingual UPSERT blind spot in finding #4 can also
+        hide).
+
+        The design's fail-safe claim (``fresh_definition``) was that a
+        wrong assumption produces false-STALE, never false-FRESH. This
+        scenario is the case where the guarantee didn't hold. The fix
+        must catch it: when live_updated_at date == last_scrape_
+        completed_at date AND the probe happened AFTER the scrape
+        completed, the bucket is STALE — HKLII may have added content
+        between the scrape end and the probe start, and same-day-
+        granularity live_updated_at cannot distinguish that.
+        """
+        row = _fresh_row(
+            live_updated_at="2026-07-08",
+            # Day 1 09:30 HKT — scrape end
+            last_scrape_completed_at=_hkt_ts_at("2026-07-08", hour=9)
+            + 30 * 60,
+            # Day 2 09:00 HKT — probe fires AFTER Day 1 scrape end
+            live_probed_at=_hkt_ts_at("2026-07-09", hour=9),
+        )
+        assert _fresh(row) is False, (
+            "Same-day upstream date + probe AFTER scrape end should "
+            "STALE — otherwise HKLII updates published between scrape "
+            "end and probe stay invisible until the wire date rolls. "
+            "See finding #3."
+        )
+
 
 # ---------- FreshnessRunner.probe_all / probe_one -------------------------
 
