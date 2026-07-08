@@ -414,3 +414,256 @@ class TestScrapeSkipIfFreshFlag:
         result = CliRunner().invoke(main, ["scrape-legis", "--help"])
         assert result.exit_code == 0
         assert "--skip-if-fresh" in result.output
+
+
+class TestSkipIfFreshFilterHelpers:
+    """Behavioural tests for the two db_freshness → surviving-buckets
+    filter helpers. Pins the semantic that a FRESH bucket is one
+    where :func:`_fresh` returns True AND the row exists —
+    first-run and probe-error rows must always pass through
+    (fail-safe = scrape).
+    """
+
+    def _seed_fresh(self, db, kind, scope, lang):
+        """Match test_freshness._seed_fresh — probe body, local count,
+        scrape completion all consistent with ``_fresh_row()`` fixture."""
+        db.upsert_freshness_probe(
+            kind, scope, lang,
+            live_count=100, live_updated_at="2026-07-07",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        db._conn.execute(
+            "UPDATE db_freshness SET local_count=100, local_counted_at=? "
+            "WHERE kind=? AND scope=? AND lang=?",
+            (1_720_000_100, kind, scope, lang),
+        )
+        db._conn.commit()
+        db.mark_bucket_scraped(
+            kind, scope, lang,
+            completed_at=_hkt_ts_at("2026-07-08"),
+        )
+
+    def test_case_filter_drops_fresh_court_when_all_langs_fresh(
+        self, tmp_path,
+    ):
+        """A court whose en AND tc are both fresh drops out of the
+        scrape scope entirely — no wasted enum for that court."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _filter_fresh_case_buckets
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        self._seed_fresh(db, "cases", "hkcfa", "en")
+        self._seed_fresh(db, "cases", "hkcfa", "tc")
+        db.close()
+
+        courts, langs = _filter_fresh_case_buckets(
+            tmp_path, ["hkcfa", "hkca"], ("en", "tc"),
+        )
+        assert courts == ["hkca"]  # hkcfa dropped, hkca kept.
+        assert langs == ("en", "tc")
+
+    def test_case_filter_keeps_court_when_any_lang_stale(self, tmp_path):
+        """If en is fresh but tc has never probed, the court must
+        stay in the scrape scope — otherwise tc-lang buckets
+        silently drift."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _filter_fresh_case_buckets
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        self._seed_fresh(db, "cases", "hkcfa", "en")
+        # tc has no db_freshness row → first-run → NOT fresh.
+        db.close()
+
+        courts, _ = _filter_fresh_case_buckets(
+            tmp_path, ["hkcfa"], ("en", "tc"),
+        )
+        assert courts == ["hkcfa"], (
+            "hkcfa/tc has no ledger row (first-run) — must pass "
+            "through the filter as stale"
+        )
+
+    def test_case_filter_keeps_probe_error_bucket(self, tmp_path):
+        """A probe_error row must pass the filter as stale. Encodes
+        fresh_definition rule (b): can't confirm freshness →
+        conservatively scrape."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _filter_fresh_case_buckets
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        self._seed_fresh(db, "cases", "hkcfa", "en")
+        # Poison the row with a probe_error → STALE per _fresh rule (b).
+        db._conn.execute(
+            "UPDATE db_freshness SET probe_error='HTTP 500' "
+            "WHERE kind='cases' AND scope='hkcfa' AND lang='en'"
+        )
+        db._conn.commit()
+        db.close()
+
+        courts, _ = _filter_fresh_case_buckets(
+            tmp_path, ["hkcfa"], ("en",),
+        )
+        assert courts == ["hkcfa"]
+
+    def test_case_filter_returns_all_courts_when_no_db(self, tmp_path):
+        """No checkpoint DB (first-ever run) → no filter possible;
+        every bucket passes through as stale. Matches the fail-safe
+        posture — scrape rather than silently no-op."""
+        from hklii_downloader.cli import _filter_fresh_case_buckets
+
+        courts, langs = _filter_fresh_case_buckets(
+            tmp_path, ["hkcfa", "hkca"], ("en", "tc"),
+        )
+        assert courts == ["hkcfa", "hkca"]
+        assert langs == ("en", "tc")
+
+    def test_hopt_filter_drops_abbr_when_all_langs_fresh(self, tmp_path):
+        """kind='hopt' dispatch: bacpg with all langs fresh drops out."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _filter_fresh_hopt_buckets
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        self._seed_fresh(db, "hopt", "bacpg", "en")
+        self._seed_fresh(db, "hopt", "bacpg", "tc")
+        db.close()
+
+        abbrs, _ = _filter_fresh_hopt_buckets(
+            tmp_path, ("bacpg", "hkts"), ("en", "tc"), kind="hopt",
+        )
+        assert abbrs == ("hkts",)
+
+    def test_legis_filter_kind_reads_legis_rows_not_hopt(self, tmp_path):
+        """kind='legis' must dispatch to freshness rows under kind='legis',
+        not kind='hopt'. Regression pin — the initial helper switch
+        gets a kind param and the caller MUST pass 'legis' from
+        scrape-legis."""
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _filter_fresh_hopt_buckets
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        # Seed ord as fresh under kind='legis'; if the helper read
+        # kind='hopt' instead, the row wouldn't be found and ord
+        # would stay in the scope.
+        self._seed_fresh(db, "legis", "ord", "en")
+        self._seed_fresh(db, "legis", "ord", "tc")
+        # And a SEPARATE 'hopt' bucket for the SAME slug shape — if
+        # the helper dispatched to hopt by mistake, it might match
+        # this row by coincidence.
+        self._seed_fresh(db, "hopt", "ord", "en")
+        db.close()
+
+        abbrs, _ = _filter_fresh_hopt_buckets(
+            tmp_path, ("ord", "reg"), ("en", "tc"), kind="legis",
+        )
+        assert abbrs == ("reg",), (
+            "kind='legis' filter should read legis rows only — "
+            "ord is fresh under legis and MUST drop out"
+        )
+
+
+class TestLoadDefaultMatrix:
+    """`discovery.load_default_matrix` is dev-mode scaffolding until
+    D3 lands. Pin its contract so a future packaging change doesn't
+    silently return an empty matrix (which would let the freshness
+    step no-op)."""
+
+    def test_returns_nonempty_matrix(self):
+        from hklii_downloader.discovery import load_default_matrix
+        matrix = load_default_matrix()
+        assert len(matrix.cases) > 0, "matrix.cases is empty"
+
+    def test_includes_hkcfa_bilingual(self):
+        """Sanity: hkcfa exists in the fixture with both en+tc so the
+        freshness runner has real triples to iterate."""
+        from hklii_downloader.discovery import load_default_matrix
+        matrix = load_default_matrix()
+        assert "hkcfa" in matrix.cases
+        assert set(matrix.cases["hkcfa"]) >= {"en", "tc"}
+
+    def test_matrix_matches_databases_parser(self):
+        """The default matrix must equal the direct-parse of the same
+        fixture — no accidental filtering or transformation between
+        the two entry points."""
+        from pathlib import Path
+        from hklii_downloader.discovery import (
+            load_default_matrix,
+            parse_databases_matrix,
+        )
+        here = Path(__file__).resolve().parent
+        fixture = here / "fixtures" / "databases_page_rendered_2026-07-08.html"
+        direct = parse_databases_matrix(fixture.read_text())
+        loaded = load_default_matrix()
+        assert direct.cases == loaded.cases
+        assert direct.legis == loaded.legis
+        assert direct.other == loaded.other
+
+
+class TestCheckFreshnessFixtureIntegration:
+    """End-to-end: the check-freshness subcommand goes through the
+    real DatabaseMatrix (from the fixture). Wire the ProxyPool +
+    HTTP get stub so we exercise probe_all against a realistic
+    matrix without hitting HKLII."""
+
+    def _patch_healthy_pool(
+        self, count: int = 100, timestamp: str = "2026-07-07",
+    ):
+        import httpx
+
+        class _FakePool:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def preflight(self):
+                class _R:
+                    home_ip = "1.2.3.4"
+                    healthy_proxies = ["p1"]
+                    leaked_proxies = []
+                    failed_proxies = []
+                return _R()
+
+            async def close(self):
+                pass
+
+            async def get(self, url, **kw):
+                return httpx.Response(
+                    200,
+                    json={"count": count, "timestamp": timestamp},
+                    request=httpx.Request("GET", url),
+                )
+
+        return _FakePool
+
+    def test_first_run_produces_stale_report_and_nonzero_exit(
+        self, tmp_path,
+    ):
+        """Empty DB + healthy wire → every triple probes cleanly BUT
+        has no ``last_scrape_completed_at`` yet, so ``_fresh`` returns
+        False under rule (e). The command must exit nonzero and the
+        stale list must include the never-scraped triples — that's the
+        primary cron-boot signal: a fresh checkout must not silently
+        pass its freshness gate.
+        """
+        from hklii_downloader.cli import main
+
+        _FakePool = self._patch_healthy_pool()
+        with patch(
+            "hklii_downloader.proxy_pool.ProxyPool", _FakePool,
+        ):
+            result = CliRunner().invoke(main, [
+                "check-freshness",
+                "-o", str(tmp_path),
+                "--direct", "--yes",
+                "--json", "--no-events",
+            ])
+        assert result.exit_code != 0, result.output
+        payload = json.loads(result.output)
+        assert payload["healthy"] > 0
+        # After probe_all every mapped triple has a row, so first_run
+        # is empty. But every row has last_scrape_completed_at IS NULL,
+        # so stale_buckets is populated. Split explicitly — the CLI
+        # exit test above is on (stale ∪ first_run), the two lists
+        # separately let a scripted consumer distinguish the two.
+        assert payload["first_run"] == []
+        assert len(payload["stale"]) > 0, (
+            "stale list is empty even though no bucket has "
+            "last_scrape_completed_at set"
+        )
