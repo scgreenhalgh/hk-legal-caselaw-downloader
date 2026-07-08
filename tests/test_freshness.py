@@ -477,11 +477,19 @@ class TestProbeAllUrlDispatch:
         assert get.calls == []
         assert rows == []
 
-    async def test_sc_lang_is_skipped(self):
-        """DatabaseMatrix surfaces `sc` (Simplified Chinese) for some
-        legis slugs. LEGIS_LANGS is en/tc-only and there is no local
-        sc corpus; sc probes would return counts that never converge
-        against local_count. Punted to D3 — skip for now."""
+    async def test_sc_lang_probes_all_three_langs(self):
+        """DatabaseMatrix surfaces ``sc`` (Simplified Chinese) for the
+        three trilingual legis slugs (ord/reg/instrument) and for three
+        ``other`` bucket entries. Pre-2026-07-08 the freshness pipeline
+        skipped SC; live probe showed ``getmetalegis?lang=SC`` returns
+        real per-DB totals (ord=838, reg=2253, instrument=63) so
+        skipping meant zero drift visibility on 3 legis DBs.
+
+        Local corpus is still EN+TC only, so SC buckets sit at
+        permanent-STALE with local_count=0 — the correct signal for
+        an operator ("HKLII has 838 SC ordinances, we have 0") rather
+        than silent gap.
+        """
         matrix = _make_matrix(legis={"ord": ("en", "sc", "tc")})
         db = CheckpointDB(":memory:")
         get = _FakeGet()
@@ -492,9 +500,11 @@ class TestProbeAllUrlDispatch:
             await runner.probe_all()
         finally:
             db.close()
-        assert "lang=sc" not in "".join(get.calls)
-        # Exactly two probes: en + tc.
-        assert len(get.calls) == 2
+        # All three langs probed now.
+        assert "lang=en" in "".join(get.calls)
+        assert "lang=tc" in "".join(get.calls)
+        assert "lang=sc" in "".join(get.calls)
+        assert len(get.calls) == 3
 
 
 class TestProbeAllPersistence:

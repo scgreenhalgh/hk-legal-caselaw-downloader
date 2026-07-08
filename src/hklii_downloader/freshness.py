@@ -63,10 +63,16 @@ _BASE = "https://www.hklii.hk"
 # scrape needs the full runner surface).
 _HOPT_SLUGS = frozenset({"bacpg", "bahkg", "hktmc", "hktml", "hkts"})
 
-# `sc` is a valid HKLII lang code but is not part of :data:`.legis.LEGIS_LANGS`
-# — the local corpus has no ``sc`` rows, so probing sc would produce a
-# permanent false-stale (live_count > 0, local_count = 0). Punted to D3.
-_ACCEPTED_LANGS = frozenset({"en", "tc"})
+# Every lang HKLII serves. ``sc`` is a real slice on the three
+# trilingual legis-native slugs (ord/reg/instrument) plus the 3
+# trilingual /databases "other" bucket entries; live probe on
+# 2026-07-08 confirmed ``getmetalegis?cap_type=ord&lang=SC`` returns
+# 838, matching EN/TC. Probing SC gives operators drift visibility on
+# those DBs even though we don't currently scrape SC — buckets sit at
+# permanent-STALE with a clear "we have 0, HKLII has N" signal that
+# points at the scrape gap. The matrix already filters per-slug lang
+# availability, so this frozenset is only a global sanity fence.
+_ACCEPTED_LANGS = frozenset({"en", "tc", "sc"})
 
 # The category tokens ``classify`` emits AND ``dispatch_url`` accepts.
 # Keeping the token space small keeps drift bugs local.
