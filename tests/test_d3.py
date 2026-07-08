@@ -67,3 +67,30 @@ class TestD3UrlBuilders:
         assert "lang=en" in url
         assert "page=1" in url
         assert "itemsPerPage=100" in url
+
+    @pytest.mark.parametrize(
+        "slug,expected_endpoint,expected_abbr",
+        [
+            ("histlaw", "gethistlaw", "hkhistlaws"),  # wire rewrite
+            ("hkiac", "getother", "hkiac"),
+            ("hklrccp", "getother", "hklrccp"),
+            ("hklrcr", "getother", "hklrcr"),
+            ("pcpdaab", "getother", "pcpdaab"),
+            ("pcpdc", "getother", "pcpdc"),
+        ],
+    )
+    def test_fetch_url_endpoint_and_wire_abbr(
+        self, slug, expected_endpoint, expected_abbr,
+    ):
+        from hklii_downloader.d3 import D3_FAMILIES, fetch_url
+
+        family = next(f for f in D3_FAMILIES if f.slug == slug)
+        url = fetch_url(family, year=2020, num=1, lang="en")
+
+        assert url.startswith(
+            f"https://www.hklii.hk/api/{expected_endpoint}?"
+        )
+        assert f"abbr={expected_abbr}" in url
+        assert "year=2020" in url
+        assert "num=1" in url
+        assert "lang=en" in url
