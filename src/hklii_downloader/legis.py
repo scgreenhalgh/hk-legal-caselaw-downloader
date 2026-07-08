@@ -44,7 +44,7 @@ _DEFAULT_PAGE_SIZE = 500
 # with real content — bacpg/bahkg/hktml/hkts/hktmc are HOPT and use
 # gethoptfiles, not getlegisfiles; those live in a follow-up.
 LEGIS_CAP_TYPES = ("ord", "reg", "instrument")
-LEGIS_LANGS = ("en", "tc")
+LEGIS_LANGS = ("en", "tc", "sc")
 
 
 class LegisFetchError(RuntimeError):

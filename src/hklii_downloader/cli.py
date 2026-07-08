@@ -1461,9 +1461,13 @@ async def _run_recheck_html(
 )
 @click.option(
     "--lang",
-    type=click.Choice(["en", "tc", "both"]),
-    default="both",
-    help="Language(s) to enumerate. Default: both.",
+    type=click.Choice(["en", "tc", "sc", "all"]),
+    default="all",
+    help=(
+        "Language(s) to enumerate. Default: all — HKLII serves EN, "
+        "TC AND SC for the trilingual legis slugs (ord / reg / "
+        "instrument). Pass a specific lang to narrow the sweep."
+    ),
 )
 @click.option(
     "--limit",
@@ -1533,7 +1537,7 @@ def scrape_legis(
         s.strip() for s in (abbr_str or ",".join(LEGIS_CAP_TYPES)).split(",")
         if s.strip()
     )
-    langs = LEGIS_LANGS if lang == "both" else (lang,)
+    langs = LEGIS_LANGS if lang == "all" else (lang,)
 
     if skip_if_fresh:
         cap_types, langs = _filter_fresh_hopt_buckets(
@@ -3207,16 +3211,20 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
                         limit=None, force=False, no_events=no_events,
                     )
             elif step.name == "scrape_legis":
+                # LEGIS_LANGS is the source of truth for lang coverage.
+                # As of 2026-07-08 it's (en, tc, sc) — HKLII serves SC
+                # for the three trilingual legis slugs.
+                from .legis import LEGIS_LANGS
                 if runner.settings.get("include_freshness_check"):
                     legis_types, legis_langs = _filter_fresh_hopt_buckets(
                         runner.output,
                         ("ord", "reg", "instrument"),
-                        ("en", "tc"),
+                        LEGIS_LANGS,
                         kind="legis",
                     )
                 else:
                     legis_types, legis_langs = (
-                        ("ord", "reg", "instrument"), ("en", "tc"),
+                        ("ord", "reg", "instrument"), LEGIS_LANGS,
                     )
                 if not legis_types:
                     click.echo(

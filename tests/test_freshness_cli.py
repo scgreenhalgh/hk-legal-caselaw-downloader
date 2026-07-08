@@ -582,11 +582,14 @@ class TestUpdateHoptLegisUkpcConsumeFreshness:
 
         from hklii_downloader.checkpoint import CheckpointDB
         from hklii_downloader.cli import _dispatch_update_plan
+        from hklii_downloader.legis import LEGIS_LANGS
         from hklii_downloader.update import Step, UpdateRunner
 
         db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        # LEGIS_LANGS is (en, tc, sc) as of 2026-07-08; seed every
+        # lang the dispatcher will check.
         for cap_type in ("ord", "reg", "instrument"):
-            for lang in ("en", "tc"):
+            for lang in LEGIS_LANGS:
                 self._seed_fresh(db, "legis", cap_type, lang)
         db.close()
 
