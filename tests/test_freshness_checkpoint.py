@@ -249,9 +249,22 @@ class TestRecomputeLocalCount:
         assert db.recompute_local_count("hopt", "hkts", "en") == 2
 
     def test_filters_by_scope_and_lang(self):
-        """Only rows whose (court/abbr, lang) match the arguments are
+        """Only rows whose scope (court/abbr) match the argument are
         counted. A scope-blind implementation would return the global
-        table count instead."""
+        table count instead.
+
+        Bilingual-collapse compensation for kind='cases' + lang='tc':
+        because upsert_case collapses en+tc rows to lang='en', a plain
+        ``WHERE lang='tc'`` count silently drops bilingual rows.
+        recompute_local_count OR's lang='en' into the tc-cases filter
+        so the TC bucket is countable against HKLII's
+        getmetacase?lang=tc (which includes bilingual). The 'hkcfa'
+        assertion below therefore returns 3 (2 en-only + 1 tc-only) —
+        the compensation over-counts slightly but that's still a
+        fail-safe direction (STALE, not FRESH) and it finally allows
+        parity on heavily bilingual courts where en-only is rare. See
+        finding #4 in the D2 adversarial review pass.
+        """
         db = CheckpointDB(":memory:")
         # hkcfa/en: 2 rows
         for n in (1, 2):
@@ -273,7 +286,12 @@ class TestRecomputeLocalCount:
 
         assert db.recompute_local_count("cases", "hkcfa", "en") == 2
         assert db.recompute_local_count("cases", "hkca", "en") == 1
-        assert db.recompute_local_count("cases", "hkcfa", "tc") == 1
+        # hkcfa/tc counts 2 en-only + 1 tc-only under the collapse
+        # compensation. Different scope (hkca) still isolated because
+        # scope is the top filter.
+        assert db.recompute_local_count("cases", "hkcfa", "tc") == 3
+        # Sanity: scope isolation still holds for the compensated path.
+        assert db.recompute_local_count("cases", "hkca", "tc") == 1
 
     def test_only_counts_downloaded_status(self):
         """status='downloaded' is the only kind the local corpus
