@@ -1008,6 +1008,210 @@ class TestD3RunnerFetchFailures:
         finally:
             db.close()
 
+    async def test_hop1_transport_error_marks_failed_and_continues(
+        self, tmp_path,
+    ):
+        """httpx.ConnectTimeout / RequestError on hop-1 must be caught,
+        the row marked failed, and the drain loop must continue to
+        remaining pending rows rather than aborting the whole batch.
+        """
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            # Two pending rows — first will transport-fail, second must
+            # still get processed.
+            for num in (1, 2):
+                db.upsert_hopt_document(
+                    abbr="hklrccp", year=2020, num=num, lang="en",
+                    title=f"T{num}", neutral=None, doc_date=None,
+                )
+
+            call_count = {"n": 0}
+            metadata = {"content": "<p>ok</p>"}
+
+            async def mock_get(url, **kw):
+                call_count["n"] += 1
+                if call_count["n"] == 1:
+                    raise httpx.ConnectTimeout(
+                        "simulated proxy stall",
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(
+                    200, json=metadata,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.failed == 1
+            assert result.downloaded == 1
+            rows = db._conn.execute(
+                "SELECT num, status, error FROM hopt_documents "
+                "WHERE abbr='hklrccp' ORDER BY num"
+            ).fetchall()
+            failed_row = next(r for r in rows if r[1] == "failed")
+            assert "hop-1" in failed_row[2]
+            assert "ConnectTimeout" in failed_row[2] or "timeout" in failed_row[2].lower()
+        finally:
+            db.close()
+
+    async def test_hop2_transport_error_marks_failed(self, tmp_path):
+        """httpx transport error on hop-2 must be caught, not propagated."""
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="histlaw", year=1964, num=1, lang="en",
+                title="T", neutral=None, doc_date=None,
+            )
+
+            metadata = {"pdf": "/static/en/histlaw/1964/1.pdf"}
+
+            async def mock_get(url, **kw):
+                if "/api/gethistlaw" in url:
+                    return httpx.Response(
+                        200, json=metadata,
+                        request=httpx.Request("GET", url),
+                    )
+                # hop-2: external / static host
+                raise httpx.ReadTimeout(
+                    "simulated hop-2 timeout",
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.failed == 1
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents "
+                "WHERE abbr='histlaw'"
+            ).fetchone()
+            assert row[0] == "failed"
+            assert "hop-2" in row[1]
+
+        finally:
+            db.close()
+
+    async def test_enumerate_transport_error_skips_lang_and_continues(
+        self, tmp_path,
+    ):
+        """A transport error on ONE (family, lang) enum must NOT abort
+        enumeration for other pairs. And the failed pair MUST NOT show
+        up in langs_enumerated so freshness stays STALE for it.
+        """
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            good_page = {
+                "totalfiles": 1,
+                "files": [
+                    {
+                        "title": "T",
+                        "path": "/en/other/hklrccp/2020/2",
+                        "neutral": "[2020] HKLRCCP 2",
+                        "date": "2020-12-01",
+                    },
+                ],
+            }
+
+            async def mock_get(url, **kw):
+                if "hklrccp" in url and "lang=en" in url:
+                    raise httpx.ConnectError(
+                        "simulated proxy dead",
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(
+                    200, json=good_page,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en", "tc"),
+            )
+
+            upserted = await runner.enumerate_all()
+
+            # EN failed, TC succeeded → 1 upsert from TC.
+            assert upserted == 1
+            assert "en" not in runner.langs_enumerated.get("hklrccp", set())
+            assert "tc" in runner.langs_enumerated.get("hklrccp", set())
+        finally:
+            db.close()
+
+    async def test_enumerate_json_decode_error_skips_lang_and_continues(
+        self, tmp_path,
+    ):
+        """200-with-HTML upstream error body (JSONDecodeError) on ONE
+        (family, lang) enum must NOT abort the whole enumeration for
+        other pairs.
+        """
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            good_page = {"totalfiles": 0, "files": []}
+
+            async def mock_get(url, **kw):
+                if "histlaw" in url:
+                    return httpx.Response(
+                        200,
+                        text="<html>gunicorn hiccup</html>",
+                        headers={"content-type": "text/html"},
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(
+                    200, json=good_page,
+                    request=httpx.Request("GET", url),
+                )
+
+            histlaw = next(f for f in D3_FAMILIES if f.slug == "histlaw")
+            hklrccp = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(histlaw, hklrccp), langs=("en",),
+            )
+
+            # Must not raise despite histlaw returning non-JSON.
+            await runner.enumerate_all()
+
+            # histlaw's enum wire-failed → not in langs_enumerated.
+            assert "en" not in runner.langs_enumerated.get(
+                "histlaw", set(),
+            )
+            # hklrccp's enum succeeded (totalfiles=0 is a valid read).
+            assert "en" in runner.langs_enumerated.get("hklrccp", set())
+        finally:
+            db.close()
+
     async def test_hop1_non_json_body_marks_failed(self, tmp_path):
         """HKLII returned an HTML error page instead of JSON."""
         import httpx
