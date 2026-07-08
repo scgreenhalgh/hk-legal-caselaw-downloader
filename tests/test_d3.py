@@ -148,3 +148,127 @@ class TestD3PathRegex:
         from hklii_downloader.d3 import _PATH_RE
 
         assert _PATH_RE.match(path) is None
+
+
+class TestD3ParseFilesResponse:
+    """parse_files_response over real fixtures from the 2026-07-08 probe."""
+
+    def test_parse_histlaw_response(self):
+        body = {
+            "totalfiles": 3836,
+            "files": [
+                {
+                    "title": "Companies Ordinance(32)",
+                    "path": "/en/legis/histlaw/1964/1/",
+                    "neutral": "[1964] HKHistLaws 1",
+                    "date": "1964-01-01",
+                },
+                {
+                    "title": "Official Languages Ordinance(5)",
+                    "path": "/en/legis/histlaw/1964/3/",
+                    "neutral": "[1964] HKHistLaws 3",
+                    "date": "1964-01-01",
+                },
+            ],
+        }
+        from hklii_downloader.d3 import parse_files_response
+
+        result = parse_files_response(body)
+
+        assert result.total == 3836
+        assert len(result.entries) == 2
+        first = result.entries[0]
+        assert first.year == 1964
+        assert first.num == 1
+        assert first.title == "Companies Ordinance(32)"
+        assert first.neutral == "[1964] HKHistLaws 1"
+        assert first.date == "1964-01-01"
+
+    def test_parse_hklrccp_response_no_trailing_slash(self):
+        body = {
+            "totalfiles": 78,
+            "files": [
+                {
+                    "title": "Outcome Related Fee Structures for Arbitration",
+                    "path": "/en/other/hklrccp/2020/2",
+                    "neutral": "[2020] HKLRCCP 2",
+                    "date": "2020-12-01",
+                },
+            ],
+        }
+        from hklii_downloader.d3 import parse_files_response
+
+        result = parse_files_response(body)
+
+        assert result.total == 78
+        assert len(result.entries) == 1
+        assert result.entries[0].year == 2020
+        assert result.entries[0].num == 2
+
+    def test_parse_hkiac_response(self):
+        body = {
+            "totalfiles": 190,
+            "files": [
+                {
+                    "title": (
+                        "Playboy Enterprises International, Inc. v. "
+                        "E-MODE LIMITED"
+                    ),
+                    "path": "/en/other/hkiac/2021/183",
+                    "neutral": "[2021] HKIAC 183",
+                    "date": "2021-10-10",
+                },
+            ],
+        }
+        from hklii_downloader.d3 import parse_files_response
+
+        result = parse_files_response(body)
+
+        assert result.total == 190
+        assert len(result.entries) == 1
+        e = result.entries[0]
+        assert e.year == 2021
+        assert e.num == 183
+        assert e.neutral == "[2021] HKIAC 183"
+
+    def test_parse_skips_malformed_paths_and_logs_count(self, caplog):
+        import logging
+
+        body = {
+            "totalfiles": 3,
+            "files": [
+                {"title": "ok", "path": "/en/legis/histlaw/1964/1/"},
+                {"title": "bad", "path": "/random/garbage"},
+                {"title": "also bad", "path": ""},
+            ],
+        }
+        from hklii_downloader.d3 import parse_files_response
+
+        with caplog.at_level(logging.INFO, logger="hklii_downloader.d3"):
+            result = parse_files_response(body)
+
+        assert len(result.entries) == 1
+        assert result.total == 3
+        assert any(
+            "skipped 2" in r.message.lower() or "skipped 2" in r.message
+            for r in caplog.records
+        ), f"expected skip-log with count 2 in {caplog.records}"
+
+    def test_parse_skips_nd_year_but_still_parses(self):
+        """Regex accepts nd defensively; parser skips it to keep year: int.
+
+        Not observed on D3 during probe — future-proofing against a hopt-
+        style legacy row appearing on histlaw or elsewhere.
+        """
+        body = {
+            "totalfiles": 2,
+            "files": [
+                {"title": "ok", "path": "/en/legis/histlaw/1964/1/"},
+                {"title": "nd row", "path": "/en/legis/histlaw/nd/9/"},
+            ],
+        }
+        from hklii_downloader.d3 import parse_files_response
+
+        result = parse_files_response(body)
+        assert len(result.entries) == 1
+        assert result.entries[0].year == 1964
