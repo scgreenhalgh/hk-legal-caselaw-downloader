@@ -2621,6 +2621,203 @@ async def _hopt_with_progress(runner, target: int):
         return await runner.fetch_pending(on_progress=on_progress)
 
 
+@main.command("scrape-d3")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB + d3 artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--slug", "slug_str",
+    type=str,
+    default=None,
+    help=(
+        "Comma-separated D3 slugs. Default: histlaw,hkiac,hklrccp,"
+        "hklrcr,pcpdaab,pcpdc."
+    ),
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "tc", "sc", "all"]),
+    default="all",
+    help="Language(s). Default: all (en+tc+sc).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N document fetches.",
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+@click.option(
+    "--skip-if-fresh",
+    is_flag=True,
+    default=False,
+    help=(
+        "Consult db_freshness (kind='hopt') and drop (slug, lang) "
+        "buckets already marked FRESH. Default OFF."
+    ),
+)
+def scrape_d3(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    slug_str: str | None,
+    lang: str,
+    limit: int | None,
+    yes: bool,
+    no_events: bool,
+    skip_if_fresh: bool,
+) -> None:
+    """Scrape HKLII D3 families (historical laws, HKIAC, HKLRC, PCPD).
+
+    Two-hop for PDF slugs (histlaw, hkiac, pcpdaab): metadata JSON →
+    PDF binary → optional pdftotext sidecar. Single-hop for HTML slugs
+    (hklrccp, hklrcr, pcpdc). Rows land in ``hopt_documents`` under
+    ``abbr={slug}`` so the D2 freshness ledger auto-inherits.
+
+    \b
+    Examples:
+      hklii scrape-d3 --proxy http://127.0.0.1:8888
+      hklii scrape-d3 --slug hklrccp --lang en --limit 5 --direct --yes
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    from .d3 import D3_FAMILIES, D3_LANGS
+    default_slugs = tuple(f.slug for f in D3_FAMILIES)
+    slugs = tuple(
+        s.strip() for s in (slug_str or ",".join(default_slugs)).split(",")
+        if s.strip()
+    )
+    langs = D3_LANGS if lang == "all" else (lang,)
+    if skip_if_fresh:
+        slugs, langs = _filter_fresh_hopt_buckets(
+            output, slugs, langs, kind="hopt",
+        )
+        if not slugs:
+            click.echo("skip-if-fresh: every requested slug is fresh.")
+            return
+    asyncio.run(_run_scrape_d3(
+        output=output, proxies=list(proxies), direct=direct,
+        slugs=slugs, langs=langs, limit=limit, no_events=no_events,
+    ))
+
+
+async def _run_scrape_d3(
+    output: Path, proxies: list[str], direct: bool,
+    slugs: tuple[str, ...], langs: tuple[str, ...],
+    limit: int | None, no_events: bool = False,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .d3 import D3_FAMILIES, D3Runner
+    from .events import StructuredEventLogger
+    from .proxy_pool import ProxyPool
+
+    output.mkdir(parents=True, exist_ok=True)
+    db_path = output / ".checkpoint.db"
+    db = CheckpointDB(str(db_path))
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            preflight = await pool.preflight()
+            click.echo(f"Home IP: {preflight.home_ip}")
+            click.echo(
+                f"Healthy proxies: {len(preflight.healthy_proxies)}",
+            )
+            if not preflight.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight."
+                )
+            workers = max(1, len(preflight.healthy_proxies))
+
+        families = tuple(
+            f for f in D3_FAMILIES if f.slug in slugs
+        )
+        runner = D3Runner(
+            get=pool.get, checkpoint=db, output_dir=output,
+            families=families, langs=langs, workers=workers, limit=limit,
+        )
+
+        click.echo(
+            f"Enumerating slugs={list(slugs)} langs={list(langs)}...",
+        )
+        upserted = await runner.enumerate_all()
+        click.echo(f"Upserted {upserted} d3 rows.")
+
+        stats = db.hopt_stats()
+        target = stats["pending"] if limit is None else min(
+            limit, stats["pending"],
+        )
+        click.echo(
+            f"Pending: {stats['pending']}, "
+            f"downloaded: {stats['downloaded']}, "
+            f"failed: {stats['failed']}. target this pass: {target}.",
+        )
+        if target == 0:
+            click.echo("Nothing to fetch.")
+        else:
+            result = await runner.fetch_pending(limit=limit)
+            click.echo(
+                f"\nDone. Downloaded: {result.downloaded}, "
+                f"Failed: {result.failed}.",
+            )
+            click.echo(f"By abbr: {db.hopt_stats_by_abbr()}")
+
+        # Freshness ledger close-out — mark only (slug, lang) pairs
+        # whose enum actually returned a valid wire read. En-only slugs
+        # whose TC/SC bucket returned totalfiles=0 STILL flip FRESH
+        # (langs_enumerated captures them).
+        import time as _time
+        now = int(_time.time())
+        for slug, enum_langs in runner.langs_enumerated.items():
+            for lang in enum_langs:
+                db.mark_bucket_scraped(
+                    "hopt", slug, lang, completed_at=now,
+                )
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+        db.close()
+
+
 @main.command("scrape-ukpc")
 @click.option(
     "-o", "--output",
