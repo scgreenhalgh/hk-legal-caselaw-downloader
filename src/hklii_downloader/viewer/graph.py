@@ -50,6 +50,7 @@ class ViewerCacheMissing(Exception):
 _COURT_RANK_WHEN_ELSE = """
     WHEN 'hkcfa'  THEN 0
     WHEN 'hkca'   THEN 1
+    WHEN 'ukpc'   THEN 1
     WHEN 'hkcfi'  THEN 2
     WHEN 'hkdc'   THEN 3
     WHEN 'hkmagc' THEN 4

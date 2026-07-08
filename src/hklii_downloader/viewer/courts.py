@@ -14,13 +14,18 @@ from __future__ import annotations
 
 
 CANONICAL_COURTS: tuple[str, ...] = (
-    "hkcfa", "hkca",
+    "hkcfa", "hkca", "ukpc",
     "hkcfi", "hkdc", "hkmagc", "hkfc",
     "hkldt", "hklat", "hkct", "hksct", "hkcrc", "hkoat",
 )
-# UKPC (UK Privy Council) removed 2026-07-08 in coordination with
-# cli.ALL_COURTS. HKLII's ukpc slug is currently empty, no rows or
-# citations reference it. See cli.py for the fuller explanation.
+# UKPC (UK Privy Council): back 2026-07-08 after finding it lives on
+# HKLII under a DIFFERENT endpoint family — gethoptfiles?dbcat=C&abbr=ukpc
+# returns 242 records, whereas getmetacase?caseDb=ukpc returns 0. Our
+# initial "UKPC is empty" call was measured against the wrong endpoint.
+# ALL_COURTS in cli.py stays at 12 because that list drives the
+# getcasefiles fan-out (case-family scraping); UKPC gets fetched via
+# the hopt-C pipeline instead but is DISPLAYED here like a court.
+# CANONICAL_COURTS is a superset: cli.ALL_COURTS + hopt-sourced courts.
 
 
 #: Curial-precedence rank rendered as a Unicode Roman numeral.
@@ -33,6 +38,7 @@ CANONICAL_COURTS: tuple[str, ...] = (
 CURIAL_ROMAN: dict[str, str] = {
     "hkcfa":  "Ⅰ",  # Ⅰ
     "hkca":   "Ⅱ",  # Ⅱ
+    "ukpc":   "Ⅱ",  # Ⅱ (tied with HKCA — pre-1997 near-apex authority)
     "hkcfi":  "Ⅲ",  # Ⅲ
     "hkdc":   "Ⅳ",  # Ⅳ
     "hkmagc": "Ⅴ",  # Ⅴ
@@ -52,6 +58,7 @@ CURIAL_ROMAN: dict[str, str] = {
 COURT_DISPLAY_NAMES: dict[str, str] = {
     "hkcfa":  "Court of Final Appeal",
     "hkca":   "Court of Appeal",
+    "ukpc":   "UK Privy Council",
     "hkcfi":  "Court of First Instance",
     "hkdc":   "District Court",
     "hkmagc": "Magistrates' Courts",

@@ -1,7 +1,7 @@
 """Tests for GET /case/{slug}/{year}/{number}/cited-by — HTMX partial (route 5).
 
 Design §7:
-  * Ranking: court_rank ASC, first_seen DESC (all 12 court slugs)
+  * Ranking: court_rank ASC, first_seen DESC (all 13 court slugs)
   * Fragment response — meant to swap into #panel-cited-by via
     hx-swap="innerHTML"
   * Pagination: 50/page, "Load next 50" with hx-swap="beforeend"

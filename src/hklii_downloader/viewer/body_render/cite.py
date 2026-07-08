@@ -16,12 +16,12 @@ from lxml import html as lxml_html
 from lxml.etree import ParserError, _Element
 
 
-#: Court slugs recognized in neutral citations. Mirrors _COURT_RANK_WHEN_ELSE
-#: in viewer/graph.py — 12 shipped downloader canonical slugs (UKPC dropped
-#: 2026-07-08; see cli.ALL_COURTS comment).
+#: Court slugs recognized in neutral citations. 13 total: the 12
+#: getcasefiles-family courts + UKPC (which lives under the hopt-C
+#: endpoint family — see viewer/courts.py comment).
 _COURTS = "|".join([
     "HKCFA", "HKCA", "HKCFI", "HKDC", "HKMAGC", "HKFC",
-    "HKLDT", "HKLAT", "HKCT", "HKSCT", "HKCRC", "HKOAT",
+    "HKLDT", "HKLAT", "HKCT", "HKSCT", "HKCRC", "HKOAT", "UKPC",
 ])
 
 #: Neutral citation regex: ``[YYYY] COURT N`` with case-insensitive court

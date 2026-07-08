@@ -73,10 +73,10 @@ def test_home_shows_court_tiles_for_all_canonical_courts(client: TestClient) -> 
     soup = BeautifulSoup(resp.text, "html.parser")
     tiles = soup.select("[data-testid=court-tile]")
     slugs = {t.get("data-court") for t in tiles}
-    # All 12 canonical courts surface — matches graph.py's court-rank list.
-    # UKPC removed 2026-07-08 — see cli.ALL_COURTS comment.
+    # All 13 canonical courts surface — 12 from getcasefiles-family +
+    # UKPC (hopt-C family). Matches viewer.courts.CANONICAL_COURTS.
     expected = {
-        "hkcfa", "hkca", "hkcfi", "hkdc",
+        "hkcfa", "hkca", "ukpc", "hkcfi", "hkdc",
         "hkmagc", "hkfc", "hkldt", "hklat",
         "hkct", "hksct", "hkcrc", "hkoat",
     }
@@ -143,22 +143,30 @@ def test_home_court_tile_links_to_court_landing(client: TestClient) -> None:
     assert anchor["href"] == "/court/hkcfa"
 
 
-def test_canonical_courts_stay_synced_with_cli_all_courts() -> None:
-    """L2 drift guard: viewer's ``CANONICAL_COURTS`` must equal
-    ``cli.ALL_COURTS`` (as a set). The design's §7 verdict-integration
-    note flags this exact drift class — 'curial precedence collapses to
-    4 courts was L3 drift against the actual slug list'. A new court
-    added to the downloader's canonical list would otherwise silently
-    fall off the viewer home page and every court-facet filter.
+def test_canonical_courts_covers_all_court_scrape_sources() -> None:
+    """L2 drift guard: viewer's ``CANONICAL_COURTS`` must cover every
+    court the downloader scrapes from — whether the source is the
+    getcasefiles fan-out (``cli.ALL_COURTS``) or the hopt-C endpoint
+    family (currently just UKPC). Any new court added to a scrape
+    pipeline would otherwise silently fall off the viewer home page
+    and every court-facet filter.
+
+    The relationship is CANONICAL_COURTS == ALL_COURTS ∪ HOPT_C_COURTS.
+    Direct equality with ALL_COURTS would fail because UKPC is in
+    CANONICAL_COURTS but scraped via hopt (see viewer/courts.py comment).
     """
     from hklii_downloader.cli import ALL_COURTS
     from hklii_downloader.viewer.courts import CANONICAL_COURTS
 
+    # UKPC (and any future hopt-C court) is expected to be extra vs
+    # ALL_COURTS. Everything else must match.
+    _KNOWN_HOPT_C_COURTS = {"ukpc"}
+
     missing = set(ALL_COURTS) - set(CANONICAL_COURTS)
-    extra = set(CANONICAL_COURTS) - set(ALL_COURTS)
+    extra = set(CANONICAL_COURTS) - set(ALL_COURTS) - _KNOWN_HOPT_C_COURTS
     assert not missing and not extra, (
-        f"CANONICAL_COURTS drift vs cli.ALL_COURTS — "
-        f"missing: {missing}, extra: {extra}"
+        f"CANONICAL_COURTS drift — missing from viewer: {missing}, "
+        f"unexpected in viewer (not hopt-C): {extra}"
     )
 
 
@@ -187,10 +195,10 @@ def test_home_empty_corpus_shows_empty_state_not_broken_page(
     resp = client.get("/")
     assert resp.status_code == 200
     soup = BeautifulSoup(resp.text, "html.parser")
-    # All 12 tiles still render — court-doesn't-exist vs no-cases-yet
+    # All 13 tiles still render — court-doesn't-exist vs no-cases-yet
     # must remain distinct (courts always exist, cases might not).
     tiles = soup.select("[data-testid=court-tile]")
-    assert len(tiles) == 12
+    assert len(tiles) == 13
     # No recent-case rows; an explicit empty-state marker replaces them.
     assert soup.select("[data-testid=recent-case]") == []
     assert soup.select_one(".empty") is not None
