@@ -36,34 +36,39 @@ class TestD3Family:
         family = next(f for f in D3_FAMILIES if f.slug == slug)
         assert wire_abbr(family) == expected_wire_abbr
 
-    def test_hkiac_marked_disabled(self):
-        """hkiac.org URL structure changed 2026-07-09; every referenced
-        DHK-*.pdf 404s, category page 404s. Disabled at family-spec level
-        so scraper/CLI/dispatcher all skip by default.
+    @pytest.mark.parametrize(
+        "slug,expected_enabled",
+        [
+            # HKLII's /static/en/histlaw/*.pdf serves SPA HTML placeholder;
+            # real archive at HKU library (oelawhk.lib.hku.hk).
+            ("histlaw", False),
+            # hkiac.org restructured 2026-07-09; every URL 404s.
+            ("hkiac", False),
+            # Same SPA-HTML issue as histlaw; source is
+            # pcpd.org.hk/english/enforcement/decisions/decisions.html.
+            ("pcpdaab", False),
+            # HTML slugs — 100% scraped via HKLII getother shape B.
+            ("hklrccp", True),
+            ("hklrcr", True),
+            ("pcpdc", True),
+        ],
+    )
+    def test_family_enabled_flag(self, slug, expected_enabled):
+        """`enabled` reflects whether the runner should scrape this slug
+        today. Disabled slugs stay in D3_FAMILIES for provenance
+        (metadata + freshness ledger) but ACTIVE_D3_FAMILIES filters
+        them out at every default callsite.
         """
         from hklii_downloader.d3 import D3_FAMILIES
 
-        hkiac = next(f for f in D3_FAMILIES if f.slug == "hkiac")
-        assert hkiac.enabled is False
+        fam = next(f for f in D3_FAMILIES if f.slug == slug)
+        assert fam.enabled is expected_enabled
 
-    def test_all_other_families_enabled(self):
-        """Only hkiac is disabled today. histlaw and pcpdaab are kept
-        enabled (still noisy, still failing) pending a resolver for the
-        real content source; hkiac was explicitly triaged as dead.
-        """
-        from hklii_downloader.d3 import D3_FAMILIES
-
-        for f in D3_FAMILIES:
-            if f.slug == "hkiac":
-                continue
-            assert f.enabled is True, f"{f.slug} unexpectedly disabled"
-
-    def test_active_d3_families_excludes_hkiac(self):
+    def test_active_d3_families_is_html_slugs_only(self):
         from hklii_downloader.d3 import ACTIVE_D3_FAMILIES
 
         slugs = {f.slug for f in ACTIVE_D3_FAMILIES}
-        assert "hkiac" not in slugs
-        assert slugs == {"histlaw", "hklrccp", "hklrcr", "pcpdaab", "pcpdc"}
+        assert slugs == {"hklrccp", "hklrcr", "pcpdc"}
 
 
 class TestD3UrlBuilders:
