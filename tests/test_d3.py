@@ -1708,6 +1708,11 @@ class TestD3Dispatcher:
         from hklii_downloader.update import _STEP_EST
 
         assert "scrape_d3" in _STEP_EST
+        # T5 — key presence is not enough; a refactor to empty string
+        # would leave `est: ` blank in format_plan output. Require a
+        # non-empty descriptive string.
+        assert _STEP_EST["scrape_d3"], "empty estimate string"
+        assert "enum" in _STEP_EST["scrape_d3"].lower() or "fetch" in _STEP_EST["scrape_d3"].lower()
 
     def test_daily_and_weekly_exclude_d3(self):
         from hklii_downloader.update import PROFILE_DEFAULTS
