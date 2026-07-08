@@ -1746,6 +1746,48 @@ class TestD3Dispatcher:
         step_names = {s.name for s in runner.plan()}
         assert "scrape_d3" not in step_names
 
+    def test_update_cli_accepts_include_d3_flag(self, tmp_path):
+        """M2 — `hklii update --include-d3` must be registered.
+
+        PROFILE_DEFAULTS + UpdateRunner already accept include_d3, but
+        without a Click option the flag returns NoSuchOption and the
+        custom profile can never opt into D3.
+        """
+        from click.testing import CliRunner
+
+        from hklii_downloader.cli import main
+
+        result = CliRunner().invoke(main, ["update", "--help"])
+
+        assert result.exit_code == 0
+        assert "--include-d3" in result.output
+        assert "--no-d3" in result.output
+
+    def test_update_cli_include_d3_reaches_update_runner(self, tmp_path):
+        """--include-d3 must flow into UpdateRunner(include_d3=True)."""
+        from unittest.mock import patch
+
+        from click.testing import CliRunner
+
+        from hklii_downloader.cli import main
+
+        with patch("hklii_downloader.update.UpdateRunner") as MockRunner:
+            instance = MockRunner.return_value
+            instance.plan.return_value = []
+            instance.format_plan.return_value = "no steps"
+            CliRunner().invoke(main, [
+                "update",
+                "--profile", "custom",
+                "--include-d3",
+                "--dry-run",
+                "-o", str(tmp_path),
+                "-p", "http://127.0.0.1:8888",
+            ])
+
+        assert MockRunner.called, "UpdateRunner was not instantiated"
+        call_kwargs = MockRunner.call_args.kwargs
+        assert call_kwargs.get("include_d3") is True
+
 
 class TestD3FreshnessEndToEnd:
     """Runner run → mark_bucket_scraped → recompute → row flips FRESH."""
