@@ -19,10 +19,14 @@ and unmotivated.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from urllib.parse import urlencode
+
+from .atomic_write import atomic_write_text
 
 _log = logging.getLogger("hklii_downloader.d3")
 
@@ -97,6 +101,36 @@ class D3Entry:
 class D3Listing:
     total: int
     entries: list[D3Entry] = field(default_factory=list)
+
+
+def _row_dir(output_dir: Path, family: D3Family, year: int, num: int) -> Path:
+    base = Path(output_dir) / "d3" / family.slug / str(year) / str(num)
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _stem(family: D3Family, year: int, num: int, lang: str) -> str:
+    return f"{family.slug}_{year}_{num}_{lang}"
+
+
+def save_d3_html(
+    output_dir: Path, family: D3Family,
+    year: int, num: int, lang: str,
+    response: dict,
+) -> list[str]:
+    """Shape-B save — one JSON sidecar with embedded ``content`` field.
+
+    Returns the list of formats landed. HTML slugs always produce
+    ``["json"]``; the JSON body carries the full HKLII response
+    verbatim so downstream tooling can grep ``id`` / ``neutral`` /
+    ``date`` without re-parsing HTML.
+    """
+    base = _row_dir(output_dir, family, year, num)
+    atomic_write_text(
+        base / f"{_stem(family, year, num, lang)}.json",
+        json.dumps(response, ensure_ascii=False, indent=2),
+    )
+    return ["json"]
 
 
 def pdf_url(family: D3Family, response: dict) -> str | None:
