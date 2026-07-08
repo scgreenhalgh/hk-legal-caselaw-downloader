@@ -863,12 +863,14 @@ mark {
   border-collapse: collapse;
   width: 100%;
   font-family: var(--font-mono);
-  font-size: 0.9rem;
-  margin-block: 1.5rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin-block: 1rem;
+  table-layout: fixed;
 }
 .freshness-table th,
 .freshness-table td {
-  padding: 0.35rem 0.6rem;
+  padding: 0.2rem 0.5rem;
   border-bottom: 1px solid var(--pico-muted-border-color, #eee);
   text-align: left;
   vertical-align: baseline;
@@ -876,15 +878,39 @@ mark {
 .freshness-table th {
   font-family: var(--font-body);
   font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
   background: var(--pico-secondary-background, #fafafa);
   position: sticky;
   top: 0;
   z-index: 1;
 }
+/* Fixed column widths so every row is single-line for parity rows
+   and long titles clip with ellipsis (hover shows the full title via
+   the title attribute). Without table-layout: fixed, the Chinese
+   column wrapped one character per line. */
+.freshness-table col.c-slug  { width: 5rem; }
+.freshness-table col.c-en    { width: 14rem; }
+.freshness-table col.c-zh    { width: 10rem; }
+.freshness-table col.c-count { width: 6.5rem; }
+.freshness-table col.c-upd   { width: 4.6rem; }
 .freshness-table .col-count,
 .freshness-table .col-lang { text-align: right; }
-.freshness-table .col-updated { text-align: center; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.85rem; }
+.freshness-table .col-updated {
+  text-align: center;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
 .freshness-table .col-slug { font-weight: 600; color: var(--ink); }
+.freshness-table .col-en,
+.freshness-table .col-zh {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .freshness-table .col-zh { font-family: var(--font-body); }
 .freshness-table .count { white-space: nowrap; }
 .freshness-table .count.freshness-mismatch {
@@ -895,9 +921,13 @@ mark {
   margin-left: 0.3rem;
   color: var(--scarlet);
   font-family: var(--font-body);
-  font-size: 0.75rem;
+  font-size: 0.7rem;
 }
 .freshness-table .dash { color: var(--ink-muted); }
+
+/* Nav gap — pre-fix the two links rendered as "SearchFreshness"
+   with no space between. */
+.viewer-header nav { display: flex; gap: 1rem; }
 
 .meta {
   color: var(--ink-muted);

@@ -26,14 +26,23 @@
   {% endif %}
 
   <table class="freshness-table" data-testid="freshness-table">
+    <colgroup>
+      <col class="c-slug">
+      <col class="c-en">
+      <col class="c-zh">
+      {% for lang in langs %}
+        <col class="c-count">
+        <col class="c-upd">
+      {% endfor %}
+    </colgroup>
     <thead>
       <tr>
         <th scope="col">Slug</th>
         <th scope="col">English</th>
         <th scope="col">中文</th>
         {% for lang in langs %}
-          <th scope="col" class="col-count">{{ lang | upper }} local / live</th>
-          <th scope="col" class="col-updated">{{ lang | upper }} updated</th>
+          <th scope="col" class="col-count">{{ lang | upper }} l/L</th>
+          <th scope="col" class="col-updated">upd</th>
         {% endfor %}
       </tr>
     </thead>
@@ -42,8 +51,8 @@
       {% for row in section.rows %}
         <tr data-slug="{{ row.slug }}" data-bucket="{{ section.name }}">
           <td class="col-slug">{{ row.slug }}</td>
-          <td class="col-en">{{ row.en_name }}</td>
-          <td class="col-zh">{{ row.zh_name }}</td>
+          <td class="col-en" title="{{ row.en_name }}">{{ row.en_name }}</td>
+          <td class="col-zh" title="{{ row.zh_name }}">{{ row.zh_name }}</td>
           {% for cell in row.cells %}
             <td class="col-lang" data-lang="{{ cell.lang }}">
               {% if not cell.available %}
