@@ -1107,3 +1107,49 @@ class TestScrapeD3Cli:
 
         assert result.exit_code == 0, result.output
         assert mocked.await_count == 0, "runner ran despite all-fresh"
+
+
+class TestD3Dispatcher:
+    """update.py PROFILE_DEFAULTS + plan step + step estimate."""
+
+    def test_step_est_registered_for_scrape_d3(self):
+        from hklii_downloader.update import _STEP_EST
+
+        assert "scrape_d3" in _STEP_EST
+
+    def test_daily_and_weekly_exclude_d3(self):
+        from hklii_downloader.update import PROFILE_DEFAULTS
+
+        assert PROFILE_DEFAULTS["daily"]["include_d3"] is False
+        assert PROFILE_DEFAULTS["weekly"]["include_d3"] is False
+
+    def test_monthly_and_quarterly_include_d3(self):
+        from hklii_downloader.update import PROFILE_DEFAULTS
+
+        assert PROFILE_DEFAULTS["monthly"]["include_d3"] is True
+        assert PROFILE_DEFAULTS["quarterly"]["include_d3"] is True
+
+    def test_custom_defaults_include_d3_off(self):
+        from hklii_downloader.update import PROFILE_DEFAULTS
+
+        assert PROFILE_DEFAULTS["custom"]["include_d3"] is False
+
+    def test_plan_contains_scrape_d3_step_when_included(self, tmp_path):
+        from hklii_downloader.update import UpdateRunner
+
+        runner = UpdateRunner(
+            profile="custom", output=tmp_path, proxies=["p"],
+            include_d3=True,
+        )
+        step_names = {s.name for s in runner.plan()}
+        assert "scrape_d3" in step_names
+
+    def test_plan_omits_scrape_d3_step_when_excluded(self, tmp_path):
+        from hklii_downloader.update import UpdateRunner
+
+        runner = UpdateRunner(
+            profile="custom", output=tmp_path, proxies=["p"],
+            include_d3=False,
+        )
+        step_names = {s.name for s in runner.plan()}
+        assert "scrape_d3" not in step_names
