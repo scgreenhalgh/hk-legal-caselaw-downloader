@@ -278,6 +278,22 @@ CREATE INDEX IF NOT EXISTS idx_db_freshness_scraped
 _ENRICHMENT_KINDS = ("summary_en", "summary_zh", "appeal_history")
 _ENRICHMENT_STATUSES = ("pending", "downloaded", "na", "failed")
 
+# db_freshness.kind values — dispatched by recompute_local_count over
+# cases / legis_documents / hopt_documents respectively. UKPC lives
+# under kind='cases' because its rows are stored in the cases table
+# (see ukpc.py + upsert_downloaded_case).
+_FRESHNESS_KINDS = ("cases", "legis", "hopt")
+
+# Column-to-table dispatch for recompute_local_count. Isolated as a
+# constant so a future kind (e.g. 'histlaw' once D3 lands) is a
+# single-line addition rather than a scattered edit across the method
+# body.
+_FRESHNESS_TABLE_BY_KIND = {
+    "cases": ("cases", "court"),
+    "legis": ("legis_documents", "abbr"),
+    "hopt": ("hopt_documents", "abbr"),
+}
+
 
 class CheckpointDB:
     def __init__(self, path: str):
@@ -1670,11 +1686,11 @@ class CheckpointDB:
 
     # ---- db_freshness accessors (Phase D2) ---------------------------
     #
-    # NOTE: these are placeholder stubs so the failing-test commit can
-    # reach assertion-level failure without ImportError / AttributeError.
-    # They deliberately return placeholder values (no-op / 0 / None /
-    # empty iter) that make the paired assertions FAIL. Real
-    # implementations ship in the paired feat: commit.
+    # Ownership discipline: each writer touches only its own columns.
+    # A drift here silently corrupts the freshness signal — e.g. a
+    # probe clobbering last_scrape_completed_at back to NULL would
+    # re-trigger every scrape at the next update. Enforced by the
+    # tests in tests/test_freshness_checkpoint.py.
 
     def upsert_freshness_probe(
         self, kind: str, scope: str, lang: str, *,
@@ -1683,32 +1699,141 @@ class CheckpointDB:
         live_probed_at: int,
         probe_error: str | None,
     ) -> None:
-        # D2 stub — no-op, real impl in feat: commit.
-        return
+        """Record the outcome of one wire probe against the getmeta*
+        endpoint for (kind, scope, lang).
+
+        * live_count / live_updated_at are COALESCE-preserved on
+          conflict — a failed probe (live_count=None) must NOT wipe a
+          previous good value, otherwise a single wire flake flips
+          every healthy bucket to STALE via the _fresh rule's
+          `live_count IS NOT NULL` requirement.
+        * live_probed_at / probe_error describe the LAST attempt and
+          are always overwritten. A healthy probe after a failed one
+          must clear probe_error to NULL.
+        * Never touches local_count / last_scrape_completed_at /
+          source_generation_id — those belong to other writers.
+        """
+        self._conn.execute(
+            "INSERT INTO db_freshness "
+            "(kind, scope, lang, live_count, live_updated_at, "
+            "live_probed_at, probe_error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (kind, scope, lang) DO UPDATE SET "
+            "live_count=COALESCE(excluded.live_count, "
+            "                     db_freshness.live_count), "
+            "live_updated_at=COALESCE(excluded.live_updated_at, "
+            "                          db_freshness.live_updated_at), "
+            "live_probed_at=excluded.live_probed_at, "
+            "probe_error=excluded.probe_error",
+            (kind, scope, lang, live_count, live_updated_at,
+             live_probed_at, probe_error),
+        )
+        self._conn.commit()
 
     def recompute_local_count(
         self, kind: str, scope: str, lang: str,
     ) -> int:
-        # D2 stub — returns 0 so assertions on real counts fail.
-        return 0
+        """Refresh local_count / local_counted_at for a bucket by
+        running the kind-specific SELECT COUNT(*) over the
+        status='downloaded' slice, and return the count so the caller
+        can log it without a re-SELECT.
+
+        Dispatch is table-driven via _FRESHNESS_TABLE_BY_KIND so a
+        future kind (e.g. 'histlaw' after D3) is a single-line add.
+        Wire columns and scrape-runner columns are COALESCE-preserved
+        on conflict — this writer owns local_count / local_counted_at
+        only.
+        """
+        if kind not in _FRESHNESS_KINDS:
+            raise ValueError(
+                f"unknown freshness kind {kind!r}; "
+                f"expected one of {_FRESHNESS_KINDS}"
+            )
+        table, scope_col = _FRESHNESS_TABLE_BY_KIND[kind]
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM {table} "
+            f"WHERE {scope_col}=? AND lang=? AND status='downloaded'",
+            (scope, lang),
+        ).fetchone()
+        count = int(row[0]) if row else 0
+        now = int(time.time())
+        self._conn.execute(
+            "INSERT INTO db_freshness "
+            "(kind, scope, lang, local_count, local_counted_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (kind, scope, lang) DO UPDATE SET "
+            "local_count=excluded.local_count, "
+            "local_counted_at=excluded.local_counted_at",
+            (kind, scope, lang, count, now),
+        )
+        self._conn.commit()
+        return count
 
     def mark_bucket_scraped(
         self, kind: str, scope: str, lang: str, *,
         completed_at: int,
         source_generation_id: int | None = None,
     ) -> None:
-        # D2 stub — no-op, real impl in feat: commit.
-        return
+        """Record a clean scrape completion for (kind, scope, lang).
+
+        Called by every scrape runner (BulkScraper, HoptRunner,
+        LegisRunner, UkpcRunner) on successful sweep completion. If no
+        db_freshness row exists yet (first-run scrape landing before
+        any probe), INSERT with NULL wire columns so a later probe
+        can UPSERT-refresh them.
+
+        source_generation_id is optional — hopt/legis scrapes don't
+        touch enum_runs and pass None; cases scrapes pass the
+        generation_id of the enum_run whose enumeration surfaced the
+        rows this scrape captured.
+
+        Wire columns (live_*, probe_error) and local columns are
+        COALESCE-preserved on conflict — this writer owns
+        last_scrape_completed_at / source_generation_id only.
+        """
+        self._conn.execute(
+            "INSERT INTO db_freshness "
+            "(kind, scope, lang, last_scrape_completed_at, "
+            "source_generation_id) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT (kind, scope, lang) DO UPDATE SET "
+            "last_scrape_completed_at="
+            "excluded.last_scrape_completed_at, "
+            "source_generation_id=excluded.source_generation_id",
+            (kind, scope, lang, completed_at, source_generation_id),
+        )
+        self._conn.commit()
 
     def get_freshness_row(
         self, kind: str, scope: str, lang: str,
     ) -> DbFreshnessRecord | None:
-        # D2 stub — returns None so isinstance assertions fail.
-        return None
+        """Point-read a single freshness row. Returns None if the
+        triple has no row (first-run — caller treats as STALE per
+        fresh_definition rule (1))."""
+        row = self._conn.execute(
+            "SELECT kind, scope, lang, live_count, live_updated_at, "
+            "live_probed_at, probe_error, local_count, "
+            "local_counted_at, last_scrape_completed_at, "
+            "source_generation_id FROM db_freshness "
+            "WHERE kind=? AND scope=? AND lang=?",
+            (kind, scope, lang),
+        ).fetchone()
+        if row is None:
+            return None
+        return DbFreshnessRecord(*row)
 
     def iter_freshness_rows(self):
-        # D2 stub — empty iterator, real impl in feat: commit.
-        return iter([])
+        """Full-scan iterator over db_freshness. Cheap in practice —
+        the table stays under ~100 rows (one per mapped
+        category × slug × lang triple). Consumers: FreshnessRunner.
+        stale_buckets(), the check-freshness CLI JSON report."""
+        for row in self._conn.execute(
+            "SELECT kind, scope, lang, live_count, live_updated_at, "
+            "live_probed_at, probe_error, local_count, "
+            "local_counted_at, last_scrape_completed_at, "
+            "source_generation_id FROM db_freshness"
+        ).fetchall():
+            yield DbFreshnessRecord(*row)
 
     def close(self) -> None:
         self._conn.close()
