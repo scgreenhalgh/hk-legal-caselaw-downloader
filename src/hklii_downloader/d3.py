@@ -446,7 +446,14 @@ async def _fetch_row(
         raise D3FetchError(
             f"hop-2 HTTP {resp.status_code} for {binary_url}"
         )
-    return metadata, resp.content
+    body = resp.content
+    if not body[:4] == b"%PDF":
+        raise D3FetchError(
+            f"hop-2 body missing %PDF magic for {binary_url} "
+            f"(first 4 bytes: {body[:4]!r}, "
+            f"content-type: {resp.headers.get('content-type', '?')})"
+        )
+    return metadata, body
 
 
 def pdf_url(family: D3Family, response: object) -> str | None:
