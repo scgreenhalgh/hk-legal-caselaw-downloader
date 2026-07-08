@@ -1859,6 +1859,110 @@ class TestD3FreshnessEndToEnd:
         finally:
             db.close()
 
+    async def test_run_scrape_d3_close_out_marks_only_enumerated_langs(
+        self, tmp_path,
+    ):
+        """T4 — the CLI close-out loop must iterate langs_enumerated,
+        not the requested langs. If a lang's enum wire-failed, that
+        bucket must remain STALE.
+
+        Drives the full `_run_scrape_d3` helper end-to-end (unlike
+        TestD3FreshnessEndToEnd which calls db.mark_bucket_scraped
+        directly and would miss a refactor to the close-out loop).
+        """
+        import time
+
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import _run_scrape_d3
+        from hklii_downloader.proxy_pool import ProxyPool
+
+        now = int(time.time())
+
+        # Seed live counts so freshness has targets for both langs.
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            for lang in ("en", "tc"):
+                db.upsert_freshness_probe(
+                    kind="hopt", scope="hklrccp", lang=lang,
+                    live_count=1, live_updated_at="2026-07-08",
+                    live_probed_at=now, probe_error=None,
+                )
+        finally:
+            db.close()
+
+        good_page = {
+            "totalfiles": 1,
+            "files": [
+                {
+                    "title": "T",
+                    "path": "/en/other/hklrccp/2020/2",
+                    "neutral": "[2020] HKLRCCP 2",
+                    "date": "2020-12-01",
+                },
+            ],
+        }
+        metadata = {"content": "<h3>x</h3>"}
+
+        async def fake_get(self, url, **kw):
+            if "gethoptfiles" in url and "lang=tc" in url:
+                # TC enum wire-fails — 500.
+                return httpx.Response(
+                    500, text="internal",
+                    request=httpx.Request("GET", url),
+                )
+            if "gethoptfiles" in url:
+                return httpx.Response(
+                    200, json=good_page,
+                    request=httpx.Request("GET", url),
+                )
+            return httpx.Response(
+                200, json=metadata,
+                request=httpx.Request("GET", url),
+            )
+
+        # Patch ProxyPool.get on the class so the real _run_scrape_d3
+        # helper drives the actual close-out loop.
+        from unittest.mock import patch
+
+        async def fake_preflight(self):
+            from hklii_downloader.proxy_pool import PreflightResult
+            return PreflightResult(
+                home_ip="1.2.3.4", healthy_proxies=["p1"], failed_proxies=[],
+            )
+
+        async def fake_close(self):
+            return None
+
+        with patch.object(ProxyPool, "get", fake_get), \
+             patch.object(ProxyPool, "preflight", fake_preflight), \
+             patch.object(ProxyPool, "close", fake_close):
+            await _run_scrape_d3(
+                output=tmp_path,
+                proxies=["http://p1"], direct=False,
+                slugs=("hklrccp",), langs=("en", "tc"),
+                limit=None, no_events=True,
+            )
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            en_row = db.get_freshness_row("hopt", "hklrccp", "en")
+            tc_row = db.get_freshness_row("hopt", "hklrccp", "tc")
+            assert en_row is not None
+            assert tc_row is not None
+            # EN enumerated successfully → stamped as scraped.
+            assert en_row.last_scrape_completed_at is not None
+            # TC enum wire-failed → must NOT be stamped scraped (else
+            # freshness would lie FRESH with local=0 vs live=1).
+            assert tc_row.last_scrape_completed_at is None, (
+                "TC bucket was stamped scraped despite enum wire failure — "
+                "the close-out loop iterated requested langs instead of "
+                "langs_enumerated"
+            )
+        finally:
+            db.close()
+
     async def test_empty_bucket_flips_fresh_at_local_equals_live_zero(
         self, tmp_path,
     ):
