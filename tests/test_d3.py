@@ -452,3 +452,73 @@ class TestD3SavePdf:
             "https://www.hkiac.org/sites/default/files/"
             "ck_filebrowser/IP/hk/decision/DHK-2100183.pdf"
         )
+
+
+class TestD3ExtractPdfText:
+    """extract_pdf_text — pdftotext preferred, pypdf fallback, None on both."""
+
+    def test_pdftotext_preferred_when_it_returns_text(self, monkeypatch):
+        called: list[str] = []
+
+        def fake_pdftotext(pdf_bytes):
+            called.append("pdftotext")
+            return "text via pdftotext"
+
+        def fake_pypdf(pdf_bytes):
+            called.append("pypdf")
+            return "text via pypdf"
+
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pdftotext", fake_pdftotext,
+        )
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pypdf", fake_pypdf,
+        )
+        from hklii_downloader.d3 import extract_pdf_text
+
+        result = extract_pdf_text(b"%PDF-1.4")
+
+        assert result == "text via pdftotext"
+        assert called == ["pdftotext"]  # pypdf never called
+
+    def test_pypdf_fallback_when_pdftotext_returns_none(self, monkeypatch):
+        called: list[str] = []
+
+        def fake_pdftotext(pdf_bytes):
+            called.append("pdftotext")
+            return None
+
+        def fake_pypdf(pdf_bytes):
+            called.append("pypdf")
+            return "text via pypdf"
+
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pdftotext", fake_pdftotext,
+        )
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pypdf", fake_pypdf,
+        )
+        from hklii_downloader.d3 import extract_pdf_text
+
+        assert extract_pdf_text(b"%PDF-1.4") == "text via pypdf"
+        assert called == ["pdftotext", "pypdf"]
+
+    def test_returns_none_when_both_extractors_fail(self, monkeypatch):
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pdftotext", lambda b: None,
+        )
+        monkeypatch.setattr(
+            "hklii_downloader.d3._try_pypdf", lambda b: None,
+        )
+        from hklii_downloader.d3 import extract_pdf_text
+
+        assert extract_pdf_text(b"%PDF-1.4") is None
+
+    def test_pdftotext_missing_binary_returns_none(self, monkeypatch):
+        """When the pdftotext binary isn't on PATH, _try_pdftotext returns None."""
+        import shutil
+
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+        from hklii_downloader.d3 import _try_pdftotext
+
+        assert _try_pdftotext(b"%PDF-1.4") is None
