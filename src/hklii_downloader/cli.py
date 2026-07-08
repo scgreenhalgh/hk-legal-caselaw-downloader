@@ -2415,6 +2415,203 @@ async def _hopt_with_progress(runner, target: int):
         return await runner.fetch_pending(on_progress=on_progress)
 
 
+@main.command("scrape-ukpc")
+@click.option(
+    "-o", "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("./output"),
+    help="Directory holding the checkpoint DB + ukpc artifacts.",
+)
+@click.option(
+    "-p", "--proxy", "proxies",
+    multiple=True,
+    cls=MutuallyExclusiveOption,
+    help="Proxy URL(s). Repeatable for multiple proxies.",
+)
+@click.option(
+    "--direct",
+    is_flag=True,
+    default=False,
+    help="Connect directly without a proxy.",
+)
+@click.option(
+    "--lang",
+    type=click.Choice(["en", "tc", "both"]),
+    default="en",
+    help=(
+        "Language(s) to enumerate. Default: en (UKPC is EN-only per "
+        "/databases; --lang both stays best-effort in case HKLII "
+        "later ships a TC translation)."
+    ),
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Stop after N document fetches (smoke test).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help=(
+        "Re-fetch and overwrite already-downloaded rows. Default: skip "
+        "any (year, num) already at status='downloaded' in the cases "
+        "table (idempotent resume)."
+    ),
+)
+@click.option(
+    "--yes", "-y",
+    is_flag=True,
+    default=False,
+    help="Skip confirmation for --direct.",
+)
+@click.option(
+    "--no-events",
+    is_flag=True,
+    default=False,
+    help="Skip structured event logging.",
+)
+def scrape_ukpc(
+    output: Path,
+    proxies: tuple[str, ...],
+    direct: bool,
+    lang: str,
+    limit: int | None,
+    force: bool,
+    yes: bool,
+    no_events: bool,
+) -> None:
+    """Scrape HKLII UKPC — Privy Council judgments (hopt-C family).
+
+    UKPC lives on the ``gethoptfiles?dbcat=C`` enumeration endpoint and
+    ``getother`` fetch endpoint — a distinct wire family from the 12
+    case-family courts in ``ALL_COURTS``. Judgments land at
+    ``output/ukpc/YYYY/ukpc_YYYY_NUM.{html,txt,json}`` (case-family
+    layout so the viewer's render pipeline treats UKPC identically) and
+    are written to the cases table at ``court='ukpc'``,
+    ``status='downloaded'`` immediately — never sit at 'pending'
+    because ``BulkScraper.claim_pending()`` is unscoped and would hit
+    the wrong endpoint family.
+
+    \b
+    Examples:
+      hklii scrape-ukpc --proxy http://127.0.0.1:8888
+      hklii scrape-ukpc --direct --yes --limit 5
+      hklii scrape-ukpc --force -p ...  # re-fetch even if downloaded
+    """
+    if not proxies and not direct:
+        raise click.UsageError("Must specify --proxy or --direct.")
+    if direct and not yes:
+        click.confirm(
+            "Scraping without a proxy exposes your IP. Continue?",
+            abort=True,
+        )
+    from .ukpc import HOPT_C_LANGS
+    langs = HOPT_C_LANGS if lang == "both" else (lang,)
+    asyncio.run(_run_scrape_ukpc(
+        output=output, proxies=list(proxies), direct=direct,
+        langs=langs, limit=limit, force=force, no_events=no_events,
+    ))
+
+
+async def _run_scrape_ukpc(
+    output: Path, proxies: list[str], direct: bool,
+    langs: tuple[str, ...],
+    limit: int | None, force: bool = False, no_events: bool = False,
+) -> None:
+    from .checkpoint import CheckpointDB
+    from .events import StructuredEventLogger
+    from .proxy_pool import ProxyPool
+    from .ukpc import UkpcRunner
+
+    output.mkdir(parents=True, exist_ok=True)
+    db_path = output / ".checkpoint.db"
+    db = CheckpointDB(str(db_path))
+    events = None if no_events else StructuredEventLogger(output)
+    if events is not None:
+        await events.start()
+    if direct:
+        pool = ProxyPool(proxy_urls=[], direct=True, events=events)
+        workers = 1
+    else:
+        pool = ProxyPool(proxy_urls=proxies, events=events)
+    try:
+        if not direct:
+            click.echo("Running preflight IP checks...")
+            result = await pool.preflight()
+            click.echo(f"Home IP: {result.home_ip}")
+            click.echo(f"Healthy proxies: {len(result.healthy_proxies)}")
+            if not result.healthy_proxies:
+                raise click.UsageError(
+                    "No healthy proxies after preflight."
+                )
+            workers = max(1, len(result.healthy_proxies))
+
+        runner = UkpcRunner(
+            get=pool.get, checkpoint=db, output_dir=output,
+            langs=langs, workers=workers, limit=limit, force=force,
+        )
+
+        # Pre-count already-downloaded UKPC rows so the operator can
+        # tell "skipped resume" from "nothing to fetch" in the final
+        # summary line.
+        pre_count = db._conn.execute(
+            "SELECT COUNT(*) FROM cases "
+            "WHERE court='ukpc' AND status='downloaded'"
+        ).fetchone()[0]
+        click.echo(
+            f"Enumerating ukpc langs={list(langs)} "
+            f"(pre-existing downloaded rows: {pre_count})..."
+        )
+
+        outcome = await _ukpc_with_progress(runner)
+        click.echo(
+            f"\nDone. Downloaded: {outcome.downloaded}, "
+            f"Failed: {outcome.failed}."
+        )
+        total_count = db._conn.execute(
+            "SELECT COUNT(*) FROM cases "
+            "WHERE court='ukpc' AND status='downloaded'"
+        ).fetchone()[0]
+        click.echo(f"UKPC rows now in cases table: {total_count}")
+    finally:
+        if events is not None:
+            await events.aclose()
+        await pool.close()
+        db.close()
+
+
+async def _ukpc_with_progress(runner):
+    """Rich progress bar around ``UkpcRunner.run``. Total is unknown
+    up-front (enum happens inside ``run``), so total=None → indeterminate
+    bar that just shows ok/fail counters + elapsed."""
+    from rich.progress import (
+        Progress, TextColumn, BarColumn,
+        TaskProgressColumn,
+        TimeElapsedColumn,
+    )
+    with Progress(
+        TextColumn("[bold blue]ukpc"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[green]ok {task.fields[ok]}"),
+        TextColumn("[red]fail {task.fields[fail]}"),
+        TimeElapsedColumn(),
+    ) as progress:
+        task_id = progress.add_task(
+            "ukpc", total=None, ok=0, fail=0,
+        )
+
+        def on_progress(stats):
+            progress.update(
+                task_id,
+                ok=stats.downloaded, fail=stats.failed,
+            )
+
+        return await runner.run(on_progress=on_progress)
+
+
 async def _legis_history_with_progress(runner, target: int):
     from rich.progress import (
         Progress, TextColumn, BarColumn,

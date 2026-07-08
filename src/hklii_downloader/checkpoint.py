@@ -379,6 +379,67 @@ class CheckpointDB:
         )
         self._conn.commit()
 
+    def upsert_downloaded_case(
+        self, court: str, year: int, number: int, lang: str,
+        neutral: str, title: str, date: str, formats: list[str],
+        last_seen_at: int | None = None,
+    ) -> None:
+        """Insert a cases row directly at status='downloaded'.
+
+        UKPC entries are enumerated + fetched + saved in one pass by
+        :class:`hklii_downloader.ukpc.UkpcRunner`. They must never sit
+        at status='pending' waiting to be claimed because
+        :meth:`claim_pending` is court-unscoped and would let a plain
+        ``hklii scrape`` invocation pull ukpc rows off the pending
+        queue and hit ``getjudgment`` — the WRONG endpoint family for
+        the hopt-C UKPC slug — on every subsequent run.
+
+        On conflict, preserves the existing status (downloaded stays
+        downloaded, no reverts) and refreshes the metadata columns.
+        Uses the same lang-collapse rule as :meth:`upsert_case` so a
+        future EN counterpart for an already-TC row collapses to
+        lang='en' consistently across the cases table.
+        """
+        self._conn.execute(
+            "INSERT INTO cases "
+            "(court, year, number, neutral, title, date, lang, status, "
+            "formats, last_seen_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 'downloaded', ?, ?) "
+            "ON CONFLICT (court, year, number) DO UPDATE SET "
+            "neutral=excluded.neutral, title=excluded.title, "
+            "date=excluded.date, "
+            "lang=CASE "
+            "  WHEN cases.lang='en' OR excluded.lang='en' THEN 'en' "
+            "  ELSE excluded.lang "
+            "END, "
+            "formats=excluded.formats, "
+            "last_seen_at=COALESCE(excluded.last_seen_at, "
+            "                      cases.last_seen_at)",
+            (court, year, number, neutral, title, date, lang,
+             json.dumps(formats), last_seen_at),
+        )
+        self._conn.commit()
+
+    def has_downloaded_case(
+        self, court: str, year: int, number: int,
+    ) -> bool:
+        """Return True iff (court, year, number) exists at
+        status='downloaded'.
+
+        Used by :class:`hklii_downloader.ukpc.UkpcRunner` for idempotent
+        resume — a re-run over the same corpus skips already-downloaded
+        rows without re-fetching. Cheaper than the row-loading version
+        of :meth:`get_formats` because the caller only needs the
+        boolean.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM cases "
+            "WHERE court=? AND year=? AND number=? "
+            "AND status='downloaded' LIMIT 1",
+            (court, year, number),
+        ).fetchone()
+        return row is not None
+
     def claim_pending(self, court: str | None = None) -> CaseRecord | None:
         if court:
             row = self._conn.execute(

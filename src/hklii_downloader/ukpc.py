@@ -19,10 +19,13 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlencode
+
+import httpx
 
 from .atomic_write import atomic_write_text
 from .parser import html_to_text
@@ -266,7 +269,33 @@ class UkpcRunResult:
 
 
 class UkpcRunner:
-    """Stub — replaced by the implementation in the next commit."""
+    """Single-pass runner: enumerate → fetch → save → dual-write cases row.
+
+    UKPC lives on the hopt-C endpoint family but its judgments belong
+    in the case-family cases table so the viewer's court indexer picks
+    them up unchanged. Unlike ``HoptRunner`` (which uses a two-phase
+    enumerate-then-drain pattern via the ``hopt_documents`` state table),
+    UKPC skips the intermediate pending state and inserts rows straight
+    at status='downloaded' via
+    :meth:`hklii_downloader.checkpoint.CheckpointDB.upsert_downloaded_case`.
+
+    Why single-pass:
+
+    * :meth:`CheckpointDB.claim_pending` is court-unscoped. If a
+      UKPC row landed at status='pending', the next ``hklii scrape``
+      run would pull it off the queue and hit ``getjudgment`` — WRONG
+      endpoint family. Single-pass sidesteps that hazard entirely.
+    * The corpus is small (242 records at the current snapshot), so a
+      one-shot enumerate + fan-out fetch is cheap; no need for the
+      two-phase resume tracking that hopt/legis get from a dedicated
+      state table.
+
+    Idempotent resume via :meth:`CheckpointDB.has_downloaded_case`:
+    a re-run over the same corpus skips already-downloaded rows without
+    re-fetching (unless ``force=True``). TC enum is best-effort — if
+    UKPC/TC ever comes online (currently EN-only per /databases), the
+    upsert's lang-collapse rule handles the transition.
+    """
 
     def __init__(
         self,
@@ -290,4 +319,85 @@ class UkpcRunner:
         self,
         on_progress: Callable[[UkpcRunResult], None] | None = None,
     ) -> UkpcRunResult:
-        return UkpcRunResult()
+        result = UkpcRunResult()
+        counter_lock = asyncio.Lock()
+        remaining = {"n": self._limit if self._limit is not None else -1}
+
+        pending: list[tuple[int, int, str, UkpcEntry]] = []
+        for lang in self._langs:
+            try:
+                entries = await enumerate_hopt_c_court(
+                    get=self._get, abbr="ukpc", lang=lang,
+                )
+            except UkpcFetchError as exc:
+                # TC endpoint historically 500s while EN is fine; log
+                # and continue rather than aborting the run.
+                _log.warning(
+                    "ukpc enum failed for lang=%s: %s", lang, exc,
+                )
+                continue
+            for e in entries:
+                if (
+                    not self._force
+                    and self._checkpoint.has_downloaded_case(
+                        "ukpc", e.year, e.num,
+                    )
+                ):
+                    continue
+                pending.append((e.year, e.num, lang, e))
+
+        pending_iter = iter(pending)
+
+        async def worker() -> None:
+            while True:
+                async with counter_lock:
+                    if remaining["n"] == 0:
+                        return
+                    try:
+                        year, num, lang, entry = next(pending_iter)
+                    except StopIteration:
+                        return
+                    if remaining["n"] > 0:
+                        remaining["n"] -= 1
+
+                try:
+                    judgment = await fetch_one_hopt_c_judgment(
+                        get=self._get, abbr="ukpc",
+                        year=year, num=num, lang=lang,
+                    )
+                    save_ukpc_local(
+                        output_dir=self._output_dir, judgment=judgment,
+                    )
+                    now = int(time.time())
+                    self._checkpoint.upsert_downloaded_case(
+                        court="ukpc", year=year, number=num, lang=lang,
+                        neutral=judgment.neutral or entry.neutral,
+                        title=judgment.title or entry.title,
+                        date=judgment.date or entry.date,
+                        formats=["html", "json", "txt"],
+                        last_seen_at=now,
+                    )
+                    async with counter_lock:
+                        result.downloaded += 1
+                except UkpcFetchError as exc:
+                    _log.warning(
+                        "ukpc fetch failed for %s/%s (%s): %s",
+                        year, num, lang, exc,
+                    )
+                    async with counter_lock:
+                        result.failed += 1
+                except (httpx.RequestError, OSError) as exc:
+                    _log.warning(
+                        "ukpc transport failure %s/%s (%s): %s: %s",
+                        year, num, lang, type(exc).__name__, exc,
+                    )
+                    async with counter_lock:
+                        result.failed += 1
+
+                if on_progress is not None:
+                    on_progress(result)
+
+        await asyncio.gather(
+            *[worker() for _ in range(self._workers)]
+        )
+        return result
