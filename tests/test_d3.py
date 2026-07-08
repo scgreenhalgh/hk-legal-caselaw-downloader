@@ -94,3 +94,57 @@ class TestD3UrlBuilders:
         assert "year=2020" in url
         assert "num=1" in url
         assert "lang=en" in url
+
+
+class TestD3PathRegex:
+    """_PATH_RE accepts /legis/ (histlaw) OR /other/ (getother slugs).
+
+    Not a reuse of hopt._PATH_RE (which is /legis/ only). Also defends
+    against ``nd`` year token by parity with hopt even though it was
+    not observed on D3 during the endpoint probe.
+    """
+
+    @pytest.mark.parametrize(
+        "path,expected_year,expected_num",
+        [
+            # histlaw — /legis/, trailing slash
+            ("/en/legis/histlaw/1964/1/", "1964", "1"),
+            # HTML slugs — /other/, no trailing slash observed
+            ("/en/other/hklrccp/2020/2", "2020", "2"),
+            ("/en/other/hklrcr/2019/3", "2019", "3"),
+            ("/en/other/pcpdc/2018/5", "2018", "5"),
+            # PDF external-host slugs — /other/
+            ("/en/other/hkiac/2021/183", "2021", "183"),
+            ("/en/other/pcpdaab/2020/1", "2020", "1"),
+            # TC lang lane
+            ("/tc/other/hklrccp/2020/2", "2020", "2"),
+            # nd year — defensive parity with hopt
+            ("/en/legis/histlaw/nd/7/", "nd", "7"),
+        ],
+    )
+    def test_path_re_matches_legis_and_other(
+        self, path, expected_year, expected_num,
+    ):
+        from hklii_downloader.d3 import _PATH_RE
+
+        m = _PATH_RE.match(path)
+        assert m is not None, f"regex did not match {path}"
+        assert m.group(1) == expected_year
+        assert m.group(2) == expected_num
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "",
+            "/",
+            "/en/legis/",
+            "/en/legis/histlaw/",
+            "/en/legis/histlaw/1964",     # missing num
+            "/en/cases/hkcfa/2020/1/",    # wrong bucket
+            "/de/legis/histlaw/1964/1/",  # wrong lang
+        ],
+    )
+    def test_path_re_rejects_malformed(self, path):
+        from hklii_downloader.d3 import _PATH_RE
+
+        assert _PATH_RE.match(path) is None
