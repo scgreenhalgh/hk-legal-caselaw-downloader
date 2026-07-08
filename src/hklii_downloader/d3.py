@@ -179,7 +179,8 @@ def _try_pdftotext(pdf_bytes: bytes) -> str | None:
             result.stderr[:200] if result.stderr else "",
         )
         return None
-    return result.stdout.decode("utf-8", errors="replace")
+    text = result.stdout.decode("utf-8", errors="replace")
+    return text or None
 
 
 def _try_pypdf(pdf_bytes: bytes) -> str | None:
