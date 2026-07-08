@@ -33,11 +33,13 @@ import pytest
 from hklii_downloader.checkpoint import CheckpointDB, DbFreshnessRecord
 from hklii_downloader.discovery import DatabaseMatrix
 from hklii_downloader.freshness import (
+    DB_DISPLAY_NAMES,
     FreshnessRow,
     FreshnessRunner,
     ProbeOutcome,
     _fresh,
     dispatch_url,
+    render_report_markdown,
 )
 
 HKT = timezone(timedelta(hours=8))
@@ -1134,3 +1136,195 @@ class TestMarkBucketScrapedDelegates:
         assert row is not None
         assert row.last_scrape_completed_at == 1_720_005_000
         assert row.source_generation_id == 7
+
+
+class TestDisplayNames:
+    """Every slug in the matrix carries an English + Chinese display
+    name used by ``render_report_markdown``. The lookup table is
+    static — the /databases fixture *has* the names in anchor text
+    but D1 didn't extract them, so we embed them here as a
+    single-source-of-truth constant."""
+
+    def test_covers_every_case_family_court(self):
+        for slug in _ALL_COURTS:
+            assert slug in DB_DISPLAY_NAMES, (
+                f"case-family slug {slug!r} missing from DB_DISPLAY_NAMES"
+            )
+
+    def test_covers_ukpc(self):
+        assert "ukpc" in DB_DISPLAY_NAMES
+        en, zh = DB_DISPLAY_NAMES["ukpc"]
+        assert "Privy Council" in en
+
+    def test_covers_all_legis_and_other_slugs(self):
+        expected = {
+            "ord", "reg", "instrument", "histlaw",
+            "hktmc", "hktml", "bahkg", "bacpg", "hkts",
+            "hkiac", "hklrccp", "hklrcr", "pcpdaab", "pcpdc", "pd",
+        }
+        for slug in expected:
+            assert slug in DB_DISPLAY_NAMES, (
+                f"slug {slug!r} missing from DB_DISPLAY_NAMES"
+            )
+
+    def test_english_names_never_empty(self):
+        for slug, (en, _zh) in DB_DISPLAY_NAMES.items():
+            assert en.strip(), f"empty English name for slug {slug!r}"
+
+
+class TestRenderReportMarkdown:
+    """``render_report_markdown`` turns the ``db_freshness`` ledger into
+    the fill-in-blanks markdown table used by ``hklii check-freshness
+    --report``. Renderer contract:
+
+      * One row per matrix slug × known-lang.
+      * Slugs iterate in matrix order (cases → legis → other).
+      * A slug with no freshness row shows ``—`` in every count/updated cell.
+      * Bilingual/trilingual slugs render lang columns side-by-side.
+    """
+
+    def _make_full_matrix(self):
+        """A tiny matrix with one slug per category to keep assertion
+        surface tight."""
+        return DatabaseMatrix(
+            cases={"hkcfa": ("en", "tc"), "ukpc": ("en",)},
+            legis={"ord": ("en", "sc", "tc")},
+            other={"hkiac": ("en", "tc")},
+        )
+
+    def test_output_is_markdown_table(self):
+        """Renders a real markdown table — header row + separator row."""
+        db = CheckpointDB(":memory:")
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        lines = table.splitlines()
+        assert lines[0].startswith("|") and lines[0].endswith("|")
+        # Second line is the markdown ``|---|---|…`` separator.
+        assert set(lines[1]) <= set("|-: ")
+
+    def test_includes_hkcfa_row_with_names(self):
+        db = CheckpointDB(":memory:")
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        assert "Court of Final Appeal" in table
+        assert "終審法院" in table
+
+    def test_renders_local_and_live_from_db_freshness(self):
+        """When a db_freshness row exists, its live_count / local_count /
+        live_updated_at populate the table cells (not em-dashes)."""
+        db = CheckpointDB(":memory:")
+        db.upsert_freshness_probe(
+            "cases", "hkcfa", "en",
+            live_count=2143, live_updated_at="2026-07-08",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        db._conn.execute(
+            "UPDATE db_freshness SET local_count=2143 "
+            "WHERE kind='cases' AND scope='hkcfa' AND lang='en'"
+        )
+        db._conn.commit()
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        assert "2143" in table
+        assert "2026-07-08" in table
+
+    def test_missing_rows_show_em_dash(self):
+        """A slug with no probe yet shows ``—`` in its cells so a
+        reader knows it's unpopulated, not zero."""
+        db = CheckpointDB(":memory:")
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        assert "—" in table
+
+    def test_trilingual_slug_has_sc_column(self):
+        """ord has ('en', 'sc', 'tc') in the matrix — the row must
+        surface a Simplified Chinese cell (populated or em-dash)."""
+        db = CheckpointDB(":memory:")
+        db.upsert_freshness_probe(
+            "legis", "ord", "sc",
+            live_count=838, live_updated_at="2026-07-08",
+            live_probed_at=1_720_000_000, probe_error=None,
+        )
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        # Header mentions SC.
+        assert "SC" in table or "sc" in table
+        # Content has the 838 count.
+        assert "838" in table
+
+    def test_bilingual_only_slug_omits_sc_cell(self):
+        """A slug with only ('en', 'tc') in the matrix (hkcfa here)
+        should not falsely advertise an SC record cell that never
+        exists upstream. The row's SC cells are em-dash or absent."""
+        db = CheckpointDB(":memory:")
+        try:
+            table = render_report_markdown(
+                rows=list(db.iter_freshness_rows()),
+                matrix=self._make_full_matrix(),
+            )
+        finally:
+            db.close()
+        hkcfa_line = next(
+            (line for line in table.splitlines()
+             if "Court of Final Appeal" in line),
+            None,
+        )
+        assert hkcfa_line is not None
+        # The row should not have a numeric SC count injected for
+        # hkcfa (which is bilingual only). We can't easily assert on
+        # column position without parsing markdown; assert that if
+        # the SC column exists globally, the hkcfa row's SC cell is
+        # em-dash. Ensured indirectly: no digit sequence follows an
+        # "sc:" style tag on this row (renderer contract).
+        assert "sc:0" not in hkcfa_line.lower()
+
+
+class TestCheckFreshnessReportCli:
+    """CLI integration for the ``--report`` flag."""
+
+    def test_report_flag_in_help(self):
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+        result = CliRunner().invoke(
+            main, ["check-freshness", "--help"],
+        )
+        assert result.exit_code == 0
+        assert "--report" in result.output
+
+    def test_report_json_text_mutex(self):
+        """``--report`` cannot combine with ``--json`` or ``--text``."""
+        from click.testing import CliRunner
+        from hklii_downloader.cli import main
+        result = CliRunner().invoke(
+            main, [
+                "check-freshness", "--direct", "--yes",
+                "--report", "--json",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output.lower()

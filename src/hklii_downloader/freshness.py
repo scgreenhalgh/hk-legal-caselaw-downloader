@@ -610,6 +610,13 @@ class FreshnessRunner:
         )
 
 
+DB_DISPLAY_NAMES: dict[str, tuple[str, str]] = {}
+
+
+def render_report_markdown(rows, matrix) -> str:
+    return ""
+
+
 def _rederive_category(kind: str, scope: str) -> str | None:
     """Reverse-map a checkpoint kind + scope back to a dispatch category.
 
