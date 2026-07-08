@@ -253,17 +253,13 @@ class TestRecomputeLocalCount:
         counted. A scope-blind implementation would return the global
         table count instead.
 
-        Bilingual-collapse compensation for kind='cases' + lang='tc':
-        because upsert_case collapses en+tc rows to lang='en', a plain
-        ``WHERE lang='tc'`` count silently drops bilingual rows.
-        recompute_local_count OR's lang='en' into the tc-cases filter
-        so the TC bucket is countable against HKLII's
-        getmetacase?lang=tc (which includes bilingual). The 'hkcfa'
-        assertion below therefore returns 3 (2 en-only + 1 tc-only) —
-        the compensation over-counts slightly but that's still a
-        fail-safe direction (STALE, not FRESH) and it finally allows
-        parity on heavily bilingual courts where en-only is rare. See
-        finding #4 in the D2 adversarial review pass.
+        Post-2026-07-08 fix: ``recompute_local_count("cases", scope,
+        "tc")`` without ``sidecar_count`` returns the deterministic
+        tc-only count. The bilingual half is supplied by the caller
+        as a disk-walked sidecar count. Prior expectation counted 2
+        en-only + 1 tc-only = 3 under the OR-lang-en compensation,
+        which over-counted by every en-only row — parity never held
+        for any court with en-only content.
         """
         db = CheckpointDB(":memory:")
         # hkcfa/en: 2 rows
@@ -286,12 +282,19 @@ class TestRecomputeLocalCount:
 
         assert db.recompute_local_count("cases", "hkcfa", "en") == 2
         assert db.recompute_local_count("cases", "hkca", "en") == 1
-        # hkcfa/tc counts 2 en-only + 1 tc-only under the collapse
-        # compensation. Different scope (hkca) still isolated because
-        # scope is the top filter.
-        assert db.recompute_local_count("cases", "hkcfa", "tc") == 3
-        # Sanity: scope isolation still holds for the compensated path.
-        assert db.recompute_local_count("cases", "hkca", "tc") == 1
+        # hkcfa/tc = 1 tc-only row (no sidecar_count passed → naive).
+        assert db.recompute_local_count("cases", "hkcfa", "tc") == 1
+        # hkca has no tc-only rows at all.
+        assert db.recompute_local_count("cases", "hkca", "tc") == 0
+        # Sidecar count adds on top (the caller's disk-walked bilingual
+        # count is added to naive tc-only). Zero-sidecar is the same
+        # as omitting.
+        assert db.recompute_local_count(
+            "cases", "hkcfa", "tc", sidecar_count=5,
+        ) == 6
+        assert db.recompute_local_count(
+            "cases", "hkca", "tc", sidecar_count=3,
+        ) == 3
 
     def test_only_counts_downloaded_status(self):
         """status='downloaded' is the only kind the local corpus

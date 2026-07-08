@@ -1732,6 +1732,7 @@ class CheckpointDB:
 
     def recompute_local_count(
         self, kind: str, scope: str, lang: str,
+        sidecar_count: int | None = None,
     ) -> int:
         """Refresh local_count / local_counted_at for a bucket by
         running the kind-specific SELECT COUNT(*) over the
@@ -1744,21 +1745,28 @@ class CheckpointDB:
         on conflict — this writer owns local_count / local_counted_at
         only.
 
-        Bilingual-collapse compensation for kind='cases' + lang='tc':
+        Bilingual-collapse handling for ``kind='cases'`` + ``lang='tc'``:
         :meth:`upsert_case` collapses every bilingual (en+tc) row to
-        lang='en' via a CASE expression, so a naive ``WHERE lang='tc'``
-        count silently drops all bilingual entries. HKLII's
-        ``getmetacase?lang=tc`` count includes those cases (they have a
-        TC rendering on the wire), so the mismatch would be permanent
-        and every hkcfa/tc probe would false-STALE the bucket forever
-        — burning wire on daily re-scrapes for no gain. We compensate
-        by OR-ing lang='en' into the TC-cases filter: it slightly
-        over-counts by true en-only rows (schema can't distinguish
-        bilingual-collapsed-to-en from en-only), but the over-count
-        still fails safe (STALE, never FRESH), and for courts where
-        en-only is rare parity is finally achievable. Legis / hopt
-        kinds keep the strict per-lang count because those tables
-        have no collapse rule.
+        lang='en', so ``WHERE lang='tc'`` returns tc-only rows and
+        misses the bilingual half of HKLII's ``getmetacase?lang=tc``
+        count. The prior OR-lang-en compensation over-counted by every
+        en-only row (schema can't distinguish bilingual-collapsed-to-en
+        from true en-only), which permanently blocked parity for any
+        court with any en-only content — hkca/tc landed 39170 vs a live
+        9830 on the 2026-07-08 live probe.
+
+        The right split identifies bilingual rows from disk: each
+        bilingual case has a ``*.tc.json`` sidecar written by
+        :mod:`case_translations`. Callers with filesystem access
+        (:class:`freshness.FreshnessRunner`) walk the disk and pass
+        the count via ``sidecar_count``. Without it we return the
+        deterministic tc-only count — safe (STALE, not FRESH) but the
+        parity comparison only holds when the caller supplies the
+        sidecar count.
+
+        Legis / hopt kinds are unaffected — those tables have no
+        collapse rule and their per-lang counts are direct.
+        ``sidecar_count`` is silently ignored for those kinds.
         """
         if kind not in _FRESHNESS_KINDS:
             raise ValueError(
@@ -1766,21 +1774,14 @@ class CheckpointDB:
                 f"expected one of {_FRESHNESS_KINDS}"
             )
         table, scope_col = _FRESHNESS_TABLE_BY_KIND[kind]
-        if kind == "cases" and lang == "tc":
-            row = self._conn.execute(
-                f"SELECT COUNT(*) FROM {table} "
-                f"WHERE {scope_col}=? "
-                "AND lang IN ('tc', 'en') "
-                "AND status='downloaded'",
-                (scope,),
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                f"SELECT COUNT(*) FROM {table} "
-                f"WHERE {scope_col}=? AND lang=? AND status='downloaded'",
-                (scope, lang),
-            ).fetchone()
+        row = self._conn.execute(
+            f"SELECT COUNT(*) FROM {table} "
+            f"WHERE {scope_col}=? AND lang=? AND status='downloaded'",
+            (scope, lang),
+        ).fetchone()
         count = int(row[0]) if row else 0
+        if kind == "cases" and lang == "tc" and sidecar_count:
+            count += int(sidecar_count)
         now = int(time.time())
         self._conn.execute(
             "INSERT INTO db_freshness "
