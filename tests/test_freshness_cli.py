@@ -156,7 +156,7 @@ class TestCheckFreshnessBehaviour:
         # the completion timestamp AFTER the probe runs. Easier: patch
         # the runner's stale_buckets / first_run_missing return to [].
         with patch(
-            "hklii_downloader.cli.ProxyPool", _FakePool,
+            "hklii_downloader.proxy_pool.ProxyPool", _FakePool,
         ), patch(
             "hklii_downloader.freshness.FreshnessRunner.stale_buckets",
             return_value=[],
@@ -182,7 +182,7 @@ class TestCheckFreshnessBehaviour:
 
         _FakePool = self._patch_pool()
         with patch(
-            "hklii_downloader.cli.ProxyPool", _FakePool,
+            "hklii_downloader.proxy_pool.ProxyPool", _FakePool,
         ), patch(
             "hklii_downloader.freshness.FreshnessRunner.stale_buckets",
             return_value=[FreshnessRow("cases", "hkcfa", "en")],
@@ -206,7 +206,7 @@ class TestCheckFreshnessBehaviour:
 
         _FakePool = self._patch_pool()
         with patch(
-            "hklii_downloader.cli.ProxyPool", _FakePool,
+            "hklii_downloader.proxy_pool.ProxyPool", _FakePool,
         ), patch(
             "hklii_downloader.freshness.FreshnessRunner.stale_buckets",
             return_value=[FreshnessRow("cases", "hkcfa", "en")],
