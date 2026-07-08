@@ -380,14 +380,20 @@ class D3Runner:
         return await self.fetch_pending(limit=self._limit)
 
     async def fetch_pending(self, limit: int | None = None) -> D3RunResult:
-        """Drain pending rows: metadata JSON, then optional PDF binary.
+        """Drain pending rows for this runner's family set.
 
-        Rows whose ``abbr`` does not resolve to a known family (someone
-        else wrote them) are marked failed rather than crashing the
-        whole run — one bad row must not block the queue.
+        Both :meth:`CheckpointDB.release_in_progress_hopt` and
+        :meth:`claim_pending_hopt` are called with an abbr filter so a
+        D3 run NEVER touches HoptRunner-owned rows (bacpg / bahkg /
+        hktmc / hktml / hkts) or D3 rows for slugs outside this run's
+        ``--slug`` scope. Without this filter, foreign rows would be
+        marked failed via the unknown-family path — a permanent
+        data-loss corruption because ``upsert_hopt_document``
+        preserves status on conflict.
         """
-        self._checkpoint.release_in_progress_hopt()
         family_by_slug = {f.slug: f for f in self._families}
+        abbr_scope = tuple(family_by_slug.keys())
+        self._checkpoint.release_in_progress_hopt(abbrs=abbr_scope)
         result = D3RunResult(
             langs_enumerated={
                 slug: set(langs)
@@ -396,11 +402,13 @@ class D3Runner:
         )
         remaining = limit if limit is not None else -1
         while remaining != 0:
-            row = self._checkpoint.claim_pending_hopt()
+            row = self._checkpoint.claim_pending_hopt(abbrs=abbr_scope)
             if row is None:
                 break
             family = family_by_slug.get(row.abbr)
             if family is None:
+                # Defensive: the SQL scope should prevent this branch,
+                # but if it fires (schema change, race), fail-close.
                 self._checkpoint.mark_hopt_failed(
                     row.abbr, row.year, row.num, row.lang,
                     error=f"unknown family for abbr={row.abbr}",
