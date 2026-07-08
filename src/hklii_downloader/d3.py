@@ -99,6 +99,30 @@ class D3Listing:
     entries: list[D3Entry] = field(default_factory=list)
 
 
+def pdf_url(family: D3Family, response: dict) -> str | None:
+    """Resolve the ``pdf`` field in a fetch response into a hop-2 URL.
+
+    - Shape A (histlaw): ``/static/en/histlaw/1964/1.pdf`` → joined to
+      the HKLII base.
+    - Shape C (hkiac / pcpdaab): already an absolute URL to an
+      external source-org host — returned unchanged.
+    - Shape B (hklrccp / hklrcr / pcpdc): no ``pdf`` field, or an
+      empty string — no second hop, return ``None``.
+
+    ``family`` is accepted for symmetry with other builders but is
+    not currently needed to route — the response body carries the
+    discriminator.
+    """
+    raw = response.get("pdf")
+    if not raw:
+        return None
+    if raw.startswith(("http://", "https://")):
+        return raw
+    if raw.startswith("/"):
+        return f"{_BASE_URL}{raw}"
+    return f"{_BASE_URL}/{raw}"
+
+
 def parse_files_response(body: dict) -> D3Listing:
     """Parse a ``gethoptfiles`` JSON response into a :class:`D3Listing`.
 
