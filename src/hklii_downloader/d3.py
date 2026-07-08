@@ -19,6 +19,7 @@ and unmotivated.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -379,8 +380,12 @@ class D3Runner:
         await self.enumerate_all()
         return await self.fetch_pending(limit=self._limit)
 
-    async def fetch_pending(self, limit: int | None = None) -> D3RunResult:
-        """Drain pending rows for this runner's family set.
+    async def fetch_pending(
+        self,
+        limit: int | None = None,
+        on_progress: Callable[["D3RunResult"], None] | None = None,
+    ) -> D3RunResult:
+        """Drain pending rows for this runner's family set, concurrently.
 
         Both :meth:`CheckpointDB.release_in_progress_hopt` and
         :meth:`claim_pending_hopt` are called with an abbr filter so a
@@ -390,6 +395,10 @@ class D3Runner:
         marked failed via the unknown-family path — a permanent
         data-loss corruption because ``upsert_hopt_document``
         preserves status on conflict.
+
+        ``self._workers`` workers run in parallel via
+        :func:`asyncio.gather`; ordering across workers is not
+        preserved but every claimed row is fetched exactly once.
         """
         family_by_slug = {f.slug: f for f in self._families}
         abbr_scope = tuple(family_by_slug.keys())
@@ -400,50 +409,75 @@ class D3Runner:
                 for slug, langs in self.langs_enumerated.items()
             },
         )
-        remaining = limit if limit is not None else -1
-        while remaining != 0:
-            row = self._checkpoint.claim_pending_hopt(abbrs=abbr_scope)
-            if row is None:
-                break
-            family = family_by_slug.get(row.abbr)
-            if family is None:
-                # Defensive: the SQL scope should prevent this branch,
-                # but if it fires (schema change, race), fail-close.
-                self._checkpoint.mark_hopt_failed(
-                    row.abbr, row.year, row.num, row.lang,
-                    error=f"unknown family for abbr={row.abbr}",
-                )
-                result.failed += 1
-                if remaining > 0:
-                    remaining -= 1
-                continue
-            try:
-                metadata, pdf_bytes = await _fetch_row(
-                    self._get, family, row.year, row.num, row.lang,
-                )
-                if pdf_bytes is None:
-                    formats = save_d3_html(
-                        self._output_dir, family,
-                        row.year, row.num, row.lang, metadata,
+        # Prefer the per-call ``limit`` when passed, else fall back to
+        # the runner-level default so ``run()`` still respects it.
+        effective_limit = limit if limit is not None else self._limit
+        remaining = {"n": effective_limit if effective_limit is not None else -1}
+        counter_lock = asyncio.Lock()
+
+        async def worker() -> None:
+            while True:
+                async with counter_lock:
+                    if remaining["n"] == 0:
+                        return
+                    row = self._checkpoint.claim_pending_hopt(
+                        abbrs=abbr_scope,
                     )
-                else:
-                    text = extract_pdf_text(pdf_bytes)
-                    formats = save_d3_pdf(
-                        self._output_dir, family,
-                        row.year, row.num, row.lang,
-                        metadata, pdf_bytes, text,
+                    if row is None:
+                        return
+                    if remaining["n"] > 0:
+                        remaining["n"] -= 1
+
+                family = family_by_slug.get(row.abbr)
+                if family is None:
+                    # Defensive: the SQL scope should prevent this branch,
+                    # but fail-close if it fires (schema change, race).
+                    self._checkpoint.mark_hopt_failed(
+                        row.abbr, row.year, row.num, row.lang,
+                        error=f"unknown family for abbr={row.abbr}",
                     )
-                self._checkpoint.mark_hopt_downloaded(
-                    row.abbr, row.year, row.num, row.lang, formats,
-                )
-                result.downloaded += 1
-            except D3FetchError as exc:
-                self._checkpoint.mark_hopt_failed(
-                    row.abbr, row.year, row.num, row.lang, str(exc),
-                )
-                result.failed += 1
-            if remaining > 0:
-                remaining -= 1
+                    async with counter_lock:
+                        result.failed += 1
+                    continue
+
+                try:
+                    metadata, pdf_bytes = await _fetch_row(
+                        self._get, family, row.year, row.num, row.lang,
+                    )
+                    if pdf_bytes is None:
+                        formats = save_d3_html(
+                            self._output_dir, family,
+                            row.year, row.num, row.lang, metadata,
+                        )
+                    else:
+                        text = extract_pdf_text(pdf_bytes)
+                        formats = save_d3_pdf(
+                            self._output_dir, family,
+                            row.year, row.num, row.lang,
+                            metadata, pdf_bytes, text,
+                        )
+                    self._checkpoint.mark_hopt_downloaded(
+                        row.abbr, row.year, row.num, row.lang, formats,
+                    )
+                    async with counter_lock:
+                        result.downloaded += 1
+                except D3FetchError as exc:
+                    _log.warning(
+                        "d3 fetch failed for %s/%s/%s (%s): %s",
+                        row.abbr, row.year, row.num, row.lang, exc,
+                    )
+                    self._checkpoint.mark_hopt_failed(
+                        row.abbr, row.year, row.num, row.lang, str(exc),
+                    )
+                    async with counter_lock:
+                        result.failed += 1
+
+                if on_progress is not None:
+                    on_progress(result)
+
+        await asyncio.gather(
+            *[worker() for _ in range(self._workers)]
+        )
         return result
 
 
