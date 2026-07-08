@@ -551,6 +551,114 @@ class TestUkpcRunnerCasesTable:
             db.close()
 
 
+class TestUkpcRunResultLangsEnumerated:
+    """``UkpcRunResult.langs_enumerated`` reports which langs the
+    runner actually completed a sweep for. The freshness ledger uses
+    it downstream — ``_run_scrape_ukpc`` iterates ``langs_enumerated``
+    for ``mark_bucket_scraped`` so a phantom row is never written for
+    a lang whose enum 500'd (or was never attempted).
+
+    Design rationale: UKPC's ``gethoptfiles?dbcat=C&lang=TC`` endpoint
+    has historically 500'd, but the runner opportunistically tries
+    both langs on every sweep so we detect the day HKLII starts
+    serving TC. Without ``langs_enumerated``, mark_bucket_scraped
+    would falsely stamp ``ukpc/tc.last_scrape_completed_at`` on every
+    scrape, misleading a future ``_fresh`` evaluation. See the
+    2026-07-08 sanity-check writeup at
+    ``docs/freshness-sanity-check.md``.
+    """
+
+    async def test_default_is_empty_tuple(self, tmp_path: Path):
+        """A freshly-constructed result has no langs_enumerated —
+        avoids accidentally marking anything until the runner has
+        actually completed at least one enum."""
+        r = UkpcRunResult()
+        assert r.langs_enumerated == ()
+
+    async def test_records_successful_enum(self, tmp_path: Path):
+        get = _wire_stub({"en": [(1997, 40, "[1997] UKPC 40",
+                                  "1997-07-29", "a")]})
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            r = await UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en",), workers=1,
+            ).run()
+        finally:
+            db.close()
+        assert r.langs_enumerated == ("en",)
+
+    async def test_successful_but_empty_enum_still_counts(
+        self, tmp_path: Path,
+    ):
+        """A lang whose enum returned totalfiles=0 (HKLII genuinely
+        empty for that lang) still counts as successfully swept — we
+        confirmed the wire state, that's what mark_bucket_scraped
+        is supposed to record."""
+
+        async def get(url, **kw):
+            return httpx.Response(200, json={
+                "totalfiles": 0, "files": [],
+            }, request=httpx.Request("GET", url))
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            r = await UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en", "tc"), workers=1,
+            ).run()
+        finally:
+            db.close()
+        assert set(r.langs_enumerated) == {"en", "tc"}
+
+    async def test_dropped_lang_when_enum_500s(self, tmp_path: Path):
+        """Real HKLII behaviour: TC endpoint 500s. That lang MUST
+        NOT appear in langs_enumerated so ``_run_scrape_ukpc`` skips
+        mark_bucket_scraped for it. Prevents the phantom
+        ``ukpc/tc.last_scrape_completed_at`` write flagged in the
+        sanity-check retro."""
+
+        async def get(url, **kw):
+            if "gethoptfiles" in url:
+                lang = url.split("lang=")[1].split("&")[0]
+                if lang == "TC":
+                    return httpx.Response(
+                        500, text="err",
+                        request=httpx.Request("GET", url),
+                    )
+                return httpx.Response(200, json={
+                    "totalfiles": 0, "files": [],
+                }, request=httpx.Request("GET", url))
+            raise AssertionError(url)
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            r = await UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en", "tc"), workers=1,
+            ).run()
+        finally:
+            db.close()
+        assert r.langs_enumerated == ("en",)
+
+    async def test_all_langs_failed_returns_empty(
+        self, tmp_path: Path,
+    ):
+        async def get(url, **kw):
+            return httpx.Response(500, text="err",
+                                  request=httpx.Request("GET", url))
+
+        db = CheckpointDB(str(tmp_path / ".checkpoint.db"))
+        try:
+            r = await UkpcRunner(
+                get=get, checkpoint=db, output_dir=tmp_path,
+                langs=("en", "tc"), workers=1,
+            ).run()
+        finally:
+            db.close()
+        assert r.langs_enumerated == ()
+
+
 class TestScrapeUkpcSubcommand:
     """`hklii scrape-ukpc` — CLI entry point, mirrors `scrape-hopt`."""
 

@@ -1260,3 +1260,67 @@ class TestScrapeRunnerMarksBuckets:
             "cases/ukpc/en db_freshness row has NULL "
             "last_scrape_completed_at. See finding #1."
         )
+
+    def test_scrape_ukpc_does_not_mark_tc_when_langs_enumerated_omits_tc(
+        self, tmp_path,
+    ):
+        """When UkpcRunner's TC enum 500s (real HKLII behaviour),
+        ``result.langs_enumerated`` returns ``('en',)`` and
+        ``_run_scrape_ukpc`` MUST NOT call mark_bucket_scraped for tc.
+
+        A phantom ukpc/tc row with populated
+        ``last_scrape_completed_at`` would mislead a future ``_fresh``
+        evaluation for tc — the sanity-check retro at
+        ``docs/freshness-sanity-check.md`` flagged this as the
+        UKPC-consistency smell to close.
+        """
+        from unittest.mock import patch
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.cli import main
+        from hklii_downloader.proxy_pool import PreflightResult
+        from hklii_downloader.ukpc import UkpcRunResult
+
+        out = tmp_path / "out"
+        out.mkdir()
+
+        async def ok_preflight(self):
+            return PreflightResult(
+                home_ip="203.0.113.1",
+                healthy_proxies=["http://localhost:8888"],
+            )
+
+        async def en_only_run(self, on_progress=None):
+            # Runner reports EN was swept, TC failed enum.
+            return UkpcRunResult(
+                downloaded=0, failed=0, langs_enumerated=("en",),
+            )
+
+        with patch(
+            "hklii_downloader.proxy_pool.ProxyPool.preflight", ok_preflight,
+        ), patch(
+            "hklii_downloader.ukpc.UkpcRunner.run", en_only_run,
+        ):
+            result = CliRunner().invoke(main, [
+                "scrape-ukpc",
+                "-p", "http://localhost:8888",
+                "-o", str(out),
+                "--lang", "both",
+            ])
+        assert result.exit_code == 0, result.output
+
+        db = CheckpointDB(str(out / ".checkpoint.db"))
+        try:
+            en = db.get_freshness_row("cases", "ukpc", "en")
+            tc = db.get_freshness_row("cases", "ukpc", "tc")
+        finally:
+            db.close()
+        assert en is not None
+        assert en.last_scrape_completed_at is not None, (
+            "expected ukpc/en marked scraped"
+        )
+        assert tc is None or tc.last_scrape_completed_at is None, (
+            "phantom ukpc/tc row was marked scraped even though "
+            "UkpcRunResult.langs_enumerated omitted tc — the CLI "
+            "iterated the input langs instead of the result."
+        )
