@@ -78,6 +78,36 @@ class HoptRecord:
     status: str
 
 
+@dataclass
+class DbFreshnessRecord:
+    """One row of db_freshness — per-(kind, scope, lang) freshness
+    ledger backing Phase D2 freshness-driven scraping.
+
+    Column ownership is split across three writers:
+      * wire-side (upsert_freshness_probe): live_count, live_updated_at,
+        live_probed_at, probe_error
+      * local-side (recompute_local_count): local_count, local_counted_at
+      * scrape-runner (mark_bucket_scraped): last_scrape_completed_at,
+        source_generation_id
+
+    Every non-key column is nullable — a first-run bucket exists with
+    every value NULL, a probe-only bucket has wire cols set and
+    scrape/local NULL, and so on. Callers interpret NULLs per the
+    fresh_definition rule in freshness.py.
+    """
+    kind: str                              # 'cases' | 'legis' | 'hopt'
+    scope: str                             # slug: 'hkcfa', 'ord', 'hkts'...
+    lang: str                              # 'en' | 'tc'
+    live_count: int | None                 # HKLII-reported count
+    live_updated_at: str | None            # HKLII 'timestamp', 'YYYY-MM-DD'
+    live_probed_at: int | None             # unix ts of last probe attempt
+    probe_error: str | None                # last non-200/non-JSON error
+    local_count: int | None                # our downloaded-status COUNT(*)
+    local_counted_at: int | None           # unix ts of last recompute
+    last_scrape_completed_at: int | None   # unix ts of last clean sweep
+    source_generation_id: int | None       # enum_runs.generation_id link
+
+
 _SCHEMA = """\
 CREATE TABLE IF NOT EXISTS cases (
     court    TEXT NOT NULL,
@@ -205,6 +235,44 @@ CREATE TABLE IF NOT EXISTS enum_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_enum_runs_completed
     ON enum_runs(completed_at);
+CREATE TABLE IF NOT EXISTS db_freshness (
+    -- Phase D2 freshness ledger. One row per (kind, scope, lang) triple
+    -- ('cases' × ALL_COURTS × en/tc, 'legis' × LEGIS_CAP_TYPES × en/tc,
+    -- 'hopt' × HOPT_ABBRS × en/tc, plus ukpc under kind='cases').
+    --
+    -- Column ownership is split three ways — each writer must touch
+    -- ONLY its own columns and use COALESCE-preserving semantics on
+    -- the others. Same discipline as upsert_hopt_document w.r.t.
+    -- status:
+    --   * upsert_freshness_probe (wire):     live_*, probe_error
+    --   * recompute_local_count (local):     local_count, local_counted_at
+    --   * mark_bucket_scraped (scrape run):  last_scrape_completed_at,
+    --                                        source_generation_id
+    --
+    -- A drift here silently corrupts the freshness signal: a probe
+    -- clobbering last_scrape_completed_at back to NULL would re-trigger
+    -- every scrape at the next update.
+    --
+    -- Composite natural PK + WITHOUT ROWID matches ord_reg_edges /
+    -- citations / case_parallel_cites convention. The table stays
+    -- small (~100 rows).
+    kind                     TEXT NOT NULL,
+    scope                    TEXT NOT NULL,
+    lang                     TEXT NOT NULL,
+    live_count               INTEGER,
+    live_updated_at          TEXT,
+    live_probed_at           INTEGER,
+    probe_error              TEXT,
+    local_count              INTEGER,
+    local_counted_at         INTEGER,
+    last_scrape_completed_at INTEGER,
+    source_generation_id     INTEGER,
+    PRIMARY KEY (kind, scope, lang)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_db_freshness_probed
+    ON db_freshness(live_probed_at);
+CREATE INDEX IF NOT EXISTS idx_db_freshness_scraped
+    ON db_freshness(last_scrape_completed_at);
 """
 
 _ENRICHMENT_KINDS = ("summary_en", "summary_zh", "appeal_history")
@@ -1599,6 +1667,48 @@ class CheckpointDB:
             bucket["total"] += n
             bucket[status] = bucket.get(status, 0) + n
         return result
+
+    # ---- db_freshness accessors (Phase D2) ---------------------------
+    #
+    # NOTE: these are placeholder stubs so the failing-test commit can
+    # reach assertion-level failure without ImportError / AttributeError.
+    # They deliberately return placeholder values (no-op / 0 / None /
+    # empty iter) that make the paired assertions FAIL. Real
+    # implementations ship in the paired feat: commit.
+
+    def upsert_freshness_probe(
+        self, kind: str, scope: str, lang: str, *,
+        live_count: int | None,
+        live_updated_at: str | None,
+        live_probed_at: int,
+        probe_error: str | None,
+    ) -> None:
+        # D2 stub — no-op, real impl in feat: commit.
+        return
+
+    def recompute_local_count(
+        self, kind: str, scope: str, lang: str,
+    ) -> int:
+        # D2 stub — returns 0 so assertions on real counts fail.
+        return 0
+
+    def mark_bucket_scraped(
+        self, kind: str, scope: str, lang: str, *,
+        completed_at: int,
+        source_generation_id: int | None = None,
+    ) -> None:
+        # D2 stub — no-op, real impl in feat: commit.
+        return
+
+    def get_freshness_row(
+        self, kind: str, scope: str, lang: str,
+    ) -> DbFreshnessRecord | None:
+        # D2 stub — returns None so isinstance assertions fail.
+        return None
+
+    def iter_freshness_rows(self):
+        # D2 stub — empty iterator, real impl in feat: commit.
+        return iter([])
 
     def close(self) -> None:
         self._conn.close()
