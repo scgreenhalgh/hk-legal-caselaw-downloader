@@ -162,8 +162,14 @@ def dispatch_url(category: str, slug: str, lang: str) -> str | None:
       ============  =======================================================
       cases         ``getmetacase?caseDb={slug}&lang={lang}``
       cases-ukpc    ``getmetahopt?dbcat=C&abbr={slug}&lang={lang}``
-      legis         ``getmetalegis?capType={slug}&lang={lang}``
+      legis         ``getmetalegis?cap_type={slug}&lang={lang}``
       legis-hopt    ``getmetahopt?dbcat=other&abbr={slug}&lang={lang}``
+
+    Legis note: ``getmetalegis`` uses the underscore param name
+    ``cap_type`` (all other endpoints use camelCase). CamelCase
+    ``capType=…`` silently returns count=0 rather than 400 — a
+    classic silent-drift trap. See the 2026-07-08 test-correction
+    commit for the live probe.
       ============  =======================================================
 
     ``other-unknown`` and ``legis-histlaw`` return None — the D3
@@ -177,7 +183,7 @@ def dispatch_url(category: str, slug: str, lang: str) -> str | None:
     if category == "cases-ukpc":
         return f"{_BASE}/api/getmetahopt?dbcat=C&abbr={slug}&lang={lang}"
     if category == "legis":
-        return f"{_BASE}/api/getmetalegis?capType={slug}&lang={lang}"
+        return f"{_BASE}/api/getmetalegis?cap_type={slug}&lang={lang}"
     if category == "legis-hopt":
         return f"{_BASE}/api/getmetahopt?dbcat=other&abbr={slug}&lang={lang}"
     # legis-histlaw / other-unknown / anything else — no known endpoint.
