@@ -3485,6 +3485,7 @@ async def _run_update_check_freshness(
         matrix = load_default_matrix()
         freshness = FreshnessRunner(
             get=pool.get, checkpoint=db, matrix=matrix,
+            output_dir=runner.output,
         )
         outcomes = await freshness.probe_all()
         stale = freshness.stale_buckets()
@@ -3634,6 +3635,7 @@ async def _run_check_freshness(
         matrix = load_default_matrix()
         freshness = FreshnessRunner(
             get=pool.get, checkpoint=db, matrix=matrix,
+            output_dir=output,
         )
         outcomes = await freshness.probe_all()
         stale = freshness.stale_buckets()

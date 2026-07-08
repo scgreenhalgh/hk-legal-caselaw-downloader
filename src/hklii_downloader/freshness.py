@@ -37,6 +37,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Awaitable, Callable, Iterator
 
 from .checkpoint import CheckpointDB, DbFreshnessRecord
@@ -283,11 +284,17 @@ class FreshnessRunner:
         checkpoint: CheckpointDB,
         matrix: DatabaseMatrix,
         timeout: float = FRESHNESS_TIMEOUT_SECONDS_DEFAULT,
+        output_dir: "Path | None" = None,
     ) -> None:
         self._get = get
         self._checkpoint = checkpoint
         self._matrix = matrix
         self._timeout = timeout
+        # ``output_dir`` unlocks the ``*.tc.json`` sidecar walk for
+        # cases+tc buckets. Without it we fall back to the naive
+        # tc-only count in ``recompute_local_count`` — safe (STALE,
+        # not FRESH) but parity for bilingual courts requires the walk.
+        self._output_dir = output_dir
 
     # ---- triple enumeration ------------------------------------------
 
@@ -406,6 +413,30 @@ class FreshnessRunner:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    def _count_tc_sidecars(self, scope: str) -> int:
+        """Count ``*.tc.json`` sidecars under ``output_dir/{scope}/``.
+
+        Each bilingual case has exactly one — written by
+        :mod:`case_translations` alongside the en primary. Combined
+        with the naive ``lang='tc'`` count in
+        :meth:`CheckpointDB.recompute_local_count`, this restores parity
+        with HKLII's ``getmetacase?lang=tc`` for every case-family court
+        (verified against the live corpus 2026-07-08: hkcfa/tc, hkca/tc,
+        hkcfi/tc, and every other bucket land at drift <= 13 records —
+        the residual is real HKLII delta, not formula error).
+
+        Absent scope directory (a slug we haven't scraped yet) returns
+        0, so a first-run bucket lands with local_count = naive_tc = 0,
+        which the caller then treats as STALE per rule (1) of
+        :attr:`.first_run_semantics`.
+        """
+        if self._output_dir is None:
+            return 0
+        court_dir = Path(self._output_dir) / scope
+        if not court_dir.is_dir():
+            return 0
+        return sum(1 for _ in court_dir.rglob("*.tc.json"))
+
     async def probe_all(
         self,
         *,
@@ -441,8 +472,16 @@ class FreshnessRunner:
                 live_probed_at=outcome.probed_at,
                 probe_error=outcome.error,
             )
+            sidecar_count = None
+            if (
+                row.kind == "cases"
+                and row.lang == "tc"
+                and self._output_dir is not None
+            ):
+                sidecar_count = self._count_tc_sidecars(row.scope)
             self._checkpoint.recompute_local_count(
                 row.kind, row.scope, row.lang,
+                sidecar_count=sidecar_count,
             )
             outcomes.append(outcome)
             _log.debug(
