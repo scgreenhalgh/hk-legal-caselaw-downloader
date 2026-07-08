@@ -557,6 +557,39 @@ class TestProbeAllPersistence:
         assert row is not None
         assert row.local_count == 3
 
+    async def test_legis_sc_lang_probes_and_persists(self):
+        """SC lang for legis+{ord,reg,instrument} is a real HKLII slice
+        (ord SC=838, reg SC=2253, instrument SC=63 per 2026-07-08 live
+        probe). Previously filtered out at ``_triples`` yield time, so
+        no freshness row ever landed for the trilingual legis
+        databases; enabling SC gives the operator visibility on drift.
+
+        Local corpus is still EN+TC only per ``legis.LEGIS_LANGS``, so
+        SC buckets stay permanent-STALE until an SC scraper ships —
+        that's the correct signal ('HKLII has 838 ordinances in SC,
+        we have 0') rather than silent gap.
+        """
+        matrix = _make_matrix(legis={"ord": ("en", "sc", "tc")})
+        db = CheckpointDB(":memory:")
+        get = _FakeGet(default_body={"count": 838, "timestamp": "2026-07-08"})
+        runner = FreshnessRunner(
+            get=get, checkpoint=db, matrix=matrix,
+        )
+        try:
+            await runner.probe_all()
+            sc_row = db.get_freshness_row("legis", "ord", "sc")
+        finally:
+            db.close()
+        assert sc_row is not None, (
+            "SC lang was filtered out — freshness never probes trilingual "
+            "legis dbs. Remove sc from the _ACCEPTED_LANGS blocklist."
+        )
+        assert sc_row.live_count == 838
+        assert (
+            "https://www.hklii.hk/api/getmetalegis?cap_type=ord&lang=sc"
+            in get.calls
+        )
+
     async def test_cases_tc_local_count_uses_sidecar_walk(self, tmp_path):
         """probe_all for a cases+tc bucket walks output_dir/{scope}/ for
         ``*.tc.json`` sidecars and adds that count on top of the naive
