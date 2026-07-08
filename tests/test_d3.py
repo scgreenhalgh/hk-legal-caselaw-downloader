@@ -323,3 +323,53 @@ class TestD3PdfUrl:
 
         family = next(f for f in D3_FAMILIES if f.slug == "hkiac")
         assert pdf_url(family, {"pdf": ""}) is None
+
+
+class TestD3SaveHtml:
+    """save_d3_html — shape-B slugs, one JSON sidecar per row."""
+
+    def test_writes_json_at_output_d3_layout(self, tmp_path):
+        import json
+        from hklii_downloader.d3 import D3_FAMILIES, save_d3_html
+
+        family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+        response = {
+            "id": 5338,
+            "title": "Outcome Related Fee Structures for Arbitration",
+            "neutral": "[2020] HKLRCCP 2",
+            "date": "2020-12-01",
+            "file_type": 1,
+            "content": "<h3>...</h3>",
+        }
+
+        formats = save_d3_html(tmp_path, family, 2020, 2, "en", response)
+
+        assert formats == ["json"]
+        path = (
+            tmp_path / "d3" / "hklrccp" / "2020" / "2"
+            / "hklrccp_2020_2_en.json"
+        )
+        assert path.exists()
+        stored = json.loads(path.read_text())
+        assert stored["title"] == (
+            "Outcome Related Fee Structures for Arbitration"
+        )
+        assert stored["file_type"] == 1
+        assert stored["content"] == "<h3>...</h3>"
+
+    def test_tc_lang_lands_under_same_year_num_dir(self, tmp_path):
+        from hklii_downloader.d3 import D3_FAMILIES, save_d3_html
+
+        family = next(f for f in D3_FAMILIES if f.slug == "pcpdc")
+        save_d3_html(
+            tmp_path, family, 2020, 1, "en",
+            {"content": "<p>EN body</p>"},
+        )
+        save_d3_html(
+            tmp_path, family, 2020, 1, "tc",
+            {"content": "<p>TC body</p>"},
+        )
+
+        base = tmp_path / "d3" / "pcpdc" / "2020" / "1"
+        assert (base / "pcpdc_2020_1_en.json").exists()
+        assert (base / "pcpdc_2020_1_tc.json").exists()
