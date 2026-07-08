@@ -702,6 +702,28 @@ _REPORT_BUCKETS = ("cases", "legis", "other")
 _EM_DASH = "—"
 
 
+def _format_count_cell(local, live) -> str:
+    """Render one ``local / live`` count cell for the report.
+
+    - Both em-dash → plain ``— / —``.
+    - Either side em-dash → plain (we don't have enough to compute a
+      delta, so no bold).
+    - Both integers AND equal → plain ``N / N``.
+    - Both integers AND unequal → ``**local / live (±delta)**`` with a
+      SIGNED delta (``+`` when HKLII is ahead of us, ``-`` when local
+      is ahead — the rare rollback case).
+
+    Bold + inline delta lets a scan of the report pick up every drift
+    bucket at a glance without a separate column.
+    """
+    if not isinstance(local, int) or not isinstance(live, int):
+        return f"{local} / {live}"
+    if local == live:
+        return f"{local} / {live}"
+    delta = live - local
+    return f"**{local} / {live} ({delta:+d})**"
+
+
 def render_report_markdown(
     rows: "list[DbFreshnessRecord]",
     matrix: "DatabaseMatrix",
@@ -760,7 +782,7 @@ def render_report_markdown(
                 local = found.local_count if found.local_count is not None else _EM_DASH
                 live = found.live_count if found.live_count is not None else _EM_DASH
                 updated = found.live_updated_at or _EM_DASH
-                row_cells.append(f"{local} / {live}")
+                row_cells.append(_format_count_cell(local, live))
                 row_cells.append(updated)
             lines.append("| " + " | ".join(str(c) for c in row_cells) + " |")
 
