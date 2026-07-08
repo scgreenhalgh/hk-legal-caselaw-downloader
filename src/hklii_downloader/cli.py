@@ -2712,8 +2712,11 @@ def scrape_d3(
             "Scraping without a proxy exposes your IP. Continue?",
             abort=True,
         )
-    from .d3 import D3_FAMILIES, D3_LANGS
-    default_slugs = tuple(f.slug for f in D3_FAMILIES)
+    from .d3 import ACTIVE_D3_FAMILIES, D3_LANGS
+    # Skip disabled families (e.g. hkiac after its source URLs 404'd)
+    # from the CLI's default slug set. --slug X still lets the operator
+    # force a disabled slug if they need to smoke-test it.
+    default_slugs = tuple(f.slug for f in ACTIVE_D3_FAMILIES)
     slugs = tuple(
         s.strip() for s in (slug_str or ",".join(default_slugs)).split(",")
         if s.strip()
@@ -3386,8 +3389,10 @@ async def _dispatch_update_plan(runner, no_events: bool) -> int:
                 # D3 rows live under kind='hopt' in db_freshness so the
                 # same hopt freshness filter applies — pass the D3
                 # slugs and langs explicitly.
-                from .d3 import D3_FAMILIES, D3_LANGS
-                d3_all_slugs = tuple(f.slug for f in D3_FAMILIES)
+                from .d3 import ACTIVE_D3_FAMILIES, D3_LANGS
+                # Dispatcher path only enumerates active families —
+                # `hklii update` never touches disabled slugs.
+                d3_all_slugs = tuple(f.slug for f in ACTIVE_D3_FAMILIES)
                 if runner.settings.get("include_freshness_check"):
                     d3_slugs, d3_langs = _filter_fresh_hopt_buckets(
                         runner.output, d3_all_slugs, D3_LANGS,

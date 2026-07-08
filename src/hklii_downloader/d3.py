@@ -53,15 +53,26 @@ class D3Family:
     fetch_endpoint: str
     wire_abbr: str
     content_format: str
+    enabled: bool = True
 
 
+# hkiac.org has restructured — every PDF URL in HKLII's getother
+# metadata (2001-2021 UDRP decisions) returns 404 as of 2026-07-09,
+# and the category page itself 404s so no obvious replacement pattern
+# exists. Disabled at family-spec level; if HKLII updates the metadata
+# or HKIAC republishes under a discoverable path, flip this back to
+# True. See `memory/d3-live-wire-findings.md`.
 D3_FAMILIES: tuple[D3Family, ...] = (
     D3Family("histlaw", "H", "gethistlaw", "hkhistlaws", "pdf"),
-    D3Family("hkiac", "O", "getother", "hkiac", "pdf"),
+    D3Family("hkiac", "O", "getother", "hkiac", "pdf", enabled=False),
     D3Family("hklrccp", "O", "getother", "hklrccp", "html"),
     D3Family("hklrcr", "O", "getother", "hklrcr", "html"),
     D3Family("pcpdaab", "O", "getother", "pcpdaab", "pdf"),
     D3Family("pcpdc", "O", "getother", "pcpdc", "html"),
+)
+
+ACTIVE_D3_FAMILIES: tuple[D3Family, ...] = tuple(
+    f for f in D3_FAMILIES if f.enabled
 )
 
 D3_LANGS: tuple[str, ...] = ("en", "tc", "sc")
@@ -321,7 +332,7 @@ class D3Runner:
         get: Callable,
         checkpoint,
         output_dir: Path,
-        families: tuple[D3Family, ...] = D3_FAMILIES,
+        families: tuple[D3Family, ...] = ACTIVE_D3_FAMILIES,
         langs: tuple[str, ...] = D3_LANGS,
         workers: int = 4,
         limit: int | None = None,
