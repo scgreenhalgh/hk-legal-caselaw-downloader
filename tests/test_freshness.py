@@ -156,6 +156,13 @@ class TestDispatchUrl:
 
 # ---------- _fresh --------------------------------------------------------
 
+# Sentinel for _fresh_row's `last_scrape_completed_at` kwarg. Using
+# `None` as the "not passed → use default" signal collided with the
+# test that WANTS to check the `last_scrape_completed_at IS NULL`
+# STALE branch — the sentinel lets callers distinguish the two.
+_UNSET = object()
+
+
 def _fresh_row(
     *,
     kind: str = "cases",
@@ -167,7 +174,7 @@ def _fresh_row(
     probe_error: str | None = None,
     local_count: int | None = 100,
     local_counted_at: int | None = 1_720_000_100,
-    last_scrape_completed_at: int | None = None,
+    last_scrape_completed_at=_UNSET,
     source_generation_id: int | None = None,
 ) -> DbFreshnessRecord:
     """Convenience constructor for `_fresh` tests. Defaults produce an
@@ -175,7 +182,7 @@ def _fresh_row(
     scrape completion — one day after the upstream update, comfortably
     past the date-boundary check.
     """
-    if last_scrape_completed_at is None:
+    if last_scrape_completed_at is _UNSET:
         last_scrape_completed_at = _hkt_ts_at("2026-07-08")
     return DbFreshnessRecord(
         kind=kind, scope=scope, lang=lang,
