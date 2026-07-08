@@ -118,6 +118,10 @@ class TestD3PathRegex:
             ("/en/other/pcpdaab/2020/1", "2020", "1"),
             # TC lang lane
             ("/tc/other/hklrccp/2020/2", "2020", "2"),
+            # SC lang lane — hklrccp/hklrcr/pcpdc publish Simplified Chinese
+            ("/sc/other/hklrccp/2020/2", "2020", "2"),
+            ("/sc/other/hklrcr/2019/3", "2019", "3"),
+            ("/sc/other/pcpdc/2018/5", "2018", "5"),
             # nd year — defensive parity with hopt
             ("/en/legis/histlaw/nd/7/", "nd", "7"),
         ],
