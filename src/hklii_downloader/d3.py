@@ -449,7 +449,7 @@ async def _fetch_row(
     return metadata, resp.content
 
 
-def pdf_url(family: D3Family, response: dict) -> str | None:
+def pdf_url(family: D3Family, response: object) -> str | None:
     """Resolve the ``pdf`` field in a fetch response into a hop-2 URL.
 
     - Shape A (histlaw): ``/static/en/histlaw/1964/1.pdf`` → joined to
@@ -462,9 +462,15 @@ def pdf_url(family: D3Family, response: dict) -> str | None:
     ``family`` is accepted for symmetry with other builders but is
     not currently needed to route — the response body carries the
     discriminator.
+
+    Malformed response bodies (JSON ``null``, list, string, number)
+    degrade to ``None`` rather than raise — a rare HKLII shape
+    surprise must not crash the worker.
     """
+    if not isinstance(response, dict):
+        return None
     raw = response.get("pdf")
-    if not raw:
+    if not isinstance(raw, str) or not raw:
         return None
     if raw.startswith(("http://", "https://")):
         return raw
