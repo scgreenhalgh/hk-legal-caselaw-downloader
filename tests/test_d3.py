@@ -1392,6 +1392,58 @@ class TestD3RunnerAbbrScoping:
         finally:
             db.close()
 
+    async def test_fetch_pending_runs_workers_concurrently(self, tmp_path):
+        """H3 — `workers=N` must fan out concurrent fetches.
+
+        Seeds 8 pending rows and configures workers=4. Mock get() spends
+        a tick in-flight and records max-concurrent. If fetch_pending is
+        the current serial while-loop, max-concurrent will be 1.
+        """
+        import asyncio
+
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            for num in range(1, 9):
+                db.upsert_hopt_document(
+                    abbr="hklrccp", year=2020, num=num, lang="en",
+                    title=f"T{num}", neutral=None, doc_date=None,
+                )
+
+            gauge = {"current": 0, "max": 0}
+            metadata = {"content": "<p>ok</p>"}
+
+            async def mock_get(url, **kw):
+                gauge["current"] += 1
+                gauge["max"] = max(gauge["max"], gauge["current"])
+                await asyncio.sleep(0.02)
+                gauge["current"] -= 1
+                return httpx.Response(
+                    200, json=metadata,
+                    request=httpx.Request("GET", url),
+                )
+
+            family = next(f for f in D3_FAMILIES if f.slug == "hklrccp")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",), workers=4,
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 8
+            assert result.failed == 0
+            assert gauge["max"] > 1, (
+                f"expected concurrent fetches (workers=4) but observed "
+                f"max in-flight = {gauge['max']} — fetch is still serial"
+            )
+        finally:
+            db.close()
+
     async def test_does_not_release_in_progress_hopt_family_rows(
         self, tmp_path,
     ):
