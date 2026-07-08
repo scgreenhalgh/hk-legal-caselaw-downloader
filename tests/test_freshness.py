@@ -116,11 +116,22 @@ class TestDispatchUrl:
     @pytest.mark.parametrize("slug", _LEGIS_CAP_TYPES)
     @pytest.mark.parametrize("lang", _LANGS)
     def test_legis_cap_types_return_getmetalegis(self, slug, lang):
-        """ord/reg/instrument use getmetalegis?capType=..."""
+        """ord/reg/instrument use ``getmetalegis?cap_type=...`` (underscore).
+
+        Prior expectation pinned the camelCase ``capType`` shape used by
+        every OTHER HKLII query endpoint. Live probe on 2026-07-08 via
+        the 20-proxy pool showed that ``getmetalegis`` is the outlier —
+        it silently returns ``{"count":0,"timestamp":"…"}`` for any
+        camelCase param, only responding with real per-DB totals when
+        given the underscore form. The SPA at
+        ``https://www.hklii.hk/en/legis/ord/`` uses precisely
+        ``?cap_type=ord&lang=EN`` (confirmed via Playwright network
+        capture), which is our source of truth for this fix.
+        """
         url = dispatch_url("legis", slug, lang)
         assert url == (
             f"https://www.hklii.hk/api/getmetalegis"
-            f"?capType={slug}&lang={lang}"
+            f"?cap_type={slug}&lang={lang}"
         )
 
     @pytest.mark.parametrize("slug", _HOPT_ABBRS)
@@ -410,7 +421,7 @@ class TestProbeAllUrlDispatch:
         finally:
             db.close()
         assert get.calls == [
-            "https://www.hklii.hk/api/getmetalegis?capType=ord&lang=en",
+            "https://www.hklii.hk/api/getmetalegis?cap_type=ord&lang=en",
         ]
 
     async def test_legis_hopt_slug_hits_getmetahopt_dbcat_other(self):
