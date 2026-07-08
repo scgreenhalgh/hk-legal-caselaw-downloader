@@ -852,3 +852,61 @@ mark {
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---------------------------------------------------------------------
+ * Freshness dashboard — live vs local counts per (kind, slug, lang).
+ * Mismatched cells lift into the scarlet accent + bold so an operator
+ * scanning the table picks up drift instantly. Parity rows stay quiet.
+ * ------------------------------------------------------------------- */
+
+.freshness-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  margin-block: 1.5rem;
+}
+.freshness-table th,
+.freshness-table td {
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid var(--pico-muted-border-color, #eee);
+  text-align: left;
+  vertical-align: baseline;
+}
+.freshness-table th {
+  font-family: var(--font-body);
+  font-weight: 600;
+  background: var(--pico-secondary-background, #fafafa);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.freshness-table .col-count,
+.freshness-table .col-lang { text-align: right; }
+.freshness-table .col-updated { text-align: center; color: var(--ink-muted); font-family: var(--font-mono); font-size: 0.85rem; }
+.freshness-table .col-slug { font-weight: 600; color: var(--ink); }
+.freshness-table .col-zh { font-family: var(--font-body); }
+.freshness-table .count { white-space: nowrap; }
+.freshness-table .count.freshness-mismatch {
+  font-weight: 700;
+  color: var(--scarlet);
+}
+.freshness-table .probe-error {
+  margin-left: 0.3rem;
+  color: var(--scarlet);
+  font-family: var(--font-body);
+  font-size: 0.75rem;
+}
+.freshness-table .dash { color: var(--ink-muted); }
+
+.meta {
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+  font-family: var(--font-body);
+}
+.meta code {
+  font-family: var(--font-mono);
+  background: var(--pico-secondary-background, #fafafa);
+  padding: 0.1rem 0.4rem;
+  border-radius: 2px;
+}

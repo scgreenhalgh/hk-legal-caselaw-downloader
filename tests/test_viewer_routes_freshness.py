@@ -241,10 +241,13 @@ def test_page_links_to_sanity_check_doc(client: TestClient) -> None:
     assert "freshness-sanity-check" in r.text
 
 
-def test_home_page_links_to_freshness(client: TestClient) -> None:
-    """The primary nav on / gets a link to /freshness — discoverable
-    without knowing the URL."""
-    r = client.get("/")
+def test_primary_nav_links_to_freshness(client: TestClient) -> None:
+    """The primary nav gets a link to /freshness on every page —
+    discoverable without knowing the URL. Assert against the
+    freshness page itself since the fixture doesn't seed the cases
+    table that the home route reads; the nav lives in base.html so
+    every route surfaces the same link."""
+    r = client.get("/freshness")
     soup = BeautifulSoup(r.text, "html.parser")
     nav = soup.find("nav")
     assert nav is not None

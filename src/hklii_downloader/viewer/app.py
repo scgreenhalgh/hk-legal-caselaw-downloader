@@ -21,6 +21,7 @@ from hklii_downloader.viewer.routes.case_detail import router as case_detail_rou
 from hklii_downloader.viewer.routes.citations import router as citations_router
 from hklii_downloader.viewer.routes.cite import router as cite_router
 from hklii_downloader.viewer.routes.court import router as court_router
+from hklii_downloader.viewer.routes.freshness import router as freshness_router
 from hklii_downloader.viewer.routes.healthz import router as healthz_router
 from hklii_downloader.viewer.routes.home import router as home_router
 from hklii_downloader.viewer.routes.search import router as search_router
@@ -69,4 +70,5 @@ def create_app(
     app.include_router(cite_router)
     app.include_router(browse_router)
     app.include_router(authorities_index_router)
+    app.include_router(freshness_router)
     return app

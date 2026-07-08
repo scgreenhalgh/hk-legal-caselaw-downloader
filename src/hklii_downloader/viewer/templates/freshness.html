@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Freshness — HKLII viewer{% endblock %}
+{% block content %}
+
+<section class="section" aria-labelledby="freshness-heading">
+  <h2 id="freshness-heading" class="section-label">Database freshness</h2>
+  <p class="hero-tally">
+    Local corpus vs HKLII live counts and timestamps. Bold-red cells
+    show drift.
+    See <a href="https://github.com/anthropics/claude-code/blob/main/docs/freshness-sanity-check.md">docs/freshness-sanity-check.md</a>
+    for how to close each row.
+  </p>
+  {% if last_probed_at %}
+    <p class="meta">
+      Last probed: <time datetime="{{ last_probed_at }}">{{ last_probed_at }}</time>
+      ({{ row_count }} buckets tracked).
+      Refresh with
+      <code>hklii check-freshness -o ./output -p …</code>.
+    </p>
+  {% else %}
+    <p class="meta">
+      No probes recorded yet — run
+      <code>hklii check-freshness -o ./output -p …</code> to
+      populate the ledger.
+    </p>
+  {% endif %}
+
+  <table class="freshness-table" data-testid="freshness-table">
+    <thead>
+      <tr>
+        <th scope="col">Slug</th>
+        <th scope="col">English</th>
+        <th scope="col">中文</th>
+        {% for lang in langs %}
+          <th scope="col" class="col-count">{{ lang | upper }} local / live</th>
+          <th scope="col" class="col-updated">{{ lang | upper }} updated</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+    {% for section in sections %}
+      {% for row in section.rows %}
+        <tr data-slug="{{ row.slug }}" data-bucket="{{ section.name }}">
+          <td class="col-slug">{{ row.slug }}</td>
+          <td class="col-en">{{ row.en_name }}</td>
+          <td class="col-zh">{{ row.zh_name }}</td>
+          {% for cell in row.cells %}
+            <td class="col-lang" data-lang="{{ cell.lang }}">
+              {% if not cell.available %}
+                <span class="count">—</span>
+              {% else %}
+                <span
+                  class="count{% if cell.is_mismatch %} freshness-mismatch{% endif %}"
+                  {% if cell.is_mismatch %}data-mismatch="true"{% endif %}
+                >
+                  {% if cell.local is none and cell.live is none %}—{% else %}{{ cell.local if cell.local is not none else '—' }} / {{ cell.live if cell.live is not none else '—' }}{% endif %}
+                  {% if cell.delta is not none and cell.delta != 0 %} ({{ '+' if cell.delta > 0 else '' }}{{ cell.delta }}){% endif %}
+                  {% if cell.probe_error %}<span class="probe-error" title="{{ cell.probe_error }}">[probe error]</span>{% endif %}
+                </span>
+              {% endif %}
+            </td>
+            <td class="col-updated" data-lang="{{ cell.lang }}">
+              {% if cell.updated %}
+                <time datetime="{{ cell.updated }}">{{ cell.updated }}</time>
+              {% else %}
+                <span class="dash">—</span>
+              {% endif %}
+            </td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <p class="meta">
+    Convention: <code>delta = live − local</code>. Positive means HKLII
+    is ahead of us. See the sanity-check doc for the current
+    known-permanent quirks (UKPC 5-gap, HKLII list duplicates, D3
+    backlog slugs with no scraper yet).
+  </p>
+</section>
+
+{% endblock %}
