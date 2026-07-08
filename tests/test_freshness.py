@@ -620,10 +620,9 @@ class TestProbeAllPersistence:
         no freshness row ever landed for the trilingual legis
         databases; enabling SC gives the operator visibility on drift.
 
-        Local corpus is still EN+TC only per ``legis.LEGIS_LANGS``, so
-        SC buckets stay permanent-STALE until an SC scraper ships —
-        that's the correct signal ('HKLII has 838 ordinances in SC,
-        we have 0') rather than silent gap.
+        Local corpus catches up once ``LEGIS_LANGS`` includes SC and
+        ``hklii scrape-legis`` runs — the freshness gate then flips
+        to FRESH like any other bucket.
         """
         matrix = _make_matrix(legis={"ord": ("en", "sc", "tc")})
         db = CheckpointDB(":memory:")
