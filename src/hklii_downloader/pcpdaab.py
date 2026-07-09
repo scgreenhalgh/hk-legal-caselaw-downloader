@@ -148,6 +148,12 @@ def _pairs_from_anchor_text(text: str) -> list[tuple[int, int]]:
     return pairs
 
 
+# Individual AAB decisions can be 30-70 MB (they're scanned image PDFs
+# for older years). The pool's default 30s timeout would abort those
+# mid-download. Give the PDF fetch a longer ceiling.
+_PDF_FETCH_TIMEOUT_SEC = 180
+
+
 async def fetch_pcpdaab_pdf(get: Callable, filename: str) -> bytes:
     """Fetch a single PCPD PDF via the pool.
 
@@ -158,7 +164,7 @@ async def fetch_pcpdaab_pdf(get: Callable, filename: str) -> bytes:
     """
     url = PCPD_FILES_URL_TEMPLATE.format(filename=filename)
     try:
-        resp = await get(url)
+        resp = await get(url, timeout=_PDF_FETCH_TIMEOUT_SEC)
     except (httpx.RequestError, OSError) as exc:
         raise PcpdaabFetchError(
             f"transport error fetching {filename}: "
