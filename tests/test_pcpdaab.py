@@ -186,3 +186,78 @@ class TestParseDecisionsDetail:
         result = parse_decisions_detail(html)
 
         assert result[(2020, 1)].shares_pdf_with == ()
+
+
+class TestFullFixture:
+    """Pin the live 2026-07-09 PCPD decisions_detail.html contents.
+
+    The fixture was fetched via the ProxyPool in the session that added
+    this module. It documents the parser's expected behavior against
+    every naming variant in the wild — a smoke test that a refactor
+    of the parsing regexes cannot silently regress.
+    """
+
+    @pytest.fixture
+    def fixture_html(self) -> str:
+        from pathlib import Path
+        return Path(
+            "tests/fixtures/pcpd_decisions_detail.html"
+        ).read_text()
+
+    def test_extracts_at_least_400_entries(self, fixture_html):
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        result = parse_decisions_detail(fixture_html)
+
+        # Session research 2026-07-09 measured 429 unique (year, num)
+        # pairs. Assert ≥400 to leave headroom for PCPD adding a few
+        # cases without breaking the pin.
+        assert len(result) >= 400, f"only got {len(result)}"
+
+    def test_covers_the_12_previously_missing_hklii_entries(
+        self, fixture_html,
+    ):
+        """These 12 (year, num) pairs were invisible to the filename-
+        regex approach earlier; anchor-text parsing must find all of them.
+        """
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        result = parse_decisions_detail(fixture_html)
+
+        expected_now_covered = [
+            (2000, 17),   # AAB_17_2000_e.pdf — E-suffix variant
+            (2005, 61),   # AAB_61_2005.pdf — not linked via my old regex
+            (2013, 25),   # AAB_Decision_25_2013_OCR.pdf — OCR variant
+            (2013, 26),   # AAB_26_2013_e.pdf — e-suffix
+            (2013, 232),  # HKLII pcpdaab/2013/32 → truly 232
+            (2013, 233),  # HKLII pcpdaab/2013/33 → truly 233
+            (2013, 234),  # HKLII pcpdaab/2013/34 → truly 234
+            (2014, 17),   # AAB_Decision_17_2014_OCR.pdf
+            (2014, 23),   # AAB_Decision_23_2014_OCR.pdf
+            (2014, 46),   # AAB_Decision_46_2014_OCR.pdf
+            (2015, 1),    # AAB_Decision_1_2015_OCR.pdf
+            (2016, 25),   # AAB_25_2016_E.pdf — capital-E variant
+        ]
+        for key in expected_now_covered:
+            assert key in result, f"{key} should be resolvable but is missing"
+
+    def test_multi_num_2024_shared_pdf_expands_to_10_entries(
+        self, fixture_html,
+    ):
+        """AAB_16_17_2024.pdf covers "1, 2, 5, 6, 8-11, 16 & 17/2024" —
+        10 HKLII rows must all resolve to that filename.
+        """
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        result = parse_decisions_detail(fixture_html)
+
+        expected_pairs = {
+            (2024, 1), (2024, 2), (2024, 5), (2024, 6),
+            (2024, 8), (2024, 9), (2024, 10), (2024, 11),
+            (2024, 16), (2024, 17),
+        }
+        for k in expected_pairs:
+            assert k in result, f"{k} missing"
+            assert result[k].filename == "AAB_16_17_2024.pdf"
+            # each should list all 9 others via shares_pdf_with
+            assert set(result[k].shares_pdf_with) == expected_pairs - {k}
