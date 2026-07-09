@@ -401,6 +401,60 @@ class TestFetchPcpdaabPdf:
         assert len(requested) == 1
         assert expected_prefix in requested[0]
 
+    async def test_tc_404_falls_back_to_english(self):
+        """PCPD publishes some filenames (the `_e`/`_E`-suffix variants)
+        ONLY under /english/. Since the PDF is bilingual, a /tc_chi/
+        404 must fall back to /english/ so TC lane still gets the file.
+        """
+        import httpx
+
+        from hklii_downloader.pcpdaab import fetch_pcpdaab_pdf
+
+        requested: list[str] = []
+        pdf_content = b"%PDF-1.4\nbilingual body"
+
+        async def mock_get(url, **kw):
+            requested.append(url)
+            if "/tc_chi/" in url:
+                return httpx.Response(
+                    404, text="not found",
+                    request=httpx.Request("GET", url),
+                )
+            return httpx.Response(
+                200, content=pdf_content,
+                request=httpx.Request("GET", url),
+            )
+
+        result = await fetch_pcpdaab_pdf(
+            mock_get, "AAB_17_2000_e.pdf", lang="tc",
+        )
+
+        assert result == pdf_content
+        assert len(requested) == 2
+        assert "/tc_chi/" in requested[0]
+        assert "/english/" in requested[1]
+
+    async def test_english_still_fails_when_no_fallback_available(self):
+        """A 404 on hop-1 (english lane) is a genuine miss and must
+        raise — this is the pcpd 'no such filename anywhere' case.
+        """
+        import httpx
+
+        from hklii_downloader.pcpdaab import (
+            PcpdaabFetchError, fetch_pcpdaab_pdf,
+        )
+
+        async def mock_get(url, **kw):
+            return httpx.Response(
+                404, text="not found",
+                request=httpx.Request("GET", url),
+            )
+
+        with pytest.raises(PcpdaabFetchError):
+            await fetch_pcpdaab_pdf(
+                mock_get, "AAB_99_9999.pdf", lang="en",
+            )
+
     async def test_rejects_body_missing_pdf_magic(self):
         """PCPD's server occasionally serves an HTML error page with a
         200 status. Without the %PDF-magic guard we'd mirror garbage.
