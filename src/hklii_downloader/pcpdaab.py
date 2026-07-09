@@ -35,13 +35,21 @@ class PcpdaabEntry:
     filename: str
     chinese_only: bool
     anchor_text: str
+    shares_pdf_with: tuple[tuple[int, int], ...] = ()
 
 
 _AAB_PDF_HREF_RE = re.compile(r"^files/AAB.*\.pdf$", re.IGNORECASE)
-_ANCHOR_INDEX_RE = re.compile(
-    r"\s*AAB\s+(?P<num>\d+)\s*[-/]\s*(?P<year>\d{4})\s*$",
+# Split points between multiple "AAB N-YEAR" clauses (lookahead for "AAB"
+# preserves the "AAB" prefix on each side).
+_CLAUSE_SPLIT_RE = re.compile(r"\s*&\s*(?=AAB\b)", re.IGNORECASE)
+# One clause: "AAB {num-list}[-/]YYYY".
+_CLAUSE_RE = re.compile(
+    r"\s*AAB\s+(?P<nums>.*?)\s*[-/]\s*(?P<year>\d{4})\s*$",
     re.IGNORECASE,
 )
+_NUM_TOKEN_SPLIT_RE = re.compile(r"[,&]")
+_NUM_RANGE_RE = re.compile(r"^(?P<lo>\d+)\s*-\s*(?P<hi>\d+)$")
+_NUM_SINGLE_RE = re.compile(r"^\d+$")
 
 
 class _LinkCollector(HTMLParser):
@@ -82,28 +90,71 @@ def _strip_annotation(text: str) -> str:
     return re.sub(r"\([^)]*\)", "", text).strip()
 
 
+def _parse_num_list(num_part: str) -> list[int]:
+    """Parse "1, 2, 5, 6, 8-11, 16 & 17" into [1, 2, 5, 6, 8, 9, 10, 11, 16, 17]."""
+    nums: list[int] = []
+    for token in _NUM_TOKEN_SPLIT_RE.split(num_part):
+        token = token.strip()
+        if not token:
+            continue
+        range_m = _NUM_RANGE_RE.match(token)
+        if range_m is not None:
+            lo, hi = int(range_m.group("lo")), int(range_m.group("hi"))
+            nums.extend(range(lo, hi + 1))
+            continue
+        if _NUM_SINGLE_RE.match(token):
+            nums.append(int(token))
+    return nums
+
+
+def _pairs_from_anchor_text(text: str) -> list[tuple[int, int]]:
+    """Return every (year, num) covered by this anchor.
+
+    Handles single "AAB 232-2013", "&"-joined "AAB 5-2021 & AAB 6-2021",
+    and compound lists "AAB 1, 2, 5, 6, 8-11, 16 & 17/2024" uniformly.
+    Range hyphens (``8-11``) are disambiguated from the num-year
+    separator by clause-scoped parsing — the ``& AAB``-lookahead split
+    prevents ``5-2021 & AAB 6-2021`` from being consumed as a
+    range-spanning-to-2021.
+    """
+    stripped = _strip_annotation(text)
+    pairs: list[tuple[int, int]] = []
+    for clause in _CLAUSE_SPLIT_RE.split(stripped):
+        match = _CLAUSE_RE.match(clause)
+        if match is None:
+            continue
+        year = int(match.group("year"))
+        for num in _parse_num_list(match.group("nums")):
+            pairs.append((year, num))
+    return pairs
+
+
 def parse_decisions_detail(html: str) -> dict[tuple[int, int], PcpdaabEntry]:
     """Parse PCPD's ``decisions_detail.html`` into ``(year, num) → entry``.
 
     Uses anchor text as the authoritative index (not the filename).
+    Multi-num anchors expand into one entry per (year, num); each entry
+    records the other partners via :attr:`PcpdaabEntry.shares_pdf_with`
+    so downstream can dedupe wire fetches (all partners share the PDF).
     """
     collector = _LinkCollector()
     collector.feed(html)
 
     entries: dict[tuple[int, int], PcpdaabEntry] = {}
     for href, text in collector.pairs:
-        stripped = _strip_annotation(text)
-        match = _ANCHOR_INDEX_RE.match(stripped)
-        if match is None:
+        pairs = _pairs_from_anchor_text(text)
+        if not pairs:
             continue
-        year = int(match.group("year"))
-        num = int(match.group("num"))
         filename = href.split("/")[-1]
-        entries[(year, num)] = PcpdaabEntry(
-            year=year,
-            num=num,
-            filename=filename,
-            chinese_only="Chinese version only" in text,
-            anchor_text=text,
-        )
+        chinese_only = "Chinese version only" in text
+        for year, num in pairs:
+            partners = tuple(sorted(p for p in pairs if p != (year, num)))
+            entries[(year, num)] = PcpdaabEntry(
+                year=year,
+                num=num,
+                filename=filename,
+                chinese_only=chinese_only,
+                anchor_text=text,
+                shares_pdf_with=partners,
+            )
     return entries
