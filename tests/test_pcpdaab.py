@@ -261,3 +261,84 @@ class TestFullFixture:
             assert result[k].filename == "AAB_16_17_2024.pdf"
             # each should list all 9 others via shares_pdf_with
             assert set(result[k].shares_pdf_with) == expected_pairs - {k}
+
+
+class TestFetchDiscovery:
+    """Async fetch wrapper — delegates HTTP to a caller-provided `get`
+    (satisfied by ``ProxyPool.get``), not to a hard-coded httpx client.
+
+    That lets the pool's VPN routing / preflight / throttling flow
+    through unchanged. Every wire probe against pcpd.org.hk still
+    routes through the 20-proxy pool per the standing rule.
+    """
+
+    async def test_fetches_via_provided_get_and_parses(self):
+        from pathlib import Path
+
+        import httpx
+
+        from hklii_downloader.pcpdaab import (
+            PCPD_DECISIONS_URL,
+            fetch_discovery,
+        )
+
+        fixture = Path(
+            "tests/fixtures/pcpd_decisions_detail.html"
+        ).read_bytes()
+        requested: list[str] = []
+
+        async def mock_get(url, **kw):
+            requested.append(url)
+            return httpx.Response(
+                200,
+                content=fixture,
+                headers={"content-type": "text/html; charset=UTF-8"},
+                request=httpx.Request("GET", url),
+            )
+
+        result = await fetch_discovery(mock_get)
+
+        assert requested == [PCPD_DECISIONS_URL]
+        assert len(result) >= 400
+
+    async def test_non_200_raises_pcpdaab_fetch_error(self):
+        import httpx
+
+        from hklii_downloader.pcpdaab import (
+            PcpdaabFetchError,
+            fetch_discovery,
+        )
+
+        async def mock_get(url, **kw):
+            return httpx.Response(
+                503, text="upstream unavailable",
+                request=httpx.Request("GET", url),
+            )
+
+        with pytest.raises(PcpdaabFetchError) as exc:
+            await fetch_discovery(mock_get)
+
+        assert "503" in str(exc.value)
+        assert "decisions_detail" in str(exc.value).lower()
+
+    async def test_transport_error_wrapped_as_pcpdaab_fetch_error(self):
+        """httpx.RequestError from the pool must be converted so the
+        caller only has to except PcpdaabFetchError.
+        """
+        import httpx
+
+        from hklii_downloader.pcpdaab import (
+            PcpdaabFetchError,
+            fetch_discovery,
+        )
+
+        async def mock_get(url, **kw):
+            raise httpx.ConnectTimeout(
+                "simulated timeout",
+                request=httpx.Request("GET", url),
+            )
+
+        with pytest.raises(PcpdaabFetchError) as exc:
+            await fetch_discovery(mock_get)
+
+        assert "timeout" in str(exc.value).lower() or "connecttimeout" in str(exc.value).lower()
