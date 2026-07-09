@@ -39,8 +39,11 @@ PCPD_DECISIONS_URL = (
     "https://www.pcpd.org.hk/english/enforcement/decisions/decisions_detail.html"
 )
 PCPD_FILES_URL_TEMPLATE = (
-    "https://www.pcpd.org.hk/english/enforcement/decisions/files/{filename}"
+    "https://www.pcpd.org.hk/{lang_prefix}/enforcement/decisions/files/{filename}"
 )
+# HKLII's `en` / `tc` naming → PCPD's URL path prefix. PCPD only
+# publishes /english/ and /tc_chi/ — SC is not on their site.
+_PCPD_LANG_URL_PREFIX = {"en": "english", "tc": "tc_chi"}
 
 
 class PcpdaabFetchError(RuntimeError):
@@ -154,15 +157,25 @@ def _pairs_from_anchor_text(text: str) -> list[tuple[int, int]]:
 _PDF_FETCH_TIMEOUT_SEC = 180
 
 
-async def fetch_pcpdaab_pdf(get: Callable, filename: str) -> bytes:
+async def fetch_pcpdaab_pdf(
+    get: Callable, filename: str, lang: str = "en",
+) -> bytes:
     """Fetch a single PCPD PDF via the pool.
+
+    ``lang`` selects the URL path prefix (``/english/`` vs ``/tc_chi/``).
+    PCPD serves the same AAB PDFs under both paths — bytes are usually
+    identical but not guaranteed, so we fetch both lanes when the
+    HKLII corpus asks for both.
 
     Validates the %PDF magic prefix (same defensive posture as the C3
     fix in :mod:`hklii_downloader.d3`). Non-200 or non-PDF bodies are
     wrapped in :class:`PcpdaabFetchError` so the caller can log and
     mark the row failed without special-casing transport shape.
     """
-    url = PCPD_FILES_URL_TEMPLATE.format(filename=filename)
+    lang_prefix = _PCPD_LANG_URL_PREFIX.get(lang, "english")
+    url = PCPD_FILES_URL_TEMPLATE.format(
+        lang_prefix=lang_prefix, filename=filename,
+    )
     try:
         resp = await get(url, timeout=_PDF_FETCH_TIMEOUT_SEC)
     except (httpx.RequestError, OSError) as exc:

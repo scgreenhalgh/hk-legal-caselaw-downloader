@@ -443,7 +443,9 @@ class D3Runner:
             )
             return "failed"
         try:
-            pdf_bytes = await fetch_pcpdaab_pdf(self._get, entry.filename)
+            pdf_bytes = await fetch_pcpdaab_pdf(
+                self._get, entry.filename, lang=row.lang,
+            )
         except PcpdaabFetchError as exc:
             _log.warning(
                 "d3 pcpdaab fetch failed for %s/%s (%s): %s",
