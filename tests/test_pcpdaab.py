@@ -77,3 +77,49 @@ class TestParseDecisionsDetail:
         # NOT keyed by the naive filename num=232... it MUST match.
         # And NOT keyed by (2013, 32) which is a common wrong parse.
         assert (2013, 32) not in result
+
+    def test_skips_non_aab_pdf_anchors(self):
+        """The page has nav links, css, table-of-contents anchors that
+        don't point at AAB PDFs. Every one must be dropped so the
+        (year, num) dict only carries decision entries.
+        """
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        html = (
+            '<a href="#2020">Jump to 2020</a>'
+            '<a href="../css/default.css">stylesheet</a>'
+            '<a href="casenotes_2.php?id=2020A01">Case notes 2020A01</a>'
+            '<a href="files/other_report.pdf">Some other report</a>'
+            '<a href="files/AAB_1_2020.pdf">AAB 1-2020</a>'
+        )
+
+        result = parse_decisions_detail(html)
+
+        assert set(result.keys()) == {(2020, 1)}
+
+    def test_chinese_only_annotation_captured(self):
+        """PCPD marks some cases with "(This decision provides Chinese
+        version only)". The parser must set chinese_only=True and still
+        derive (year, num) from the AAB prefix.
+        """
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        html = (
+            '<a href="files/AAB_232_2013.pdf" rel="external">'
+            'AAB 232-2013 (This decision provides Chinese version only)'
+            '</a>'
+        )
+
+        result = parse_decisions_detail(html)
+
+        assert (2013, 232) in result
+        assert result[(2013, 232)].chinese_only is True
+
+    def test_chinese_only_absent_by_default(self):
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        html = '<a href="files/AAB_1_2020.pdf">AAB 1-2020</a>'
+
+        result = parse_decisions_detail(html)
+
+        assert result[(2020, 1)].chinese_only is False
