@@ -350,10 +350,7 @@ class TestFetchPcpdaabPdf:
     async def test_returns_pdf_bytes_on_valid_response(self):
         import httpx
 
-        from hklii_downloader.pcpdaab import (
-            PCPD_FILES_URL_TEMPLATE,
-            fetch_pcpdaab_pdf,
-        )
+        from hklii_downloader.pcpdaab import fetch_pcpdaab_pdf
 
         requested: list[str] = []
         pdf_content = b"%PDF-1.4\nfake body\n%%EOF"
@@ -371,9 +368,38 @@ class TestFetchPcpdaabPdf:
 
         assert result == pdf_content
         assert len(requested) == 1
-        assert requested[0] == PCPD_FILES_URL_TEMPLATE.format(
-            filename="AAB_1_2020.pdf",
-        )
+        assert "/english/" in requested[0]
+        assert requested[0].endswith("/files/AAB_1_2020.pdf")
+
+    @pytest.mark.parametrize(
+        "lang,expected_prefix",
+        [
+            ("en", "/english/"),
+            ("tc", "/tc_chi/"),
+        ],
+    )
+    async def test_lang_selects_url_prefix(self, lang, expected_prefix):
+        """PCPD serves the AAB PDFs under separate /english/ and /tc_chi/
+        paths. For a complete HKLII corpus we fetch both lanes even
+        though the underlying bytes are typically identical.
+        """
+        import httpx
+
+        from hklii_downloader.pcpdaab import fetch_pcpdaab_pdf
+
+        requested: list[str] = []
+
+        async def mock_get(url, **kw):
+            requested.append(url)
+            return httpx.Response(
+                200, content=b"%PDF-1.4\nbody",
+                request=httpx.Request("GET", url),
+            )
+
+        await fetch_pcpdaab_pdf(mock_get, "AAB_1_2020.pdf", lang=lang)
+
+        assert len(requested) == 1
+        assert expected_prefix in requested[0]
 
     async def test_rejects_body_missing_pdf_magic(self):
         """PCPD's server occasionally serves an HTML error page with a
