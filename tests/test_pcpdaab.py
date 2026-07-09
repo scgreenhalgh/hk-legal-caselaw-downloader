@@ -123,3 +123,66 @@ class TestParseDecisionsDetail:
         result = parse_decisions_detail(html)
 
         assert result[(2020, 1)].chinese_only is False
+
+    def test_ampersand_joined_two_clauses(self):
+        """One PDF holds two decisions, anchor text joins them with "&"."""
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        html = (
+            '<a href="files/AAB_5_6_2021.pdf">AAB 5-2021 & AAB 6-2021</a>'
+        )
+
+        result = parse_decisions_detail(html)
+
+        assert set(result.keys()) == {(2021, 5), (2021, 6)}
+        assert result[(2021, 5)].filename == "AAB_5_6_2021.pdf"
+        assert result[(2021, 6)].filename == "AAB_5_6_2021.pdf"
+        # Both entries flag they share a PDF with the OTHER pair.
+        assert result[(2021, 5)].shares_pdf_with == ((2021, 6),)
+        assert result[(2021, 6)].shares_pdf_with == ((2021, 5),)
+
+    def test_compound_num_list_with_range(self):
+        """The real 2024 anchor covers 10 decisions in one PDF."""
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        html = (
+            '<a href="files/AAB_16_17_2024.pdf">'
+            'AAB 1, 2, 5, 6, 8-11, 16 & 17/2024'
+            '</a>'
+        )
+
+        result = parse_decisions_detail(html)
+
+        expected = {
+            (2024, 1), (2024, 2), (2024, 5), (2024, 6),
+            (2024, 8), (2024, 9), (2024, 10), (2024, 11),
+            (2024, 16), (2024, 17),
+        }
+        assert set(result.keys()) == expected
+        # shares_pdf_with lists the OTHER 9 for each entry.
+        assert (2024, 1) in result
+        assert result[(2024, 1)].shares_pdf_with == tuple(
+            sorted(expected - {(2024, 1)})
+        )
+
+    def test_range_hyphen_not_confused_with_year_separator(self):
+        """Distinguishing "8-11" (range) from "1-2020" (num-year)
+        requires clause-scoped parsing. Bad greedy regex would treat
+        "5-2021 & AAB 6-2021" as one range spanning 5 to 2021.
+        """
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        html = '<a href="files/AAB_5_6_2021.pdf">AAB 5-2021 & AAB 6-2021</a>'
+
+        result = parse_decisions_detail(html)
+
+        assert len(result) == 2  # NOT 2017 pairs from a range explosion
+
+    def test_single_num_shares_pdf_with_is_empty(self):
+        from hklii_downloader.pcpdaab import parse_decisions_detail
+
+        html = '<a href="files/AAB_1_2020.pdf">AAB 1-2020</a>'
+
+        result = parse_decisions_detail(html)
+
+        assert result[(2020, 1)].shares_pdf_with == ()
