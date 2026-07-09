@@ -26,6 +26,18 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from typing import Callable
+
+import httpx
+
+
+PCPD_DECISIONS_URL = (
+    "https://www.pcpd.org.hk/english/enforcement/decisions/decisions_detail.html"
+)
+
+
+class PcpdaabFetchError(RuntimeError):
+    """Any wire-shape failure fetching PCPD's decisions index."""
 
 
 @dataclass(frozen=True)
@@ -127,6 +139,33 @@ def _pairs_from_anchor_text(text: str) -> list[tuple[int, int]]:
         for num in _parse_num_list(match.group("nums")):
             pairs.append((year, num))
     return pairs
+
+
+async def fetch_discovery(
+    get: Callable,
+) -> dict[tuple[int, int], PcpdaabEntry]:
+    """Fetch PCPD's ``decisions_detail.html`` via ``get`` and parse it.
+
+    ``get`` is the ProxyPool's ``async get(url) -> httpx.Response`` —
+    that keeps every wire request routed through the 20-proxy VPN pool
+    per the standing rule (never direct curl against pcpd.org.hk).
+
+    Transport errors and non-200 responses are wrapped in
+    :class:`PcpdaabFetchError` so the caller only has to except one
+    exception type.
+    """
+    try:
+        resp = await get(PCPD_DECISIONS_URL)
+    except (httpx.RequestError, OSError) as exc:
+        raise PcpdaabFetchError(
+            f"transport error fetching decisions_detail: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if resp.status_code != 200:
+        raise PcpdaabFetchError(
+            f"decisions_detail HTTP {resp.status_code}"
+        )
+    return parse_decisions_detail(resp.text)
 
 
 def parse_decisions_detail(html: str) -> dict[tuple[int, int], PcpdaabEntry]:
