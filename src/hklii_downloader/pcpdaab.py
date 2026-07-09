@@ -157,25 +157,10 @@ def _pairs_from_anchor_text(text: str) -> list[tuple[int, int]]:
 _PDF_FETCH_TIMEOUT_SEC = 180
 
 
-async def fetch_pcpdaab_pdf(
-    get: Callable, filename: str, lang: str = "en",
+async def _fetch_pcpdaab_pdf_one(
+    get: Callable, url: str, filename: str,
 ) -> bytes:
-    """Fetch a single PCPD PDF via the pool.
-
-    ``lang`` selects the URL path prefix (``/english/`` vs ``/tc_chi/``).
-    PCPD serves the same AAB PDFs under both paths — bytes are usually
-    identical but not guaranteed, so we fetch both lanes when the
-    HKLII corpus asks for both.
-
-    Validates the %PDF magic prefix (same defensive posture as the C3
-    fix in :mod:`hklii_downloader.d3`). Non-200 or non-PDF bodies are
-    wrapped in :class:`PcpdaabFetchError` so the caller can log and
-    mark the row failed without special-casing transport shape.
-    """
-    lang_prefix = _PCPD_LANG_URL_PREFIX.get(lang, "english")
-    url = PCPD_FILES_URL_TEMPLATE.format(
-        lang_prefix=lang_prefix, filename=filename,
-    )
+    """One-shot GET + %PDF magic validation. Wraps transport errors."""
     try:
         resp = await get(url, timeout=_PDF_FETCH_TIMEOUT_SEC)
     except (httpx.RequestError, OSError) as exc:
@@ -195,6 +180,43 @@ async def fetch_pcpdaab_pdf(
             f"content-type: {resp.headers.get('content-type', '?')})"
         )
     return body
+
+
+async def fetch_pcpdaab_pdf(
+    get: Callable, filename: str, lang: str = "en",
+) -> bytes:
+    """Fetch a single PCPD PDF via the pool.
+
+    ``lang`` selects the URL path prefix (``/english/`` vs ``/tc_chi/``).
+    PCPD serves the same AAB PDFs under both paths — bytes are usually
+    identical but not guaranteed, so we fetch both lanes when the
+    HKLII corpus asks for both.
+
+    A subset of filenames (the ``_e`` / ``_E`` suffix variants —
+    empirically ~3 of 429) are only published under ``/english/``.
+    When the TC lane 404s, we transparently fall back to ``/english/``
+    because the PDF is bilingual regardless of URL path. The EN lane
+    never falls back (a 404 there is a genuine "no such filename").
+
+    Validates the %PDF magic prefix (same defensive posture as the C3
+    fix in :mod:`hklii_downloader.d3`). Non-200 or non-PDF bodies are
+    wrapped in :class:`PcpdaabFetchError`.
+    """
+    lang_prefix = _PCPD_LANG_URL_PREFIX.get(lang, "english")
+    primary_url = PCPD_FILES_URL_TEMPLATE.format(
+        lang_prefix=lang_prefix, filename=filename,
+    )
+    try:
+        return await _fetch_pcpdaab_pdf_one(get, primary_url, filename)
+    except PcpdaabFetchError as exc:
+        # Only fall back for /tc_chi/ 404s — the PDF is bilingual so
+        # /english/ carries the same content.
+        if lang_prefix != "tc_chi" or " 404 " not in f" {exc} ":
+            raise
+    fallback_url = PCPD_FILES_URL_TEMPLATE.format(
+        lang_prefix="english", filename=filename,
+    )
+    return await _fetch_pcpdaab_pdf_one(get, fallback_url, filename)
 
 
 def save_pcpdaab_local(
