@@ -1859,22 +1859,16 @@ class TestScrapeD3Cli:
         assert call.kwargs["langs"] == ("en",)
         assert call.kwargs["limit"] == 1
 
-    def test_dispatch_fetches_pcpdaab_discovery_when_slug_in_scope(
+    async def test_run_scrape_d3_fetches_discovery_when_pcpdaab_in_slugs(
         self, tmp_path,
     ):
-        """If pcpdaab is among the requested slugs, the CLI runs
-        pcpdaab.fetch_discovery via the pool BEFORE invoking D3Runner,
-        and passes the resulting map into the runner constructor.
-
-        The runner needs the map to look up filenames; making the CLI
-        fetch it keeps D3Runner deterministic and testable (no hidden
-        wire calls).
+        """`_run_scrape_d3` must invoke pcpdaab.fetch_discovery once
+        when pcpdaab is in the requested slug set, and thread the
+        resulting map into the D3Runner it constructs.
         """
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
 
-        from click.testing import CliRunner
-
-        from hklii_downloader.cli import main
+        from hklii_downloader.cli import _run_scrape_d3
         from hklii_downloader.pcpdaab import PcpdaabEntry
 
         fake_map = {
@@ -1883,64 +1877,63 @@ class TestScrapeD3Cli:
                 chinese_only=False, anchor_text="AAB 1-2020",
             ),
         }
+        fake_run_result = MagicMock(
+            downloaded=0, failed=0, langs_enumerated={},
+        )
+        fake_runner = MagicMock(
+            enumerate_all=AsyncMock(return_value=0),
+            fetch_pending=AsyncMock(return_value=fake_run_result),
+            langs_enumerated={},
+        )
 
         with patch(
-            "hklii_downloader.cli._run_scrape_d3", new=AsyncMock(),
-        ) as m_runner, patch(
             "hklii_downloader.pcpdaab.fetch_discovery",
             new=AsyncMock(return_value=fake_map),
-        ) as m_discover:
-            result = CliRunner().invoke(
-                main,
-                [
-                    "scrape-d3",
-                    "-o", str(tmp_path),
-                    "--direct", "--yes",
-                    "--slug", "pcpdaab",
-                    "--lang", "en",
-                ],
+        ) as m_discover, patch(
+            "hklii_downloader.d3.D3Runner", return_value=fake_runner,
+        ) as m_runner_cls:
+            await _run_scrape_d3(
+                output=tmp_path, proxies=[], direct=True,
+                slugs=("pcpdaab",), langs=("en",),
+                limit=None, no_events=True,
             )
 
-        assert result.exit_code == 0, result.output
         assert m_discover.await_count == 1
-        assert m_runner.await_count == 1
-        assert m_runner.await_args.kwargs["pcpdaab_map"] == fake_map
+        assert m_runner_cls.call_count == 1
+        assert m_runner_cls.call_args.kwargs["pcpdaab_map"] == fake_map
 
-    def test_dispatch_skips_pcpdaab_discovery_when_slug_absent(
+    async def test_run_scrape_d3_skips_discovery_when_pcpdaab_absent(
         self, tmp_path,
     ):
-        """Not asking for pcpdaab means we don't burn a discovery
-        wire call. The runner still gets called (for the other slugs)
-        but pcpdaab_map is empty / None.
-        """
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
 
-        from click.testing import CliRunner
+        from hklii_downloader.cli import _run_scrape_d3
 
-        from hklii_downloader.cli import main
+        fake_run_result = MagicMock(
+            downloaded=0, failed=0, langs_enumerated={},
+        )
+        fake_runner = MagicMock(
+            enumerate_all=AsyncMock(return_value=0),
+            fetch_pending=AsyncMock(return_value=fake_run_result),
+            langs_enumerated={},
+        )
 
         with patch(
-            "hklii_downloader.cli._run_scrape_d3", new=AsyncMock(),
-        ) as m_runner, patch(
             "hklii_downloader.pcpdaab.fetch_discovery",
             new=AsyncMock(),
-        ) as m_discover:
-            result = CliRunner().invoke(
-                main,
-                [
-                    "scrape-d3",
-                    "-o", str(tmp_path),
-                    "--direct", "--yes",
-                    "--slug", "hklrccp",
-                    "--lang", "en",
-                ],
+        ) as m_discover, patch(
+            "hklii_downloader.d3.D3Runner", return_value=fake_runner,
+        ) as m_runner_cls:
+            await _run_scrape_d3(
+                output=tmp_path, proxies=[], direct=True,
+                slugs=("hklrccp",), langs=("en",),
+                limit=None, no_events=True,
             )
 
-        assert result.exit_code == 0, result.output
         assert m_discover.await_count == 0
-        assert m_runner.await_count == 1
-        # pcpdaab_map missing (or None) is fine.
-        assert not m_runner.await_args.kwargs.get("pcpdaab_map")
+        assert m_runner_cls.call_count == 1
+        # Runner still gets called, just with no pcpdaab map.
+        assert not m_runner_cls.call_args.kwargs.get("pcpdaab_map")
 
     def test_skip_if_fresh_short_circuits_when_all_fresh(self, tmp_path):
         """Every requested (slug, lang) is FRESH → returns without wire call."""
