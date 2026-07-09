@@ -2773,9 +2773,25 @@ async def _run_scrape_d3(
         families = tuple(
             f for f in D3_FAMILIES if f.slug in slugs
         )
+
+        # Fetch pcpdaab discovery iff the slug is in scope. Cheap (one
+        # HTML fetch of ~125 KB) and gives the runner the (year, num)
+        # → filename map for pcpd.org.hk direct-PDF resolution.
+        pcpdaab_map = None
+        if "pcpdaab" in slugs:
+            from .pcpdaab import fetch_discovery
+            click.echo("Fetching pcpdaab decisions index from pcpd.org.hk...")
+            pcpdaab_map = await fetch_discovery(pool.get)
+            click.echo(
+                f"Indexed {len(pcpdaab_map)} pcpdaab decisions "
+                f"({sum(1 for e in pcpdaab_map.values() if e.chinese_only)} "
+                f"marked Chinese-only)."
+            )
+
         runner = D3Runner(
             get=pool.get, checkpoint=db, output_dir=output,
             families=families, langs=langs, workers=workers, limit=limit,
+            pcpdaab_map=pcpdaab_map,
         )
 
         click.echo(
