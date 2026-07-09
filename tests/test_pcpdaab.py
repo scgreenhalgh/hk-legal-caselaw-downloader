@@ -493,3 +493,53 @@ class TestSavePcpdaabLocal:
             ).read_text(),
         )
         assert stored["pcpd"]["shares_pdf_with"] == [[2021, 6]]
+
+    def test_writes_txt_sidecar_when_text_extracted(self, tmp_path):
+        """Consistency with save_d3_pdf: successful pdftotext output
+        must land at `{stem}.txt` so downstream FTS/RAG can index it.
+        """
+        from hklii_downloader.pcpdaab import (
+            PcpdaabEntry, save_pcpdaab_local,
+        )
+
+        entry = PcpdaabEntry(
+            year=2020, num=1, filename="AAB_1_2020.pdf",
+            chinese_only=False, anchor_text="AAB 1-2020",
+        )
+
+        formats = save_pcpdaab_local(
+            tmp_path, 2020, 1, "en", entry,
+            {"title": "AAB 1-2020"},
+            b"%PDF-1.4\n",
+            extracted_text="Extracted decision body",
+        )
+
+        assert formats == ["json", "pdf", "txt"]
+        base = tmp_path / "d3" / "pcpdaab" / "2020" / "1"
+        assert (base / "pcpdaab_2020_1_en.txt").read_text() == (
+            "Extracted decision body"
+        )
+
+    def test_omits_txt_sidecar_when_text_is_none(self, tmp_path):
+        """A failed extraction (image-only PDF, missing pdftotext) must
+        NOT create an empty .txt or crash — row still counts as
+        `downloaded` because the PDF is the source of truth.
+        """
+        from hklii_downloader.pcpdaab import (
+            PcpdaabEntry, save_pcpdaab_local,
+        )
+
+        entry = PcpdaabEntry(
+            year=2020, num=1, filename="AAB_1_2020.pdf",
+            chinese_only=False, anchor_text="AAB 1-2020",
+        )
+        formats = save_pcpdaab_local(
+            tmp_path, 2020, 1, "en", entry,
+            {"title": "AAB 1-2020"},
+            b"%PDF-1.4\n",
+            extracted_text=None,
+        )
+
+        assert formats == ["json", "pdf"]
+        base = tmp_path / "d3" / "pcpdaab" / "2020" / "1"
+        assert not (base / "pcpdaab_2020_1_en.txt").exists()
