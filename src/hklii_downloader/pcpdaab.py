@@ -192,20 +192,22 @@ def save_pcpdaab_local(
     entry: PcpdaabEntry,
     hklii_metadata: dict,
     pdf_bytes: bytes,
+    extracted_text: str | None = None,
 ) -> list[str]:
-    """Write PDF binary + merged metadata JSON.
+    """Write PDF binary + merged metadata JSON + optional text sidecar.
 
-    Layout: ``output/d3/pcpdaab/{year}/{num}/pcpdaab_{year}_{num}_{lang}.{pdf,json}``.
+    Layout: ``output/d3/pcpdaab/{year}/{num}/pcpdaab_{year}_{num}_{lang}.{pdf,json[,txt]}``.
 
     ``year`` / ``num`` come from the HKLII row (not the entry) so the
     on-disk layout stays addressable by HKLII's identifiers even when
     the PCPD entry uses different numbers (the three 2013 truncation
     cases where HKLII path=32 but the real PCPD case is 232).
 
-    Text extraction is DELIBERATELY deferred — user directive is
-    "keep PDF, convert later". Both HKLII listing metadata and the
-    PCPD anchor-text/filename/chinese-only annotations are captured in
-    the JSON so a future backfill has everything it needs.
+    ``extracted_text`` is written to ``{stem}.txt`` when non-None,
+    matching :func:`hklii_downloader.d3.save_d3_pdf`'s contract so
+    downstream FTS/RAG can grep the whole corpus uniformly. Row still
+    counts as ``downloaded`` if extraction failed (PDF is source of
+    truth).
     """
     base = (
         Path(output_dir) / "d3" / "pcpdaab" / str(year) / str(num)
@@ -229,7 +231,11 @@ def save_pcpdaab_local(
         json.dumps(merged, ensure_ascii=False, indent=2),
     )
     atomic_write_bytes(base / f"{stem}.pdf", pdf_bytes)
-    return ["json", "pdf"]
+    formats = ["json", "pdf"]
+    if extracted_text is not None:
+        atomic_write_text(base / f"{stem}.txt", extracted_text)
+        formats.append("txt")
+    return formats
 
 
 async def fetch_discovery(

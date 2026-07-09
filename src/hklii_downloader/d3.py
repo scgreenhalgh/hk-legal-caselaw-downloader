@@ -458,9 +458,13 @@ class D3Runner:
             "neutral": getattr(row, "neutral", None),
             "date": getattr(row, "doc_date", None),
         }
+        # Match save_d3_pdf: best-effort text extraction. A missing
+        # sidecar does not degrade row status; the PDF is truth.
+        extracted_text = extract_pdf_text(pdf_bytes)
         formats = save_pcpdaab_local(
             self._output_dir, row.year, row.num, row.lang,
             entry, hklii_metadata, pdf_bytes,
+            extracted_text=extracted_text,
         )
         self._checkpoint.mark_hopt_downloaded(
             row.abbr, row.year, row.num, row.lang, formats,
