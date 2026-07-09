@@ -180,25 +180,32 @@ async def fetch_pcpdaab_pdf(get: Callable, filename: str) -> bytes:
 
 def save_pcpdaab_local(
     output_dir: Path,
-    entry: PcpdaabEntry,
+    year: int,
+    num: int,
     lang: str,
+    entry: PcpdaabEntry,
     hklii_metadata: dict,
     pdf_bytes: bytes,
 ) -> list[str]:
     """Write PDF binary + merged metadata JSON.
 
     Layout: ``output/d3/pcpdaab/{year}/{num}/pcpdaab_{year}_{num}_{lang}.{pdf,json}``.
+
+    ``year`` / ``num`` come from the HKLII row (not the entry) so the
+    on-disk layout stays addressable by HKLII's identifiers even when
+    the PCPD entry uses different numbers (the three 2013 truncation
+    cases where HKLII path=32 but the real PCPD case is 232).
+
     Text extraction is DELIBERATELY deferred — user directive is
     "keep PDF, convert later". Both HKLII listing metadata and the
     PCPD anchor-text/filename/chinese-only annotations are captured in
     the JSON so a future backfill has everything it needs.
     """
     base = (
-        Path(output_dir) / "d3" / "pcpdaab" / str(entry.year)
-        / str(entry.num)
+        Path(output_dir) / "d3" / "pcpdaab" / str(year) / str(num)
     )
     base.mkdir(parents=True, exist_ok=True)
-    stem = f"pcpdaab_{entry.year}_{entry.num}_{lang}"
+    stem = f"pcpdaab_{year}_{num}_{lang}"
 
     merged = {
         "hklii": hklii_metadata,
@@ -207,6 +214,8 @@ def save_pcpdaab_local(
             "anchor_text": entry.anchor_text,
             "chinese_only": entry.chinese_only,
             "shares_pdf_with": [list(p) for p in entry.shares_pdf_with],
+            "resolved_year": entry.year,
+            "resolved_num": entry.num,
         },
     }
     atomic_write_text(

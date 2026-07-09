@@ -357,6 +357,7 @@ class D3Runner:
         langs: tuple[str, ...] = D3_LANGS,
         workers: int = 4,
         limit: int | None = None,
+        pcpdaab_map: dict | None = None,
     ) -> None:
         self._get = get
         self._checkpoint = checkpoint
@@ -365,6 +366,11 @@ class D3Runner:
         self._langs = langs
         self._workers = max(1, workers)
         self._limit = limit
+        # Discovery output for resolver_kind='pcpd' families. The CLI /
+        # dispatcher populates this via `pcpdaab.fetch_discovery` before
+        # calling run(). None means no pcpdaab in scope; empty dict is
+        # a legitimate "no entries available" state.
+        self._pcpdaab_map = pcpdaab_map or {}
         self.langs_enumerated: dict[str, set[str]] = {}
 
     async def enumerate_all(self) -> int:
@@ -401,6 +407,65 @@ class D3Runner:
                     family.slug, set(),
                 ).add(lang)
         return upserted
+
+    async def _process_pcpdaab_row(self, row) -> str:
+        """Fetch + save one pcpdaab row via the pcpd.org.hk resolver.
+
+        Returns ``"downloaded"`` or ``"failed"``. Marks the row in
+        the checkpoint DB accordingly. Does not update the shared
+        counters — the caller handles that under its lock.
+
+        HKLII bug workaround — three entries (2013/32, 33, 34) store a
+        truncated num in the path; the title reads the real num (232,
+        233, 234). If ``(year, path_num)`` misses the resolver map, we
+        try to parse a real num from the row's title before failing.
+        """
+        from .pcpdaab import (
+            PcpdaabFetchError,
+            fetch_pcpdaab_pdf,
+            save_pcpdaab_local,
+        )
+        entry = self._pcpdaab_map.get((row.year, row.num))
+        if entry is None:
+            title_num = _parse_pcpdaab_title_num(
+                getattr(row, "title", None), row.year,
+            )
+            if title_num is not None:
+                entry = self._pcpdaab_map.get((row.year, title_num))
+        if entry is None:
+            error = (
+                f"pcpdaab resolver map has no entry for "
+                f"{row.year}/{row.num}"
+            )
+            _log.warning("d3 pcpdaab miss %s: %s", row, error)
+            self._checkpoint.mark_hopt_failed(
+                row.abbr, row.year, row.num, row.lang, error=error,
+            )
+            return "failed"
+        try:
+            pdf_bytes = await fetch_pcpdaab_pdf(self._get, entry.filename)
+        except PcpdaabFetchError as exc:
+            _log.warning(
+                "d3 pcpdaab fetch failed for %s/%s (%s): %s",
+                row.year, row.num, row.lang, exc,
+            )
+            self._checkpoint.mark_hopt_failed(
+                row.abbr, row.year, row.num, row.lang, str(exc),
+            )
+            return "failed"
+        hklii_metadata = {
+            "title": getattr(row, "title", None),
+            "neutral": getattr(row, "neutral", None),
+            "date": getattr(row, "doc_date", None),
+        }
+        formats = save_pcpdaab_local(
+            self._output_dir, row.year, row.num, row.lang,
+            entry, hklii_metadata, pdf_bytes,
+        )
+        self._checkpoint.mark_hopt_downloaded(
+            row.abbr, row.year, row.num, row.lang, formats,
+        )
+        return "downloaded"
 
     async def run(self) -> D3RunResult:
         """Enumerate all (family, lang) pairs then drain pending rows.
@@ -472,6 +537,17 @@ class D3Runner:
                         result.failed += 1
                     continue
 
+                if family.resolver_kind == "pcpd":
+                    outcome = await self._process_pcpdaab_row(row)
+                    async with counter_lock:
+                        if outcome == "downloaded":
+                            result.downloaded += 1
+                        else:
+                            result.failed += 1
+                    if on_progress is not None:
+                        on_progress(result)
+                    continue
+
                 try:
                     metadata, pdf_bytes = await _fetch_row(
                         self._get, family, row.year, row.num, row.lang,
@@ -511,6 +587,29 @@ class D3Runner:
             *[worker() for _ in range(self._workers)]
         )
         return result
+
+
+_PCPDAAB_TITLE_NUM_RE = re.compile(
+    r"AAB\s+(\d+)[-_/](\d{4})", re.IGNORECASE,
+)
+
+
+def _parse_pcpdaab_title_num(title: str | None, year: int) -> int | None:
+    """Extract the real num from a HKLII pcpdaab row's title.
+
+    Used only to work around the three HKLII rows (2013/32, 33, 34)
+    whose path num is a truncation of the AAB title num (232, 233, 234).
+    Returns None if the title is missing, unparseable, or the parsed
+    year doesn't match the row's path year (belt-and-suspenders).
+    """
+    if not title:
+        return None
+    match = _PCPDAAB_TITLE_NUM_RE.search(title)
+    if match is None:
+        return None
+    if int(match.group(2)) != year:
+        return None
+    return int(match.group(1))
 
 
 async def _fetch_row(

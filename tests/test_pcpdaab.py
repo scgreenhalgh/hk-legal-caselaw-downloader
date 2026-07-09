@@ -448,7 +448,7 @@ class TestSavePcpdaabLocal:
         pdf_bytes = b"%PDF-1.4\nfake body"
 
         formats = save_pcpdaab_local(
-            tmp_path, entry, "en", hklii_meta, pdf_bytes,
+            tmp_path, 2020, 1, "en", entry, hklii_meta, pdf_bytes,
         )
 
         base = tmp_path / "d3" / "pcpdaab" / "2020" / "1"
@@ -481,7 +481,7 @@ class TestSavePcpdaabLocal:
             shares_pdf_with=((2021, 6),),
         )
         save_pcpdaab_local(
-            tmp_path, entry, "en",
+            tmp_path, 2021, 5, "en", entry,
             {"title": "AAB 5-2021"},
             b"%PDF-1.4\n",
         )
