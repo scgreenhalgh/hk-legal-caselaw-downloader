@@ -342,3 +342,154 @@ class TestFetchDiscovery:
             await fetch_discovery(mock_get)
 
         assert "timeout" in str(exc.value).lower() or "connecttimeout" in str(exc.value).lower()
+
+
+class TestFetchPcpdaabPdf:
+    """Per-row PDF fetch through the pool's get callable."""
+
+    async def test_returns_pdf_bytes_on_valid_response(self):
+        import httpx
+
+        from hklii_downloader.pcpdaab import (
+            PCPD_FILES_URL_TEMPLATE,
+            fetch_pcpdaab_pdf,
+        )
+
+        requested: list[str] = []
+        pdf_content = b"%PDF-1.4\nfake body\n%%EOF"
+
+        async def mock_get(url, **kw):
+            requested.append(url)
+            return httpx.Response(
+                200,
+                content=pdf_content,
+                headers={"content-type": "application/pdf"},
+                request=httpx.Request("GET", url),
+            )
+
+        result = await fetch_pcpdaab_pdf(mock_get, "AAB_1_2020.pdf")
+
+        assert result == pdf_content
+        assert len(requested) == 1
+        assert requested[0] == PCPD_FILES_URL_TEMPLATE.format(
+            filename="AAB_1_2020.pdf",
+        )
+
+    async def test_rejects_body_missing_pdf_magic(self):
+        """PCPD's server occasionally serves an HTML error page with a
+        200 status. Without the %PDF-magic guard we'd mirror garbage.
+        Same defensive posture as `_fetch_row`'s C3 fix in d3.py.
+        """
+        import httpx
+
+        from hklii_downloader.pcpdaab import (
+            PcpdaabFetchError,
+            fetch_pcpdaab_pdf,
+        )
+
+        async def mock_get(url, **kw):
+            return httpx.Response(
+                200,
+                content=b"<html>Not available</html>",
+                headers={"content-type": "text/html"},
+                request=httpx.Request("GET", url),
+            )
+
+        with pytest.raises(PcpdaabFetchError) as exc:
+            await fetch_pcpdaab_pdf(mock_get, "AAB_1_2020.pdf")
+
+        assert "%PDF" in str(exc.value) or "magic" in str(exc.value).lower()
+        assert "AAB_1_2020.pdf" in str(exc.value)
+
+    async def test_non_200_raises(self):
+        import httpx
+
+        from hklii_downloader.pcpdaab import (
+            PcpdaabFetchError,
+            fetch_pcpdaab_pdf,
+        )
+
+        async def mock_get(url, **kw):
+            return httpx.Response(
+                404, text="not found",
+                request=httpx.Request("GET", url),
+            )
+
+        with pytest.raises(PcpdaabFetchError) as exc:
+            await fetch_pcpdaab_pdf(mock_get, "AAB_9999_2099.pdf")
+
+        assert "404" in str(exc.value)
+
+
+class TestSavePcpdaabLocal:
+    """On-disk layout: output/d3/pcpdaab/{year}/{num}/pcpdaab_{...}_.{pdf,json}."""
+
+    def test_writes_pdf_and_metadata_json(self, tmp_path):
+        import json
+
+        from hklii_downloader.pcpdaab import (
+            PcpdaabEntry,
+            save_pcpdaab_local,
+        )
+
+        entry = PcpdaabEntry(
+            year=2020,
+            num=1,
+            filename="AAB_1_2020.pdf",
+            chinese_only=False,
+            anchor_text="AAB 1-2020",
+        )
+        hklii_meta = {
+            "id": 5326,
+            "title": "AAB 1-2020",
+            "neutral": "[2020] HKPCPDAAB 1",
+            "date": "2020-01-01",
+        }
+        pdf_bytes = b"%PDF-1.4\nfake body"
+
+        formats = save_pcpdaab_local(
+            tmp_path, entry, "en", hklii_meta, pdf_bytes,
+        )
+
+        base = tmp_path / "d3" / "pcpdaab" / "2020" / "1"
+        assert formats == ["json", "pdf"]
+        assert (base / "pcpdaab_2020_1_en.pdf").read_bytes() == pdf_bytes
+        stored = json.loads(
+            (base / "pcpdaab_2020_1_en.json").read_text(),
+        )
+        # Merged metadata: HKLII listing + PCPD resolver info
+        assert stored["hklii"]["neutral"] == "[2020] HKPCPDAAB 1"
+        assert stored["pcpd"]["filename"] == "AAB_1_2020.pdf"
+        assert stored["pcpd"]["chinese_only"] is False
+        assert stored["pcpd"]["anchor_text"] == "AAB 1-2020"
+
+    def test_records_shares_pdf_with_partners(self, tmp_path):
+        """Multi-appeal partners must be preserved in the metadata JSON
+        so an audit can see this PDF backs multiple HKLII rows.
+        """
+        import json
+
+        from hklii_downloader.pcpdaab import (
+            PcpdaabEntry,
+            save_pcpdaab_local,
+        )
+
+        entry = PcpdaabEntry(
+            year=2021, num=5, filename="AAB_5_6_2021.pdf",
+            chinese_only=False,
+            anchor_text="AAB 5-2021 & AAB 6-2021",
+            shares_pdf_with=((2021, 6),),
+        )
+        save_pcpdaab_local(
+            tmp_path, entry, "en",
+            {"title": "AAB 5-2021"},
+            b"%PDF-1.4\n",
+        )
+
+        stored = json.loads(
+            (
+                tmp_path / "d3" / "pcpdaab" / "2021" / "5"
+                / "pcpdaab_2021_5_en.json"
+            ).read_text(),
+        )
+        assert stored["pcpd"]["shares_pdf_with"] == [[2021, 6]]
