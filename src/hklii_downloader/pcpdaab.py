@@ -23,16 +23,23 @@ DOM already carries the mapping we need. See
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from pathlib import Path
 from typing import Callable
 
 import httpx
 
+from .atomic_write import atomic_write_bytes, atomic_write_text
+
 
 PCPD_DECISIONS_URL = (
     "https://www.pcpd.org.hk/english/enforcement/decisions/decisions_detail.html"
+)
+PCPD_FILES_URL_TEMPLATE = (
+    "https://www.pcpd.org.hk/english/enforcement/decisions/files/{filename}"
 )
 
 
@@ -139,6 +146,75 @@ def _pairs_from_anchor_text(text: str) -> list[tuple[int, int]]:
         for num in _parse_num_list(match.group("nums")):
             pairs.append((year, num))
     return pairs
+
+
+async def fetch_pcpdaab_pdf(get: Callable, filename: str) -> bytes:
+    """Fetch a single PCPD PDF via the pool.
+
+    Validates the %PDF magic prefix (same defensive posture as the C3
+    fix in :mod:`hklii_downloader.d3`). Non-200 or non-PDF bodies are
+    wrapped in :class:`PcpdaabFetchError` so the caller can log and
+    mark the row failed without special-casing transport shape.
+    """
+    url = PCPD_FILES_URL_TEMPLATE.format(filename=filename)
+    try:
+        resp = await get(url)
+    except (httpx.RequestError, OSError) as exc:
+        raise PcpdaabFetchError(
+            f"transport error fetching {filename}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    if resp.status_code != 200:
+        raise PcpdaabFetchError(
+            f"HTTP {resp.status_code} for {filename}"
+        )
+    body = resp.content
+    if body[:4] != b"%PDF":
+        raise PcpdaabFetchError(
+            f"body missing %PDF magic for {filename} "
+            f"(first 4 bytes: {body[:4]!r}, "
+            f"content-type: {resp.headers.get('content-type', '?')})"
+        )
+    return body
+
+
+def save_pcpdaab_local(
+    output_dir: Path,
+    entry: PcpdaabEntry,
+    lang: str,
+    hklii_metadata: dict,
+    pdf_bytes: bytes,
+) -> list[str]:
+    """Write PDF binary + merged metadata JSON.
+
+    Layout: ``output/d3/pcpdaab/{year}/{num}/pcpdaab_{year}_{num}_{lang}.{pdf,json}``.
+    Text extraction is DELIBERATELY deferred — user directive is
+    "keep PDF, convert later". Both HKLII listing metadata and the
+    PCPD anchor-text/filename/chinese-only annotations are captured in
+    the JSON so a future backfill has everything it needs.
+    """
+    base = (
+        Path(output_dir) / "d3" / "pcpdaab" / str(entry.year)
+        / str(entry.num)
+    )
+    base.mkdir(parents=True, exist_ok=True)
+    stem = f"pcpdaab_{entry.year}_{entry.num}_{lang}"
+
+    merged = {
+        "hklii": hklii_metadata,
+        "pcpd": {
+            "filename": entry.filename,
+            "anchor_text": entry.anchor_text,
+            "chinese_only": entry.chinese_only,
+            "shares_pdf_with": [list(p) for p in entry.shares_pdf_with],
+        },
+    }
+    atomic_write_text(
+        base / f"{stem}.json",
+        json.dumps(merged, ensure_ascii=False, indent=2),
+    )
+    atomic_write_bytes(base / f"{stem}.pdf", pdf_bytes)
+    return ["json", "pdf"]
 
 
 async def fetch_discovery(
