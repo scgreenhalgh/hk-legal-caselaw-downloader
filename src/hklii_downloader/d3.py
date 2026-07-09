@@ -54,29 +54,41 @@ class D3Family:
     wire_abbr: str
     content_format: str
     enabled: bool = True
+    # 'hklii' (default) → two-hop fetch via HKLII's getother/gethistlaw.
+    # 'pcpd'  → route through the pcpdaab resolver which fetches direct
+    # PDFs from pcpd.org.hk (HKLII's /static/ URLs serve SPA HTML for
+    # pcpdaab). See :mod:`hklii_downloader.pcpdaab`.
+    resolver_kind: str = "hklii"
 
 
-# Three PDF slugs are disabled because HKLII's `pdf` URLs are broken:
+# PDF slugs disabled because HKLII's `pdf` URLs are broken:
 #
 # * histlaw   — /static/en/histlaw/*.pdf serves the SPA HTML placeholder
 #               (200 text/html, ~2.7 kB). Real archive at HKU library
-#               (oelawhk.lib.hku.hk). Needs a resolver.
-# * pcpdaab   — same SPA-HTML issue. Real source is pcpd.org.hk
-#               (/english/enforcement/decisions/decisions.html).
+#               (oelawhk.lib.hku.hk). Data-model mismatch (edition-based
+#               vs year-num); needs a resolver we haven't built.
 # * hkiac     — hkiac.org restructured 2026-07-09; every URL in HKLII's
 #               metadata (2001-2021 UDRP decisions) 404s, category page
 #               also 404s. Provenance only unless HKIAC republishes.
 #
+# pcpdaab was in that bucket until 2026-07-09 when the resolver landed:
+# pcpd.org.hk publishes direct PDFs at
+# /english/enforcement/decisions/files/AAB_*.pdf. Discovery scrapes
+# decisions_detail.html once per run; per-row fetch is a single hop.
+#
 # The disabled families stay in D3_FAMILIES for provenance (freshness
 # ledger continues to probe and track the STALE state). ACTIVE_D3_FAMILIES
 # is the runtime default at every callsite. See
-# `memory/d3-live-wire-findings.md`.
+# `memory/d3-live-wire-findings.md` and `d3-alt-source-research.md`.
 D3_FAMILIES: tuple[D3Family, ...] = (
     D3Family("histlaw", "H", "gethistlaw", "hkhistlaws", "pdf", enabled=False),
     D3Family("hkiac", "O", "getother", "hkiac", "pdf", enabled=False),
     D3Family("hklrccp", "O", "getother", "hklrccp", "html"),
     D3Family("hklrcr", "O", "getother", "hklrcr", "html"),
-    D3Family("pcpdaab", "O", "getother", "pcpdaab", "pdf", enabled=False),
+    D3Family(
+        "pcpdaab", "O", "getother", "pcpdaab", "pdf",
+        resolver_kind="pcpd",
+    ),
     D3Family("pcpdc", "O", "getother", "pcpdc", "html"),
 )
 
