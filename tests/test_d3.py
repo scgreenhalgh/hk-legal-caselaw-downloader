@@ -1311,6 +1311,161 @@ class TestD3RunnerFetchFailures:
             db.close()
 
 
+class TestD3RunnerPcpdaabResolver:
+    """resolver_kind='pcpd' fetches via pcpd.org.hk direct PDF URLs.
+
+    The runner's discovery-phase caller (CLI or update dispatcher)
+    passes a pre-populated `pcpdaab_map` — the runner never fetches
+    the map itself, so tests can inject a mock and stay hermetic.
+    """
+
+    async def test_pcpdaab_fetch_uses_resolver_map(self, tmp_path):
+        import json
+
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+        from hklii_downloader.pcpdaab import PcpdaabEntry
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="pcpdaab", year=2020, num=1, lang="en",
+                title="AAB 1-2020",
+                neutral="[2020] HKPCPDAAB 1",
+                doc_date="2020-01-01",
+            )
+
+            pdf_bytes = b"%PDF-1.4\nfake body\n%%EOF"
+            requested: list[str] = []
+
+            async def mock_get(url, **kw):
+                requested.append(url)
+                return httpx.Response(
+                    200,
+                    content=pdf_bytes,
+                    headers={"content-type": "application/pdf"},
+                    request=httpx.Request("GET", url),
+                )
+
+            pcpdaab_map = {
+                (2020, 1): PcpdaabEntry(
+                    year=2020, num=1, filename="AAB_1_2020.pdf",
+                    chinese_only=False, anchor_text="AAB 1-2020",
+                ),
+            }
+            family = next(f for f in D3_FAMILIES if f.slug == "pcpdaab")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+                pcpdaab_map=pcpdaab_map,
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 1
+            assert result.failed == 0
+            assert len(requested) == 1
+            assert "AAB_1_2020.pdf" in requested[0]
+            base = tmp_path / "d3" / "pcpdaab" / "2020" / "1"
+            assert (base / "pcpdaab_2020_1_en.pdf").read_bytes() == pdf_bytes
+            stored = json.loads(
+                (base / "pcpdaab_2020_1_en.json").read_text(),
+            )
+            assert stored["hklii"]["neutral"] == "[2020] HKPCPDAAB 1"
+            assert stored["pcpd"]["filename"] == "AAB_1_2020.pdf"
+        finally:
+            db.close()
+
+    async def test_pcpdaab_missing_map_entry_marks_failed(self, tmp_path):
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="pcpdaab", year=1999, num=99, lang="en",
+                title="AAB 99-1999", neutral=None, doc_date=None,
+            )
+
+            async def mock_get(url, **kw):
+                raise AssertionError(f"should never fetch: {url}")
+
+            family = next(f for f in D3_FAMILIES if f.slug == "pcpdaab")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+                pcpdaab_map={},  # empty
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 0
+            assert result.failed == 1
+            row = db._conn.execute(
+                "SELECT status, error FROM hopt_documents "
+                "WHERE abbr='pcpdaab' AND year=1999 AND num=99"
+            ).fetchone()
+            assert row[0] == "failed"
+            assert "resolver" in row[1].lower() or "1999/99" in row[1]
+        finally:
+            db.close()
+
+    async def test_pcpdaab_hklii_truncation_uses_title_num(self, tmp_path):
+        """HKLII stores pcpdaab/2013/32 but the real case is AAB 232-2013
+        (title says so). Runner must fall back to title-parsed num when
+        (year, path_num) misses the resolver map.
+        """
+        import httpx
+
+        from hklii_downloader.checkpoint import CheckpointDB
+        from hklii_downloader.d3 import D3_FAMILIES, D3Runner
+        from hklii_downloader.pcpdaab import PcpdaabEntry
+
+        db = CheckpointDB(str(tmp_path / "cp.db"))
+        try:
+            db.upsert_hopt_document(
+                abbr="pcpdaab", year=2013, num=32, lang="en",
+                title="AAB 232-2013 (This decision provides Chinese version only)",
+                neutral="[2013] HKPCPDAAB 32",
+                doc_date="2013-01-02",
+            )
+
+            pdf_bytes = b"%PDF-1.4\nfake"
+
+            async def mock_get(url, **kw):
+                return httpx.Response(
+                    200, content=pdf_bytes,
+                    request=httpx.Request("GET", url),
+                )
+
+            # Map has (2013, 232) — NOT (2013, 32). Runner must find it
+            # via title parsing.
+            pcpdaab_map = {
+                (2013, 232): PcpdaabEntry(
+                    year=2013, num=232, filename="AAB_232_2013.pdf",
+                    chinese_only=True, anchor_text="AAB 232-2013",
+                ),
+            }
+            family = next(f for f in D3_FAMILIES if f.slug == "pcpdaab")
+            runner = D3Runner(
+                get=mock_get, checkpoint=db, output_dir=tmp_path,
+                families=(family,), langs=("en",),
+                pcpdaab_map=pcpdaab_map,
+            )
+
+            result = await runner.fetch_pending()
+
+            assert result.downloaded == 1, "title-num fallback failed"
+            # File written under HKLII's path-num (32), not title (232),
+            # so the pipeline's directory layout still matches HKLII.
+            base = tmp_path / "d3" / "pcpdaab" / "2013" / "32"
+            assert (base / "pcpdaab_2013_32_en.pdf").exists()
+        finally:
+            db.close()
+
+
 class TestD3RunnerAbbrScoping:
     """C1 + H4 — cross-runner isolation via abbr-scoped queue operations.
 
