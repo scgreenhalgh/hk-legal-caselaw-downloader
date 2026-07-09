@@ -44,9 +44,8 @@ class TestD3Family:
             ("histlaw", False),
             # hkiac.org restructured 2026-07-09; every URL 404s.
             ("hkiac", False),
-            # Same SPA-HTML issue as histlaw; source is
-            # pcpd.org.hk/english/enforcement/decisions/decisions.html.
-            ("pcpdaab", False),
+            # PCPD resolver ships 2026-07-09 via pcpd.org.hk direct PDFs.
+            ("pcpdaab", True),
             # HTML slugs — 100% scraped via HKLII getother shape B.
             ("hklrccp", True),
             ("hklrcr", True),
@@ -64,11 +63,34 @@ class TestD3Family:
         fam = next(f for f in D3_FAMILIES if f.slug == slug)
         assert fam.enabled is expected_enabled
 
-    def test_active_d3_families_is_html_slugs_only(self):
+    def test_active_d3_families_is_html_slugs_plus_pcpdaab(self):
         from hklii_downloader.d3 import ACTIVE_D3_FAMILIES
 
         slugs = {f.slug for f in ACTIVE_D3_FAMILIES}
-        assert slugs == {"hklrccp", "hklrcr", "pcpdc"}
+        assert slugs == {"hklrccp", "hklrcr", "pcpdc", "pcpdaab"}
+
+    @pytest.mark.parametrize(
+        "slug,expected_kind",
+        [
+            # Only pcpdaab uses the PCPD alt-source resolver.
+            ("pcpdaab", "pcpd"),
+            # Everything else stays on HKLII's getother/gethistlaw.
+            ("hklrccp", "hklii"),
+            ("hklrcr", "hklii"),
+            ("pcpdc", "hklii"),
+            ("histlaw", "hklii"),
+            ("hkiac", "hklii"),
+        ],
+    )
+    def test_resolver_kind_per_family(self, slug, expected_kind):
+        """`resolver_kind` selects the fetch dispatch. Default is
+        'hklii' (existing two-hop path). 'pcpd' invokes the pcpdaab
+        resolver against pcpd.org.hk direct PDFs.
+        """
+        from hklii_downloader.d3 import D3_FAMILIES
+
+        fam = next(f for f in D3_FAMILIES if f.slug == slug)
+        assert fam.resolver_kind == expected_kind
 
 
 class TestD3UrlBuilders:
