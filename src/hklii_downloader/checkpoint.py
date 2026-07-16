@@ -830,13 +830,32 @@ class CheckpointDB:
         )
         self._conn.commit()
 
-    def release_in_progress_hopt(self) -> None:
+    def release_in_progress_hopt(
+        self, abbrs: tuple[str, ...] | None = None,
+    ) -> None:
         """Recover hopt_documents rows stuck at 'in_progress' after a
-        worker crash. Called at HoptRunner startup."""
-        self._conn.execute(
-            "UPDATE hopt_documents SET status='pending' "
-            "WHERE status='in_progress'"
-        )
+        worker crash. Called at HoptRunner / D3Runner startup.
+
+        When ``abbrs`` is provided, ONLY rows for those abbrs are
+        released — required by D3Runner to avoid resurrecting a
+        HoptRunner-owned in_progress row into the D3 claim pool, which
+        would then trigger the cross-runner data-loss path fixed by
+        the abbr scope on :meth:`claim_pending_hopt`.
+        """
+        if abbrs is None:
+            self._conn.execute(
+                "UPDATE hopt_documents SET status='pending' "
+                "WHERE status='in_progress'"
+            )
+        else:
+            if not abbrs:
+                return
+            placeholders = ",".join("?" for _ in abbrs)
+            self._conn.execute(
+                f"UPDATE hopt_documents SET status='pending' "
+                f"WHERE status='in_progress' AND abbr IN ({placeholders})",
+                tuple(abbrs),
+            )
         self._conn.commit()
 
     def release_in_progress_legis(self) -> None:
@@ -1436,11 +1455,35 @@ class CheckpointDB:
         )
         self._conn.commit()
 
-    def claim_pending_hopt(self) -> HoptRecord | None:
-        row = self._conn.execute(
-            "SELECT abbr, year, num, lang, title, neutral, doc_date "
-            "FROM hopt_documents WHERE status='pending' LIMIT 1"
-        ).fetchone()
+    def claim_pending_hopt(
+        self, abbrs: tuple[str, ...] | None = None,
+    ) -> HoptRecord | None:
+        """Claim one pending hopt_documents row.
+
+        When ``abbrs`` is provided, only rows for those abbrs are
+        eligible — cross-runner isolation for D3Runner (which shares
+        the ``hopt_documents`` table with HoptRunner). Without it a
+        D3Runner run would claim a HoptRunner-owned bacpg/bahkg row
+        and mark it 'failed' via the unknown-family path, which is a
+        permanent data loss because :meth:`upsert_hopt_document`
+        preserves status on conflict.
+        """
+        if abbrs is None:
+            row = self._conn.execute(
+                "SELECT abbr, year, num, lang, title, neutral, doc_date "
+                "FROM hopt_documents WHERE status='pending' LIMIT 1"
+            ).fetchone()
+        else:
+            if not abbrs:
+                return None
+            placeholders = ",".join("?" for _ in abbrs)
+            row = self._conn.execute(
+                f"SELECT abbr, year, num, lang, title, neutral, doc_date "
+                f"FROM hopt_documents "
+                f"WHERE status='pending' AND abbr IN ({placeholders}) "
+                f"LIMIT 1",
+                tuple(abbrs),
+            ).fetchone()
         if not row:
             return None
         self._conn.execute(
@@ -1477,10 +1520,30 @@ class CheckpointDB:
         )
         self._conn.commit()
 
-    def hopt_stats(self) -> dict:
-        rows = self._conn.execute(
-            "SELECT status, COUNT(*) FROM hopt_documents GROUP BY status"
-        ).fetchall()
+    def hopt_stats(self, abbrs: tuple[str, ...] | None = None) -> dict:
+        """Return per-status counts of hopt_documents rows.
+
+        When ``abbrs`` is provided, only rows for those abbrs are
+        counted. Required by ``_run_scrape_d3`` to avoid confusing the
+        operator with leftover HoptRunner-owned pending counts that
+        the D3 drain loop (correctly scoped after C1) would never
+        touch anyway.
+        """
+        if abbrs is None:
+            rows = self._conn.execute(
+                "SELECT status, COUNT(*) FROM hopt_documents "
+                "GROUP BY status"
+            ).fetchall()
+        else:
+            if not abbrs:
+                return {"total": 0, "pending": 0, "in_progress": 0,
+                        "downloaded": 0, "failed": 0}
+            placeholders = ",".join("?" for _ in abbrs)
+            rows = self._conn.execute(
+                f"SELECT status, COUNT(*) FROM hopt_documents "
+                f"WHERE abbr IN ({placeholders}) GROUP BY status",
+                tuple(abbrs),
+            ).fetchall()
         counts = {r[0]: r[1] for r in rows}
         return {
             "total": sum(counts.values()),

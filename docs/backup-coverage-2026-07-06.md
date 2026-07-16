@@ -6,6 +6,51 @@
 **Total documents**: 202,286
 **Disk footprint**: 29 GB
 
+> **Superseded 2026-07-08 by the D2 freshness probe.**
+>
+> This report was accurate for 2026-07-06 as captured. Three claims
+> below have since been disproved by the metadata probe shipped with
+> the D2 freshness pipeline. Numbers here are preserved verbatim as a
+> point-in-time snapshot; for current state query `db_freshness` or
+> run `hklii check-freshness --report`.
+>
+> **Correction 1** — "9 databases have zero content" (paragraph below).
+> Only `pd` is genuinely empty. The others are populated (live counts
+> as of 2026-07-08 D2 probe):
+>
+> | slug     | EN    | TC  | SC  | notes |
+> |----------|------:|----:|----:|-------|
+> | histlaw  | 3,836 |   0 |   0 | English-only historical laws archive |
+> | pcpdaab  |   368 | 368 |   0 | Privacy Commissioner admin appeals, bilingual |
+> | hkiac    |   190 |   0 |   0 | HKIAC domain-name arbitration, English-only |
+> | pcpdc    |   165 | 165 | 165 | Privacy Commissioner cases, trilingual |
+> | hklrcr   |   137 | 137 | 137 | HKLRC reports, trilingual |
+> | hklrccp  |    78 |  72 |  72 | HKLRC consultation papers, trilingual |
+> | ukpc     |   242 |   — |   — | 237 captured; 5 upstream gaps — see `docs/freshness-sanity-check.md` |
+> | hksct    |     0 |   6 |   — | Local=live=6 (TC-only), already captured |
+> | pd       |     0 |   0 |   0 | Genuinely empty; parity holds vacuously |
+>
+> **Correction 2** — "hksct and ukpc hold zero documents" (§ Per-court
+> judgment counts, line 45). Both hold content; ukpc scraped, hksct
+> TC captured.
+>
+> **Correction 3** — "gethistlaw / getother target database is empty"
+> (§ Confirmed empty API surface, lines 116-117). Both endpoints
+> return populated JSON. HTML slugs (`hklrccp`, `hklrcr`, `pcpdc`)
+> ship an embedded `content` HTML field. PDF slugs (`histlaw`, `hkiac`,
+> `pcpdaab`) ship a `pdf` URL — `histlaw` on hklii.hk, `hkiac` and
+> `pcpdaab` on external source-org hosts. See `docs/d3-runner-design.md`
+> for the response shapes and the D3 runner plan.
+>
+> **Follow-up 2026-07-09** — HTML slugs (hklrccp/hklrcr/pcpdc) fully
+> scraped: 1,128 rows across en+tc+sc, all buckets FRESH. PDF slugs
+> uncovered further HKLII-side issues: histlaw + pcpdaab `/static/`
+> PDFs are HTML placeholders (real content lives at HKU library and
+> pcpd.org.hk respectively — need source-org resolvers); hkiac's
+> `hkiac.org` URLs universally 404 after HKIAC restructured (`hkiac`
+> disabled at family-spec level, rows removed from checkpoint DB).
+> See `memory/d3-live-wire-findings.md`.
+
 Every content-populated database listed at `https://www.hklii.hk/databases`
 is now on local disk. The 9 databases listed there with zero content
 (`hkiac`, `hklrccp`, `hklrcr`, `pcpdaab`, `pcpdc`, `pd`, `histlaw`,

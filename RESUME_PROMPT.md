@@ -1,87 +1,126 @@
-/effort max
-/ultracode
+HKLII downloader + viewer — resume prompt.
 
-Resuming HKLII offline viewer. Phases 1-3 done: graph helpers, FTS
-pipeline, body-render pipeline — TDD pairs, two review rounds folded in.
-**977 tests pass. 57 commits ahead of `main`. Nothing pushed to origin.**
+## Load context via subagents in parallel
 
-**Immediate task: Phase 4 — 10 FastAPI routes.** TestClient + BS4
-assertions, no live server until Phase 5.
+Do NOT read these on the main thread. Spawn three forks in one message.
 
-## Load context (pull, don't preload)
+1. **Fork A — recent state + shipping.** Read
+   `~/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md`
+   and the newest close
+   `memory/session-close-2026-07-09-D3-shipped.md`. Summarise: what
+   shipped in the 2026-07-09 burst, what health-check on 2026-07-17
+   confirmed, standing rules (pool-only, TDD, no push), and the
+   ranked next-work options. Under 250 words.
 
-1. `~/.claude/projects/-Users-seangreenhalgh-Developer-hklii-downloader/memory/MEMORY.md`
-   — auto-memory index.
-2. `memory/session-close-2026-07-07-viewer-phases-1-3.md` — Phase 1-3
-   outcomes, tier-3/4 deferrals, SQLite footguns (UPSERT vs INSERT OR
-   REPLACE trigger-fire).
-3. `memory/viewer-build-through-phase-3.md` — module layout: `viewer/db.py`
-   `schema.py` `graph.py` `search.py` `body_render/{text,render,sanitizer,
-   cite}.py`. Read before adding modules — helpers exist.
-4. `~/Developer/hklii_viewer/docs/viewer-design.md` §§7-10 — route
-   contracts, templates, HTMX partials, error surfaces. **§11 line 320**
-   has Phase 4 ship order.
-5. `~/Developer/hklii_downloader/docs/review-patterns.md` — 5 lenses.
-   Apply at each pair: L1 silent skip, L2 semantic drift, L3 docstring
-   drift, L4 wrong-side test (route AND helper), L5 ambiguous state.
+2. **Fork B — quirks + gaps.** Read `docs/freshness-sanity-check.md`
+   and `docs/ukpc-manual-download.md`. Summarise permanent HKLII
+   quirks + phantom entries + UKPC 5-of-242 manual plan. Under 200 words.
 
-## Baseline (verify before starting)
+3. **Fork C — D3 architecture as-shipped.** Read
+   `src/hklii_downloader/d3.py` (ACTIVE_D3_FAMILIES, resolver_kind
+   dispatch, D3Family spec) and `src/hklii_downloader/pcpdaab.py`
+   (pcpd.org.hk discovery + fetch + save). Report the shipped shape
+   so future work extends it consistently. Under 300 words.
 
-```bash
-cd ~/Developer/hklii_viewer
-git status                                       # clean, worktree-local-viewer
-git log --oneline main..HEAD | wc -l             # 57
-timeout 300 uv run pytest -q 2>&1 | tail -3      # 977 passed
+Wait for all three. Do not answer the operator until grounded.
 
+## Baseline (verify before any code)
+
+```
 cd ~/Developer/hklii_downloader
-git status                                       # clean
-git log --oneline origin/main..HEAD | wc -l      # 0
+git status                                            # clean apart from scratchpad
+git log --oneline origin/main..HEAD | wc -l           # 0 ahead of origin/main
+uv run pytest --collect-only -q 2>&1 | tail -1        # 1160 tests collected
+
+cd ~/Developer/hklii_viewer
+git status
+git log --oneline origin/worktree-local-viewer..HEAD | wc -l  # 59 ahead of its remote
+git log --oneline HEAD..origin/main | wc -l                   # 83 behind main
 ```
 
-If any drifts, stop and surface.
+If any drifts materially, stop and surface — a session may have shipped
+new work.
 
-## Phase 4 sequencing (design §11 line 320)
+## Where we are (as of 2026-07-17)
 
-Ten routes as TDD pairs. Order matters — later reuse earlier templates:
+- **Downloader**: main @ `bca049d`, 0 ahead of origin, working tree
+  clean apart from `scratchpad/`. **1160 tests passing.** No CI.
+- **Corpus**: 162,713 cases · 9,464 legis in-force · 30,943 historical
+  revisions · 3,014 hopt/D3 rows · 64 db_freshness rows. **33 GB on disk.**
+- **D3 pipeline SHIPPED (2026-07-09)**: `ACTIVE_D3_FAMILIES` =
+  `hklrccp` / `hklrcr` / `pcpdaab` / `pcpdc`. `pcpdaab` uses the new
+  `resolver_kind='pcpd'` dispatch against pcpd.org.hk (735 PDFs on disk).
+  `histlaw` + `hkiac` sit permanently `enabled=False` as provenance
+  markers (HKLII source SPA-placeholders / hkiac.org restructured).
+- **Freshness**: 64 db_freshness rows, all FRESH except intentional
+  histlaw/hkiac STALEs and 2 documented single-row phantoms
+  (hkts/1961/2 tc, pcpdaab/2019/8 tc).
+- **VPN pool** (2026-07-17 probe): 20/20 containers healthy.
+- **External hosts** (2026-07-17 probe): HKLII 200 ✓,
+  pcpd.org.hk resolver URL 200 ✓, Judiciary judgment endpoint 200 ✓.
+- **Viewer worktree** at `~/Developer/hklii_viewer`, branch
+  `worktree-local-viewer`, HEAD `97bd09d`: 1446 tests pass, **59
+  commits ahead of remote (unpushed) AND 83 behind origin/main**
+  (missed the D3 push). `/freshness` page needs a merge + boot smoke
+  test before publication.
 
-1. `GET /` — home: recent cases + court tiles
-2. `GET /court/{slug}` — landing: year buckets + hub cases
-3. `GET /court/{slug}/{year}` — year: paginated case list
-4. `GET /case/{slug}/{cid}` — detail: metadata + rendered body
-5. `GET /case/{slug}/{cid}/cited-by` — HTMX partial: inbound
-6. `GET /case/{slug}/{cid}/authorities` — HTMX partial: outbound
-7. `GET /case/{slug}/{cid}/parallel` — HTMX partial: parallel cites
-8. `GET /search` — FTS form + BM25 results
-9. `GET /search/results` — HTMX partial: paginated results
-10. `GET /healthz` — DB open + schema-version check
+## Standing rules (non-negotiable)
 
-Each pair: failing test (200, template renders, BS4 asserts element),
-then implementation. **Paste failing test output before implementing**
-(global rule #1). Two commits: `test: add failing test for route N`,
-then `feat: implement route N`. Never combine.
+- **ALWAYS use the 20-proxy VPN pool (`127.0.0.1:8888-8907`)** for
+  ANY HKLII / Judiciary / pcpd.org.hk probe. Never direct curl.
+  Runners always route through `ProxyPool`.
+- TDD strict: failing test → paste output → implement. Two commits
+  per pair.
+- Never modify a failing test to make it pass. Correct wrong-
+  expectation tests in their own `test: correct expectation` commit.
+- **Do NOT push to origin without ask.**
+- Docstrings explain WHY, not WHAT. No emojis. Match surrounding style.
 
-## Design deviations locked in
+## Ranked next-work options (from 2026-07-17 grounding workflow)
 
-- **Option 3 scope**: viewer never writes `checkpoint.db`. Hub cache in
-  `viewer.db`. No `from_court` column added upstream.
-- **Body dispatch**: `select_body_source` prefers native `.html`, falls
-  back to `.generated.html`, invalidates via `format_availability_digest`.
-- **Sanitizer**: unwrap (form/button) / drop-subtree (script/style/iframe)
-  / void-drop (link/meta) — three sets, don't collapse.
-- **Citation linkifier**: HKLII pre-wraps neutral cites in `<a>`; regex
-  correctly skips. Zero additional wrapping on real bodies is expected.
+Pick one; the ranking reflects value/effort/risk.
 
-## Deferrals (do not re-open unless asked)
+1. **[HIGH]** Viewer catch-up — merge `origin/main` into
+   `worktree-local-viewer`, rerun 1446 tests, boot `hklii viewer
+   index` + `hklii serve`, verify `/freshness` reflects the
+   D3+pcpdaab reality, then ask before pushing 59 commits.
+   Effort: ~1 session. Risk: merge conflicts around freshness
+   schema likely.
+2. **[MEDIUM]** Docs sync — refresh `docs/d3-runner-design.md`
+   status table + D3Family spec, `docs/freshness-sanity-check.md:87`,
+   `README.md` corpus counts + CLI subcommand list; rehome the
+   6 committed source citations to `scratchpad/REVIEW_VERDICT.md` /
+   `scratchpad/VALIDATOR_SPEC.md`. Effort: ~4-6 hours. Risk: low.
+3. **[MEDIUM]** Structural refactor pair — extract
+   `src/hklii_downloader/constants.py` (audit `_BASE_URL` × 11 and
+   the scraper/enumerator 403-retry divergence at `scraper.py:30`
+   vs `enumerator.py:22`), then split `CheckpointDB` (1935 lines,
+   82 methods, 8 domains) into per-domain repos.
+   Effort: ~2 hours + 1 session. Risk: god-object migration.
+4. **[MEDIUM]** Permanent-gap taxonomy — model hkts/1961/2 tc,
+   pcpdaab/2019/8 tc, UKPC 5 (1987/3, 1988/2, 1993/3, 1995/4,
+   1997/4), hkdc/2019/128 EN-alt as `documented_gap` status so
+   validators stop re-flagging permanent breakage.
+   Effort: ~2-3 hours. Risk: schema change + migration.
+5. **[LOW]** Deferred fills — manual UKPC 5-of-242 fetch from
+   BAILII (recipe in `docs/ukpc-manual-download.md`); probe HKIAC
+   for new URL pattern per `d3-live-wire-findings.md`.
+   Effort: ~1-2 hours each. Risk: low.
+6. **[LOW]** histlaw disposition — either ship the HKU Omeka
+   resolver (design in `d3-alt-source-research.md`) OR write it
+   off. Effort: ~1 session decision + variable ship time. Get
+   operator's call before spending session on the resolver.
 
-- Tier-3: appeal_chain path traversal, sha+body_source drift, commit-per-
-  case fsync — Phase 5 with CLI + WAL story.
-- Tier-4 PLAUSIBLE: open-tx on mid-run raise, snippet empty-highlight,
-  open_readonly concurrent-writer test — Phase 6 with contract tests.
+## Deliberate non-goals (unchanged)
+
+- Do NOT ship a BAILII scraper for UKPC automated — report is manual.
+- Do NOT generalise the `hkdc/2019/128` Judiciary-DOCX fix into a
+  global fallback — one row, documented.
+- Do NOT push to `origin/main` or `origin/worktree-local-viewer`
+  without explicit ask.
 
 ## Ready
 
-Run baseline. If clean, say "baseline clean, Phase 4 route 1 next" and
-start the first failing test. If baseline drifts, stop and surface.
-
-Do not push to origin without ask. Do not touch downloader repo unless a
-helper migrates upstream (unlikely this phase).
+Run the three forks. When they return, run baseline, then say
+"**D3 shipped, health-checked green — picking from ranked options**"
+and ask the operator which of items 1–6 above to start on.
