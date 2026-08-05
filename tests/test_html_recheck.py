@@ -242,6 +242,48 @@ class TestHtmlRecheckRunnerEvents:
             f"{events.samples}"
         )
 
+    async def test_challenge_detected_carries_proxy_url(self, tmp_path):
+        """The challenge_detected schema branch requires proxy_url; a
+        recheck-detected challenge must therefore include it, mirroring
+        scraper.py:499-506 which supplies
+        `proxy_url=getattr(resp, "hklii_proxy_url", None)`. Without this
+        the first recheck-detected challenge produces a schema-invalid
+        events.jsonl row (documented in
+        docs/schemas/events-log.schema.json)."""
+        from hklii_downloader.html_recheck import HtmlRecheckRunner
+
+        db = _make_db_with_pending_row()
+        events = _CapturingEvents()
+
+        async def mock_get(url, **kw):
+            resp = httpx.Response(
+                200,
+                json={**SAMPLE_RESP,
+                      "content": "<html>Just a moment... cloudflare</html>"},
+                request=httpx.Request("GET", url),
+            )
+            # ProxyPool stamps this attribute on every response it serves
+            # (see proxy_pool.py:460). The recheck runner reads it via
+            # getattr with a None default, so the mock reproduces the
+            # stamping to prove the value threads through.
+            resp.hklii_proxy_url = "http://localhost:8891"
+            return resp
+
+        runner = HtmlRecheckRunner(
+            get=mock_get, checkpoint=db, output_dir=tmp_path,
+            formats={"html"}, events=events,
+        )
+        await runner.recheck_all()
+
+        emitted = [e for e in events.events if e["kind"] == "challenge_detected"]
+        assert len(emitted) == 1, (
+            f"expected one challenge_detected event, got {events.events}"
+        )
+        assert emitted[0].get("proxy_url") == "http://localhost:8891", (
+            "challenge_detected must carry proxy_url from resp.hklii_proxy_url; "
+            f"got fields {sorted(emitted[0].keys())}"
+        )
+
     async def test_http_failure_emits_case_failed(self, tmp_path):
         """Non-200 upstream (or json-parse failure) counts as failed and
         must land in the events stream so operators can tell "recheck
