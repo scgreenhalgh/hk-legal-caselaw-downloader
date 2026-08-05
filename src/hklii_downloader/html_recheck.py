@@ -150,6 +150,7 @@ class HtmlRecheckRunner:
                 self._events.emit(
                     "challenge_detected",
                     court=record.court, year=record.year, num=record.number,
+                    proxy_url=getattr(resp, "hklii_proxy_url", None),
                     url=case.api_url,
                     error_class="challenge-page",
                     error_msg=(
