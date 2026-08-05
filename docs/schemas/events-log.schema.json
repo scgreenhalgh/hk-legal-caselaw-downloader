@@ -86,7 +86,7 @@
       "required": ["kind", "court", "year", "num", "error_class", "error_msg"]
     },
     {
-      "description": "challenge_detected — WAF/interstitial captured mid-scrape. Emitted by scraper.py (which supplies proxy_url via getattr(resp, 'hklii_proxy_url', None)) and by html_recheck.py (which currently does NOT supply proxy_url — a latent bug that will produce a schema-invalid row on the first challenge captured during recheck; see html_recheck.py:150-161).",
+      "description": "challenge_detected — WAF/interstitial captured mid-scrape. Emitted by scraper.py and html_recheck.py; both supply proxy_url via getattr(resp, 'hklii_proxy_url', None) which is stamped by proxy_pool.py:460 on every response the pool serves.",
       "properties": {
         "kind": {"const": "challenge_detected"},
         "court": {"type": "string"},
