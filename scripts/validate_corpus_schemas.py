@@ -13,6 +13,7 @@ The point is to keep the schemas honest: if the on-disk shape drifts
 from __future__ import annotations
 
 import json
+import random
 import sys
 from pathlib import Path
 from typing import Callable, Iterator
@@ -26,49 +27,65 @@ except ImportError:
 
 REPO = Path(__file__).resolve().parent.parent
 SCHEMAS = REPO / "docs" / "schemas"
-SAMPLES_PER_TYPE = 5
+SAMPLES_PER_TYPE = 20
+# Random sampling seed — deterministic so a fail is reproducible.
+# Random beats first-N sort because HKLII shape drift often correlates
+# with year (e.g. UKPC lookup differs by decade, TC availability by era).
+_RNG_SEED = 1337
+
+
+def take(paths: Iterator[Path], n: int) -> list[Path]:
+    """Random sample up to `n` paths — deterministic under _RNG_SEED."""
+    all_paths = list(paths)
+    if len(all_paths) <= n:
+        return sorted(all_paths)
+    rng = random.Random(_RNG_SEED)
+    return sorted(rng.sample(all_paths, n))
 
 
 def load_schema(name: str) -> dict:
     return json.loads((SCHEMAS / name).read_text())
 
 
-def take(paths: Iterator[Path], n: int) -> list[Path]:
-    picked: list[Path] = []
-    for p in sorted(paths):
-        picked.append(p)
-        if len(picked) >= n:
-            break
-    return picked
+# Court slugs that use case-metadata.schema.json (13 courts/tribunals).
+# UKPC is excluded — it uses ukpc-metadata.schema.json (different wire
+# endpoint, different persisted shape). HOPT / D3 / legis / failure_samples
+# / .enum_cache are non-court siblings.
+_CASE_METADATA_COURTS = {
+    "hkca", "hkcfa", "hkcfi", "hkcrc", "hkct", "hkdc",
+    "hkfc", "hklat", "hkldt", "hkmagc", "hkoat", "hksct",
+}
+
+
+def _iter_primary_json(root: Path, court_slugs: set[str]) -> Iterator[Path]:
+    """Yield {stem}.json files (no dot-infixed sidecars) under the given courts."""
+    for slug in court_slugs:
+        court_dir = root / slug
+        if not court_dir.is_dir():
+            continue
+        for year_dir in court_dir.iterdir():
+            if not year_dir.is_dir():
+                continue
+            for f in year_dir.iterdir():
+                if f.suffix != ".json":
+                    continue
+                if "." in f.name[: -len(".json")]:
+                    continue
+                yield f
 
 
 def find_case_metadata(root: Path) -> list[Path]:
-    # {court}/{year}/{court}_{year}_{num}.json — exclude sidecar *.tc.json,
-    # *.noteup.json, *.appeal_history.json by dot count in the stem, and
-    # skip non-court siblings (d3/, legis/, hopt/, failure_samples/,
-    # .enum_cache/, and any other dot-prefixed metadata dirs).
-    out: list[Path] = []
-    for court_dir in sorted(root.iterdir()):
-        if not court_dir.is_dir():
-            continue
-        if court_dir.name.startswith("."):
-            continue
-        if court_dir.name in {"d3", "legis", "hopt", "failure_samples"}:
-            continue
-        for year_dir in sorted(court_dir.iterdir()):
-            if not year_dir.is_dir():
-                continue
-            for f in sorted(year_dir.iterdir()):
-                if f.suffix != ".json":
-                    continue
-                # Only primary metadata — reject sidecars by dot count.
-                stem = f.name[: -len(".json")]
-                if "." in stem:
-                    continue
-                out.append(f)
-                if len(out) >= SAMPLES_PER_TYPE:
-                    return out
-    return out
+    return take(_iter_primary_json(root, _CASE_METADATA_COURTS), SAMPLES_PER_TYPE)
+
+
+def find_tc_sidecars(root: Path) -> list[Path]:
+    # TC sidecars share the case-metadata schema. Cover them explicitly —
+    # sample from every court that has any (mostly hkcfi/hkdc/hkca).
+    return take(root.rglob("*.tc.json"), SAMPLES_PER_TYPE)
+
+
+def find_ukpc_metadata(root: Path) -> list[Path]:
+    return take(_iter_primary_json(root, {"ukpc"}), SAMPLES_PER_TYPE)
 
 
 def find_noteup(root: Path) -> list[Path]:
@@ -156,6 +173,8 @@ def validate_jsonl(schema: dict, path: Path, limit: int = 200) -> list[str]:
 
 CHECKS: list[tuple[str, str, Callable[[Path], list[Path]]]] = [
     ("case-metadata.schema.json", "court case metadata", find_case_metadata),
+    ("case-metadata.schema.json", "tc.json sidecars (same schema)", find_tc_sidecars),
+    ("ukpc-metadata.schema.json", "UKPC metadata", find_ukpc_metadata),
     ("noteup.schema.json", "noteup", find_noteup),
     ("appeal-history.schema.json", "appeal history", find_appeal_history),
     ("hopt-entry.schema.json", "HOPT entry", find_hopt),

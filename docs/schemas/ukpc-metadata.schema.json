@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/ukpc-metadata.schema.json",
+  "title": "UKPC judgment metadata",
+  "description": "Judicial Committee of the Privy Council appeals from Hong Kong. Comes through HKLII's /api/getother (hopt-C category), not /api/getjudgment, so ukpc.py:save_ukpc_local writes a distinct shape from the 13 mainline court/tribunal slugs. On disk at output/ukpc/{year}/ukpc_{year}_{num}.json — sits in a court directory but uses this schema, not case-metadata.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "neutral_citation", "date", "abbr", "year", "num", "lang", "url"],
+  "properties": {
+    "title": {"type": "string"},
+    "neutral_citation": {"type": "string", "description": "e.g. '[1996] UKPC 40'."},
+    "date": {"type": "string", "description": "YYYY-MM-DD."},
+    "abbr": {
+      "type": "string",
+      "const": "ukpc",
+      "description": "Court slug — always 'ukpc' on this shape."
+    },
+    "year": {"type": "integer", "description": "Judgment year — matches directory."},
+    "num": {"type": "integer", "description": "Judgment number — matches filename."},
+    "lang": {"type": "string", "enum": ["en", "tc"], "description": "Lowercase in the metadata (contrast with UKPC's HKLII listing endpoint which uses uppercase EN/TC)."},
+    "url": {"type": "string", "format": "uri", "description": "Canonical HKLII URL."}
+  }
+}

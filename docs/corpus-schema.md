@@ -28,11 +28,13 @@ against real samples on every commit via
 
 ```
 output/
-  {court}/{year}/                     — 17 court/tribunal slugs (main corpus)
+  {court}/{year}/                     — 13 case-metadata courts + ukpc (see §1)
     {court}_{year}_{num}.{json,html,txt,doc,docx,rtf,generated.html}
     {court}_{year}_{num}.{noteup,appeal_history}.json
     {court}_{year}_{num}.summary_{en,zh}.html          (when HKLII publishes one)
     {court}_{year}_{num}.tc.{json,html,txt,docx}       (case-translations sidecar)
+  ukpc/{year}/                        — UKPC uses ukpc-metadata schema (§1.5)
+    ukpc_{year}_{num}.json                             (different shape — no .html/.txt siblings)
   hopt/{abbr}/{year}/{num}/
     {abbr}_{year}_{num}_{lang}.json                    (5 databases · 2 langs)
   d3/{family}/{year}/{num}/
@@ -49,14 +51,17 @@ output/
     challenge_{court}_{year}_{num}.{html,headers.json}
   .enum_cache/{court}_{lang}/         — raw getcasefiles snapshots (provenance)
     {unix_ts}_page{NNNN}.json
+  .checkpoint.db                      — scraper state DB (SQLite, 11 tables, §9)
+  .hklii.lock · .checkpoint.db.lock   — fcntl exclusive locks (zero-byte)
   viewer.db (+ .db-wal, .db-shm)      — SQLite search index for the local viewer
 ```
 
 # 1. Court case records
 
-**Locations:** `output/{court}/{year}/`. Court slugs: `hkcfa, hkca, hkcfi,
-hkdc, hkfc, hkldt, hkmagc, hkct, hkcrc, hklat, hksct, hkoat, ukpc` plus a
-few tribunal micro-collections.
+**Locations:** `output/{court}/{year}/`. The 13 slugs that use the
+canonical case-metadata schema: `hkcfa, hkca, hkcfi, hkdc, hkfc, hkldt,
+hkmagc, hkct, hkcrc, hklat, hksct, hkoat`. `ukpc` uses a **different
+shape** — see [§1.5](#15-ukpc-different-shape).
 
 **Naming:** stem = `{court}_{year}_{number}` (e.g. `hkcfa_2020_10`). No lang
 suffix on the primary file — that is EN unless HKLII has TC only. TC
@@ -119,10 +124,58 @@ is a convenience rendering.
 Files with a `.tc` infix (`{stem}.tc.json`, `.tc.html`, `.tc.txt`, `.tc.docx`)
 are written by `case_translations.py` when the primary scrape ran with
 `--lang both` under EN-wins-for-bilingual semantics and the TC counterpart
-was missed. Only 1,517 exist. For most TC judgments the TC copy is a
+was missed. Only 1,517 exist. All 1,517 `.tc.json` files validate against
+[`case-metadata.schema.json`](schemas/case-metadata.schema.json) — same
+shape as the primary metadata. For most TC judgments the TC copy is a
 **separate primary** at the same `(court, year, number)` under
 `output/{court}/{year}/{stem}.json` with `url` pointing at `/tc/cases/...`
 — that is where the bulk of the 45k+ Chinese records live.
+
+### Optional backfill provenance fields
+
+One row in the current corpus (`hkdc/2019/128.tc.json`) carries three
+additional fields recording that it was fetched outside the normal
+`getjudgment` path:
+
+- `source` — e.g. `"judiciary-docx-fallback"`
+- `source_note` — human-readable explanation of the fallback route
+- `backfilled_at` — YYYY-MM-DD
+
+These are optional in [`case-metadata.schema.json`](schemas/case-metadata.schema.json).
+`hkdc/2019/128` is the sole documented instance — HKLII's
+`getjudgment?lang=tc` returned empty `content` while including a doc
+pointer; the row was fetched from Judiciary and locally converted via
+pandoc. Per project standing rules, this fallback path is not
+generalised — see `RESUME_PROMPT.md` Deliberate non-goals.
+
+## 1.5 UKPC (different shape)
+
+UKPC (Judicial Committee of the Privy Council appeals from HK) comes
+through HKLII's `/api/getother` (hopt-C category), not `/api/getjudgment`.
+`ukpc.py:save_ukpc_local` therefore writes a distinct shape from the 13
+mainline courts.
+
+Schema: [`ukpc-metadata.schema.json`](schemas/ukpc-metadata.schema.json).
+
+**Files:** only `ukpc_{year}_{num}.json` per row — no `.html`, `.txt`,
+`.doc`, `.noteup.json`, or `.appeal_history.json` siblings.
+
+```json
+{
+  "title": "Mak v. Wocom Commodities Limited",
+  "neutral_citation": "[1996] UKPC 40",
+  "date": "1996-11-12",
+  "abbr": "ukpc",
+  "year": 1996,
+  "num": 40,
+  "lang": "en",
+  "url": "https://www.hklii.hk/en/cases/ukpc/1996/40"
+}
+```
+
+**Missing** vs case-metadata: `case_number`, `court`, `doc_url`,
+`has_translation`, `parallel_citations`. **Extras**: `abbr`, `year`,
+`num`, `lang`. 237 rows in the corpus; every one uses this shape.
 
 # 2. HOPT — treaties, gazette, Basic Law consultation
 
@@ -309,9 +362,11 @@ Sampled evidence for tuning proxy/UA behaviour — not case data.
 
 # 8. Local viewer index
 
-`output/viewer.db` — SQLite database populated by `hklii viewer index` (in
-the viewer worktree, not in this repo). Not the case store — an index over
-the on-disk files.
+`output/viewer.db` — SQLite database populated by `hklii viewer index`
+(in the viewer worktree, not in this repo). Not the case store — an
+index over the on-disk files. Row count varies with how much of the
+corpus has been indexed; use `sqlite3 output/viewer.db "SELECT COUNT(*)
+FROM fts_cases"` to check the current state.
 
 WAL-mode; `.db-wal` / `.db-shm` sidecars are normal.
 
@@ -322,13 +377,27 @@ WAL-mode; `.db-wal` / `.db-shm` sidecars are normal.
 | `fts_cases` | `case_key, lang, court, year, number, neutral, title, date, body_source, body_sha256, indexed_at` | Case metadata + body hash. PK `(case_key, lang)`. `case_key` is `"hkcfa/2020/10"`. |
 | `case_bodies` | `id, case_key, lang, title, body` | Full body text. Unique `(case_key, lang)`. |
 | `fts_body` | FTS5 virtual (trigram tokenizer, case-insensitive) | Full-text search over `case_bodies`. Requires `fts5` module in the SQLite build. |
-| `viewer_hub_cache` | `case_key, inbound_count, computed_at` | Cached inbound-citation counts. Empty in the current DB. |
+| `viewer_hub_cache` | `case_key, inbound_count, computed_at` | Cached inbound-citation counts. Empty when not populated. |
 
 Indexes: `idx_fts_cases_court_year (court, year)`, `idx_fts_cases_lang_court (lang, court)`.
 
 `body_sha256` is the natural dedup key for text-identical judgments across
 multiple dockets. `body_source` records provenance — `html` = HKLII HTML,
 `generated_html` = local pandoc conversion.
+
+# 9. Scraper state DB — `.checkpoint.db`
+
+`output/.checkpoint.db` — the SQLite DB where the scraper stores its
+authoritative state: every fetch attempt, every citation edge, every
+freshness signal. The on-disk JSON/HTML files under `output/` are
+**derived** from this DB — if they get deleted, `hklii verify` reconciles
+against the DB and re-scrapes what's missing.
+
+Full table reference (11 tables, ~450k rows including 162,713 cases and
+242,488 citation edges): [`docs/schemas/checkpoint-db.md`](schemas/checkpoint-db.md).
+
+The top-level `checkpoint.db` at the repo root is a stub from an earlier
+layout — the live DB is the one under `output/`.
 
 # Text logs
 

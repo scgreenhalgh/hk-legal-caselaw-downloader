@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hklii-downloader.local/schemas/case-metadata.schema.json",
   "title": "Court case primary metadata",
-  "description": "Written by client.save_judgment_local for every court judgment. On disk at output/{court}/{year}/{court}_{year}_{number}.json (EN or TC-primary); TC sidecar variants use the .tc.json suffix.",
+  "description": "Written by client.save_judgment_local for every judgment from the 13 mainline court/tribunal slugs (hkcfa, hkca, hkcfi, hkdc, hkfc, hkldt, hkmagc, hkct, hkcrc, hklat, hksct, hkoat + tribunal micro-collections). UKPC uses a distinct shape — see ukpc-metadata.schema.json. On disk at output/{court}/{year}/{court}_{year}_{number}.json (EN or TC-primary); TC sidecar variants use the .tc.json suffix and share this schema. Optional backfill provenance fields (source, source_note, backfilled_at) mark rows fetched outside the normal getjudgment path — one such row exists in the current corpus (hkdc/2019/128.tc.json).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -55,6 +55,18 @@
       "type": "string",
       "format": "uri",
       "description": "Canonical HKLII URL for this row. Language derivable from the /en/ or /tc/ path segment."
+    },
+    "source": {
+      "type": "string",
+      "description": "OPTIONAL. Provenance marker when the row was fetched outside the normal getjudgment path (e.g. 'judiciary-docx-fallback')."
+    },
+    "source_note": {
+      "type": "string",
+      "description": "OPTIONAL. Human-readable explanation of the fallback route. Written alongside `source`."
+    },
+    "backfilled_at": {
+      "type": "string",
+      "description": "OPTIONAL. YYYY-MM-DD date the backfill was performed. Written alongside `source`."
     }
   }
 }
