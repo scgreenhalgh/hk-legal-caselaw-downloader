@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/legis-relatedcaps.schema.json",
+  "title": "Legislation related caps (ord → reg mapping)",
+  "description": "Array of caps related to the subject cap. Saved at output/legis/{abbr}/{cap}/relatedcaps_{lang}.json. For abbr=ord this endpoint returns a single self-lookup entry; for abbr=reg it returns all subsidiary regulations. Empty array when the cap has no related caps.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["title", "num", "path"],
+    "properties": {
+      "title": {"type": "string", "description": "Long title of the related cap."},
+      "num": {
+        "type": "string",
+        "description": "Cap number as a string — may include alpha suffix (e.g. '622J'). Stored as string because HKLII's num_int query parameter rejects alpha suffixes with HTTP 500."
+      },
+      "path": {"type": "string", "description": "HKLII URL path for the related cap."}
+    }
+  }
+}

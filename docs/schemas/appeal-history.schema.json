@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/appeal-history.schema.json",
+  "title": "Appeal chain",
+  "description": "Array of docket → judgments groups covering the full appeal chain for the subject case. Fetched from HKLII's /api/getappealhistory and saved as {stem}.appeal_history.json. Typically 1-4 entries; empty array possible for standalone judgments.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["act", "judgments"],
+    "properties": {
+      "act": {
+        "type": "string",
+        "description": "Docket code for this rung of the chain (e.g. 'FAMV5/2013', 'CACV254/2011'). See parser.COURT_PREFIX_MAP for the act-prefix → court-slug lookup."
+      },
+      "judgments": {
+        "type": "array",
+        "description": "Judgments issued on this docket, chronological (oldest first).",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["neutral", "date", "remarks", "path", "lang"],
+          "properties": {
+            "neutral": {"type": "string", "description": "Neutral citation."},
+            "date": {"type": "string", "description": "Judgment date (YYYY-MM-DD, no timezone)."},
+            "remarks": {"type": "string", "description": "HKLII remarks field. Often empty; occasionally 'reversed', 'affirmed', etc."},
+            "path": {"type": "string", "description": "HKLII URL path of the judgment."},
+            "lang": {"type": "string", "enum": ["EN", "TC"], "description": "Language of the judgment record. Uppercase in this endpoint's response (contrast with the lowercase `lang` used elsewhere)."}
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/case-metadata.schema.json",
+  "title": "Court case primary metadata",
+  "description": "Written by client.save_judgment_local for every court judgment. On disk at output/{court}/{year}/{court}_{year}_{number}.json (EN or TC-primary); TC sidecar variants use the .tc.json suffix.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "title",
+    "case_number",
+    "court",
+    "date",
+    "neutral_citation",
+    "parallel_citations",
+    "doc_url",
+    "has_translation",
+    "url"
+  ],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Party-name title in the row's language. Uppercase for EN; mixed case for TC. Empty string on rare rows with no HKLII title."
+    },
+    "case_number": {
+      "type": "string",
+      "description": "Primary docket for this row (e.g. 'FAMC58/2019'). One row per docket — a judgment covering N dockets appears N times with different case_number values but identical text."
+    },
+    "court": {
+      "type": "string",
+      "description": "Court name in the row's language (e.g. 'Court of Final Appeal' in EN, '原訟法庭' in TC)."
+    },
+    "date": {
+      "type": "string",
+      "description": "Judgment date. ISO 8601 with Hong Kong offset (+08:00) in practice; empty string possible on rows HKLII has no date for.",
+      "examples": ["2020-03-20T00:00:00+08:00"]
+    },
+    "neutral_citation": {
+      "type": "string",
+      "description": "HKLII-supplied neutral citation. For pre-2018 judgments, assigned retrospectively by HKLII as catalogue metadata — not necessarily present in the body text."
+    },
+    "parallel_citations": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Law-report citations (HKCFAR, HKLRD, HKC, etc.). Often empty."
+    },
+    "doc_url": {
+      "type": ["string", "null"],
+      "description": "Judiciary-hosted URL of the source Word document. Null when HKLII has no source doc. The file on disk uses the extension chosen by magic-byte validation, not the URL suffix."
+    },
+    "has_translation": {
+      "type": "boolean",
+      "description": "HKLII flag — true iff a counterpart in the other language exists at the same (court, year, number)."
+    },
+    "url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Canonical HKLII URL for this row. Language derivable from the /en/ or /tc/ path segment."
+    }
+  }
+}

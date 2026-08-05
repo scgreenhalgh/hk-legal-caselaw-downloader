@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/hopt-entry.schema.json",
+  "title": "HOPT document (treaties, gazette, Basic Law consultation)",
+  "description": "One JSON per (row, lang) at output/hopt/{abbr}/{year}/{num}/{abbr}_{year}_{num}_{lang}.json. Covers five HKLII databases: bacpg (Basic Law consultation papers), bahkg (Basic Law HK Gazette), hktmc (marine codes), hktml (multilateral treaties), hkts (HK Treaty Series). No separate .txt or .html file — the document text is embedded in `content`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["db", "title", "date", "neutral", "category", "body", "content", "inforce", "has_translation"],
+  "properties": {
+    "db": {
+      "type": "string",
+      "description": "Localised database name (e.g. 'HKTS' in EN, '公約' in TC)."
+    },
+    "title": {"type": "string"},
+    "date": {
+      "type": ["string", "null"],
+      "description": "YYYY-MM-DD, or null when HKLII has no promulgation date (~20 of 1,149 HOPT rows — e.g. old treaties with an `nd` path segment)."
+    },
+    "neutral": {"type": "string"},
+    "category": {"type": "string", "description": "Subject tag assigned by HKLII (e.g. 'Labour')."},
+    "body": {
+      "type": ["string", "null"],
+      "description": "Issuing body (e.g. 'International Labour Organisation'). Null for ~66% of HOPT rows where HKLII records no issuing body."
+    },
+    "content": {
+      "type": "string",
+      "description": "Embedded HTML — full document text. Run parser.html_to_text(content) for a plain-text rendering equivalent to the court cases' `.txt` files."
+    },
+    "inforce": {"type": "boolean"},
+    "has_translation": {"type": "boolean"}
+  }
+}

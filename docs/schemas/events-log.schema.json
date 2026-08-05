@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/events-log.schema.json",
+  "title": "Pipeline event log entry",
+  "description": "One JSON object per line in output/events.jsonl. Emitted by StructuredEventLogger during scrape runs. Every entry has `ts` (ISO 8601 UTC) and `kind`; other fields vary by kind — see the oneOf branches. Nine kinds observed across the 2026-07 run.",
+  "type": "object",
+  "required": ["ts", "kind"],
+  "properties": {
+    "ts": {"type": "string", "description": "ISO 8601 UTC timestamp with microsecond precision (e.g. '2026-07-04T11:58:24.418111+00:00')."},
+    "kind": {
+      "type": "string",
+      "enum": [
+        "request_success",
+        "request_failed",
+        "ip_echo",
+        "warmup",
+        "pool_exhausted",
+        "challenge_detected",
+        "doc_invalid_magic",
+        "case_failed",
+        "degraded"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {"const": "request_success"},
+        "proxy_url": {"type": "string"},
+        "url": {"type": "string"},
+        "http_status": {"type": "integer"},
+        "elapsed_ms": {"type": "number"}
+      },
+      "required": ["kind", "proxy_url", "url", "http_status", "elapsed_ms"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "request_failed"},
+        "proxy_url": {"type": "string"},
+        "url": {"type": "string"},
+        "elapsed_ms": {"type": "number"},
+        "error_class": {"type": "string"},
+        "error_msg": {"type": "string"}
+      },
+      "required": ["kind", "proxy_url", "url", "elapsed_ms", "error_class", "error_msg"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "ip_echo"},
+        "proxy_url": {"type": "string", "description": "'direct' or 'http://localhost:88XX'."},
+        "url": {"type": "string"},
+        "elapsed_ms": {"type": "number"},
+        "extra": {
+          "type": "object",
+          "properties": {
+            "observed_ip": {"type": "string"}
+          }
+        }
+      },
+      "required": ["kind", "proxy_url", "url", "elapsed_ms"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "warmup"},
+        "proxy_url": {"type": "string"},
+        "url": {"type": "string"},
+        "elapsed_ms": {"type": "number"}
+      },
+      "required": ["kind", "proxy_url", "url", "elapsed_ms"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "pool_exhausted"},
+        "court": {"type": "string"},
+        "year": {"type": "integer"},
+        "num": {"type": "integer"},
+        "error_class": {"type": "string"},
+        "error_msg": {"type": "string"}
+      },
+      "required": ["kind", "court", "year", "num", "error_class", "error_msg"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "challenge_detected"},
+        "court": {"type": "string"},
+        "year": {"type": "integer"},
+        "num": {"type": "integer"},
+        "proxy_url": {"type": "string"},
+        "url": {"type": "string"},
+        "http_status": {"type": "integer"},
+        "error_class": {"type": "string"},
+        "error_msg": {"type": "string"},
+        "response_len": {"type": "integer"}
+      },
+      "required": ["kind", "court", "year", "num", "proxy_url", "url", "http_status", "error_class", "error_msg", "response_len"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "doc_invalid_magic"},
+        "court": {"type": "string"},
+        "year": {"type": "integer"},
+        "num": {"type": "integer"},
+        "url": {"type": "string"},
+        "error_class": {"type": "string"},
+        "error_msg": {"type": "string"}
+      },
+      "required": ["kind", "court", "year", "num", "url", "error_class", "error_msg"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "case_failed"},
+        "court": {"type": "string"},
+        "year": {"type": "integer"},
+        "num": {"type": "integer"},
+        "error_class": {"type": "string"},
+        "error_msg": {"type": "string"}
+      },
+      "required": ["kind", "court", "year", "num", "error_class", "error_msg"]
+    },
+    {
+      "properties": {
+        "kind": {"const": "degraded"},
+        "proxy_url": {"type": "string"},
+        "error_class": {"type": "string"},
+        "error_msg": {"type": "string"}
+      },
+      "required": ["kind", "proxy_url", "error_class", "error_msg"]
+    }
+  ]
+}

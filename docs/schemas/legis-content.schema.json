@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/legis-content.schema.json",
+  "title": "Legislation TOC + section content",
+  "description": "Array of sections (parts, sections, schedules) that make up one version of an ordinance/regulation/instrument, with the section HTML inline. Saved at output/legis/{abbr}/{cap}/{abbr}_{cap}_{lang}.content.json (currently-in-force version) or {stem}.v{vid}.content.json (historical). Sort by `internal_order` to reconstruct reading order.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "subpath", "path", "title", "content", "section_type", "prov_num", "pub_date", "noteuplinks", "internal_order", "capversion"],
+    "properties": {
+      "id": {"type": "integer", "description": "HKLII internal section id."},
+      "subpath": {
+        "type": "string",
+        "description": "Section identifier within the version (e.g. 'longTitle', 'P1', 's3', 'sch2')."
+      },
+      "path": {
+        "type": "string",
+        "description": "HKLII URL path for this section (e.g. '/en/legis/ord/1/s3')."
+      },
+      "title": {"type": "string", "description": "Section heading."},
+      "content": {
+        "type": "string",
+        "description": "Inline HTML using HKLII's legislation markup (<longtitle>, <section>, <num>, <heading>, <content>, <marker>, <ref>, etc.). Hyperlinks in <a href> point to other provisions."
+      },
+      "section_type": {
+        "type": "string",
+        "description": "Structural class. Observed values: 'LT' (long title), 'P' (part), 'S' (section), 'SCH' (schedule).",
+        "examples": ["LT", "P", "S", "SCH"]
+      },
+      "prov_num": {
+        "type": "string",
+        "description": "Human-readable provision label (e.g. 'Section 1', 'Part I', 'Schedule 3'). Empty string for the long title."
+      },
+      "pub_date": {
+        "type": "string",
+        "description": "ISO 8601 with +08:00. When this specific provision's text was last updated."
+      },
+      "noteuplinks": {
+        "type": ["array", "null"],
+        "description": "Cases citing this specific provision. Null when the provision has no inbound citations; array of citation objects otherwise.",
+        "items": {"type": "object"}
+      },
+      "internal_order": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Position of this section within the TOC. Sort ascending to reconstruct reading order."
+      },
+      "capversion": {
+        "type": "integer",
+        "description": "The vid this section belongs to. Matches the `id` of a legis-versions entry."
+      }
+    }
+  }
+}

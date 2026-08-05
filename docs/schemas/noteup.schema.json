@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/noteup.schema.json",
+  "title": "Inbound citations (noteup)",
+  "description": "Array of judgments that cite the subject case. Fetched from HKLII's /api/getnoteups and saved as {stem}.noteup.json. Empty array = never cited.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["neutral", "path", "db", "date", "citation_frequency", "parallel", "cases"],
+    "properties": {
+      "neutral": {
+        "type": "string",
+        "description": "Neutral citation of the citing case."
+      },
+      "path": {
+        "type": "string",
+        "description": "HKLII URL path of the citing case (e.g. '/en/cases/hkcfi/2013/1787'). Parse for lang, court, year, number."
+      },
+      "db": {
+        "type": "string",
+        "description": "Court name of the citing case (localised — e.g. 'Court of First Instance' or '原訟法庭')."
+      },
+      "date": {
+        "type": "string",
+        "description": "Date of the citing judgment. ISO 8601 with +08:00 offset."
+      },
+      "citation_frequency": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "HKLII-side count of how many times the citing judgment references the subject case."
+      },
+      "parallel": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Parallel citations of the citing case."
+      },
+      "cases": {
+        "type": "array",
+        "description": "Dockets the citing judgment disposes of. One entry per docket.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title", "act"],
+          "properties": {
+            "title": {"type": "string", "description": "Party-name title in EN/TC."},
+            "act": {"type": "string", "description": "Docket code (e.g. 'HCMP3324/2002')."}
+          }
+        }
+      }
+    }
+  }
+}

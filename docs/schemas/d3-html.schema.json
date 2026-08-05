@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/d3-html.schema.json",
+  "title": "D3 family — HTML-in-JSON shape (hklrccp, hklrcr, pcpdc)",
+  "description": "One JSON per (row, lang) at output/d3/{family}/{year}/{num}/{family}_{year}_{num}_{lang}.json. Covers the three D3 families whose HKLII response embeds the document HTML in `content` (Shape B, file_type=1 per docs/d3-runner-design.md). No separate .txt or .html file — run parser.html_to_text on `content` for plain text. Langs observed: en, tc, sc.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "neutral", "date", "path", "db", "file_type", "content", "pdf", "has_translation"],
+  "properties": {
+    "id": {"type": "integer", "description": "HKLII internal row id."},
+    "title": {"type": "string"},
+    "neutral": {"type": "string", "description": "Neutral citation (e.g. '[2020] HKLRCCP 2')."},
+    "date": {"type": "string", "description": "YYYY-MM-DD."},
+    "path": {"type": "string", "description": "HKLII-relative path fragment for this document (e.g. '/2020/2/')."},
+    "db": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "abbr", "lang", "path"],
+      "properties": {
+        "id": {"type": "integer"},
+        "name": {"type": "string", "description": "Localised database name."},
+        "abbr": {"type": "string", "description": "Slug (hklrccp | hklrcr | pcpdc)."},
+        "lang": {"type": "string", "enum": ["EN", "TC", "SC"], "description": "Uppercase in this response (matches HKLII wire)."},
+        "path": {"type": "string", "description": "SPA route (e.g. '/tc/other/hklrcr/')."}
+      }
+    },
+    "file_type": {
+      "type": "integer",
+      "const": 1,
+      "description": "Always 1 on this shape. HKLII uses file_type=2 for external-PDF rows (see d3-pcpdaab.schema.json)."
+    },
+    "content": {
+      "type": "string",
+      "description": "Embedded document HTML (report body, footnotes, tables of contents)."
+    },
+    "pdf": {
+      "type": "string",
+      "description": "Empty string on this shape — the PDF field is only populated for file_type=2 rows."
+    },
+    "has_translation": {"type": "boolean"}
+  }
+}

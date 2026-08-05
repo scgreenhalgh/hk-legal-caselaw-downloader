@@ -97,17 +97,26 @@ https://www.hklii.hk/{en|tc}/cases/{court}/{year}/{number}
 
 ## HKLII Coverage
 
-HKLII contains **122,460+ judgments** across 14 court databases; the major courts go back to 1946:
+The current corpus (2026-07 scrape) holds **162,713 court judgments** across
+17 slugs, plus 9,464 in-force legislation instruments with 30,943 historical
+version snapshots, plus 3,014 hopt/D3 secondary-corpus rows.
 
-| Court | Abbreviation | Years |
+| Slug | Collection | Range |
 |-------|-------------|-------|
-| Court of First Instance | hkcfi  | 1946-present |
-| Court of Appeal         | hkca   | 1946-present |
-| District Court          | hkdc   | 1946-present |
-| Court of Final Appeal   | hkcfa  | 1997-present |
-| Competition Tribunal    | hkct   | 2020-present |
-| Lands Tribunal          | hkldt  | 1990-present |
-| Family Court            | hkfc   | ~1980-2020  |
+| `hkcfi` | Court of First Instance | 1946-present |
+| `hkca`  | Court of Appeal         | 1946-present |
+| `hkdc`  | District Court          | 1946-present |
+| `hkcfa` | Court of Final Appeal   | 1997-present |
+| `hkct`  | Competition Tribunal    | 2020-present |
+| `hkldt` | Lands Tribunal          | 1990-present |
+| `hkfc`  | Family Court            | ~1980-2020 |
+| `hkmagc, hkcrc, hklat, hksct, hkoat, hopt, ukpc` | Tribunals + treaties + Privy Council | mixed |
+| `legis/{ord,reg,instrument}` | Ordinances, regulations, instruments (versioned) | full HK statute book |
+| `d3/{hklrccp,hklrcr,pcpdc,pcpdaab}` | LRC consultation papers / LRC reports / Privacy Commissioner decisions / PCPD administrative appeals | full HKLII coverage |
+
+Full per-artifact schemas and on-disk layout: see
+[`docs/corpus-schema.md`](docs/corpus-schema.md) and the JSON Schema files in
+[`docs/schemas/`](docs/schemas/).
 
 ## How It Works
 

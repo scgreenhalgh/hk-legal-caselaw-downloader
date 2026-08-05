@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/enum-cache-snapshot.schema.json",
+  "title": "Enumeration cache snapshot (getcasefiles page)",
+  "description": "Raw response from HKLII's /api/getcasefiles endpoint, saved as provenance when the scraper runs with --save-enum-responses. On disk at output/.enum_cache/{court}_{lang}/{unix_ts}_page{NNNN}.json. One file per paginated page. Not part of the primary corpus — consumers should ignore this directory unless auditing enumeration coverage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["totalfiles", "judgments"],
+  "properties": {
+    "totalfiles": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total judgments in this court/lang bucket at the time of enumeration. Same value repeated across every page of the same enum run."
+    },
+    "judgments": {
+      "type": "array",
+      "description": "Per-page listing. Each entry is a minimal record — the full metadata JSON is fetched separately per row.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["neutral", "path", "date", "parallel", "cases"],
+        "properties": {
+          "neutral": {"type": "string", "description": "Neutral citation."},
+          "path": {"type": "string", "description": "HKLII URL path (e.g. '/en/cases/hkcfa/2026/1144')."},
+          "date": {"type": "string", "description": "ISO 8601 with +08:00."},
+          "parallel": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Parallel citations at enumeration time."
+          },
+          "cases": {
+            "type": "array",
+            "description": "Dockets disposed of by this judgment.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["title", "act"],
+              "properties": {
+                "title": {"type": "string"},
+                "act": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/legis-versions.schema.json",
+  "title": "Legislation version index",
+  "description": "Newest-first list of every version of a legislation instrument. Saved at output/legis/{abbr}/{cap}/{abbr}_{cap}_{lang}.versions.json. The first entry's `id` is the version id (`vid`) of the currently-in-force version; that version's TOC is at {stem}.content.json (no vid in filename). Historical version TOCs are at {stem}.v{vid}.content.json.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "title", "date", "cap"],
+    "properties": {
+      "id": {
+        "type": "integer",
+        "description": "Version id (the `vid`). Filenames encode this as v{id}."
+      },
+      "title": {"type": "string", "description": "Long title of the instrument."},
+      "date": {
+        "type": "string",
+        "description": "ISO 8601 with +08:00. Effective date of this version."
+      },
+      "cap": {
+        "type": "integer",
+        "description": "HKLII's internal cap group id (not the ordinance's public cap number, which is in the filename and parent directory)."
+      }
+    }
+  }
+}

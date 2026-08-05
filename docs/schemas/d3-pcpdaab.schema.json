@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hklii-downloader.local/schemas/d3-pcpdaab.schema.json",
+  "title": "D3 pcpdaab — PDF resolver metadata (Administrative Appeals Board decisions)",
+  "description": "One JSON per (row, lang) at output/d3/pcpdaab/{year}/{num}/pcpdaab_{year}_{num}_{lang}.json alongside a .pdf of the same stem. HKLII does not serve pcpdaab PDFs directly (its /static/ URLs return SPA HTML); the pcpdaab runner resolves each row against pcpd.org.hk's public decisions listing. See src/hklii_downloader/pcpdaab.py.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["hklii", "pcpd"],
+  "properties": {
+    "hklii": {
+      "type": "object",
+      "description": "Metadata as scraped from HKLII's getother response.",
+      "additionalProperties": false,
+      "required": ["title", "neutral", "date"],
+      "properties": {
+        "title": {"type": "string"},
+        "neutral": {"type": "string", "description": "e.g. '[2012] HKPCPDAAB 36'"},
+        "date": {"type": "string", "description": "YYYY-MM-DD."}
+      }
+    },
+    "pcpd": {
+      "type": "object",
+      "description": "Resolver output from pcpd.org.hk.",
+      "additionalProperties": false,
+      "required": ["filename", "anchor_text", "chinese_only", "shares_pdf_with", "resolved_year", "resolved_num"],
+      "properties": {
+        "filename": {"type": "string", "description": "PDF filename on pcpd.org.hk (e.g. 'AAB_36_2012.pdf')."},
+        "anchor_text": {"type": "string", "description": "Raw anchor text from the pcpd.org.hk decisions listing."},
+        "chinese_only": {
+          "type": "boolean",
+          "description": "TRUE when HKLII lists this row under `en` but the linked PDF is Chinese-only ('This decision provides Chinese version only' marker). Trust this flag over the _en filename when determining actual language."
+        },
+        "shares_pdf_with": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {"type": "integer", "description": "year"},
+              {"type": "integer", "description": "num"}
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "description": "Other AAB (year, num) partner tuples that share this PDF (batched decisions). Empty on all rows in the current corpus; the runner writes non-empty tuples when a single anchor spans multiple AAB numbers. See src/hklii_downloader/pcpdaab.py:60."
+        },
+        "resolved_year": {"type": "integer", "description": "Canonical year parsed from anchor text (may differ from filename in edge cases)."},
+        "resolved_num": {"type": "integer", "description": "Canonical decision number parsed from anchor text."}
+      }
+    }
+  }
+}
