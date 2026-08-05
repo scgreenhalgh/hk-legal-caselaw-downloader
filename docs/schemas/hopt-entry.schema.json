@@ -1,15 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hklii-downloader.local/schemas/hopt-entry.schema.json",
-  "title": "HOPT document (treaties, gazette, Basic Law consultation)",
-  "description": "One JSON per (row, lang) at output/hopt/{abbr}/{year}/{num}/{abbr}_{year}_{num}_{lang}.json. Covers five HKLII databases: bacpg (Basic Law consultation papers), bahkg (Basic Law HK Gazette), hktmc (marine codes), hktml (multilateral treaties), hkts (HK Treaty Series). No separate .txt or .html file — the document text is embedded in `content`.",
+  "title": "HOPT document (treaties + bilateral agreements)",
+  "description": "One JSON per (row, lang) at output/hopt/{abbr}/{year}/{num}/{abbr}_{year}_{num}_{lang}.json. Covers five HKLII databases: bacpg (Bilateral Agreements Concluded by the Central People's Government), bahkg (Bilateral Agreements Concluded by the HKSAR Government), hktmc (Arrangements with the Macao SAR), hktml (Arrangements with the Mainland), hkts (HK Treaty Series). Category labels above are the actual `db` field values HKLII writes; the hopt.py module docstring uses older labels (e.g. 'Basic Law Consultation Papers') that do not match the current corpus. No separate .txt or .html file — the document text is embedded in `content`.",
   "type": "object",
   "additionalProperties": false,
   "required": ["db", "title", "date", "neutral", "category", "body", "content", "inforce", "has_translation"],
   "properties": {
     "db": {
       "type": "string",
-      "description": "Localised database name (e.g. 'HKTS' in EN, '公約' in TC)."
+      "description": "Localised database name. Actual values seen in the corpus: hkts → 'Treaties' / '公約'; bacpg → 'Bilateral Agreements Concluded by the Central People's Government' / '中央人民政府達成的雙邊協定'; bahkg → 'Bilateral Agreements Concluded by the HKSAR Government' / '香港特別行政區政府達成的雙邊協定'; hktmc → 'Arrangements with the Macao SAR' / '香港特別行政區與澳門特別行政區之間的安排'; hktml → 'Arrangements with the Mainland' / '香港特別行政區與內地之間的安排'."
     },
     "title": {"type": "string"},
     "date": {

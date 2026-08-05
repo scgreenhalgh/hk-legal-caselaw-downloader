@@ -47,7 +47,7 @@ def load_schema(name: str) -> dict:
     return json.loads((SCHEMAS / name).read_text())
 
 
-# Court slugs that use case-metadata.schema.json (13 courts/tribunals).
+# Court slugs that use case-metadata.schema.json (12 courts/tribunals).
 # UKPC is excluded — it uses ukpc-metadata.schema.json (different wire
 # endpoint, different persisted shape). HOPT / D3 / legis / failure_samples
 # / .enum_cache are non-court siblings.
@@ -151,11 +151,18 @@ def validate_file(schema: dict, data) -> str | None:
         return f"{list(exc.absolute_path)}: {exc.message}"
 
 
-def validate_jsonl(schema: dict, path: Path, limit: int = 200) -> list[str]:
+def validate_jsonl(schema: dict, path: Path, limit: int | None = None) -> list[str]:
+    """Validate every line of a jsonl file against `schema`.
+
+    `limit` defaults to None = validate the whole file. An earlier
+    version capped at 200 lines, which hid 395 real schema violations
+    that appear starting at line 9,827 — the corpus review workflow
+    caught this and the cap was removed.
+    """
     errors: list[str] = []
     with path.open("r", encoding="utf-8") as fh:
         for i, line in enumerate(fh):
-            if i >= limit:
+            if limit is not None and i >= limit:
                 break
             line = line.strip()
             if not line:
@@ -168,6 +175,65 @@ def validate_jsonl(schema: dict, path: Path, limit: int = 200) -> list[str]:
             err = validate_file(schema, obj)
             if err:
                 errors.append(f"line {i + 1}: {err}")
+    return errors
+
+
+def validate_events_jsonl(schema: dict, path: Path) -> list[str]:
+    """Fast path for events.jsonl (~741k lines): dispatch by `kind` and
+    validate only the matching oneOf branch, instead of Draft202012's
+    all-branches-plus-unevaluatedProperties bookkeeping. Full-file
+    validation with the naive path is prohibitively slow (~20 min)
+    because oneOf must check every branch to prove exactly-one match
+    AND every branch's evaluated-properties must be tracked to reach
+    the outer unevaluatedProperties. This function reconstructs each
+    branch as a standalone schema (branch properties ∪ outer properties,
+    additionalProperties:false) and dispatches by `kind`.
+    """
+    # Build per-kind branch schemas.
+    outer_props = dict(schema.get("properties", {}))
+    per_kind_schemas: dict[str, dict] = {}
+    for branch in schema.get("oneOf", []):
+        bp = branch.get("properties", {})
+        kind_const = bp.get("kind", {}).get("const")
+        if not kind_const:
+            continue
+        merged_props = {**outer_props, **bp}
+        per_kind_schemas[kind_const] = {
+            "type": "object",
+            "properties": merged_props,
+            "required": branch.get("required", []),
+            "additionalProperties": False,
+        }
+    outer_required = set(schema.get("required", []))
+    valid_kinds = set(per_kind_schemas.keys())
+
+    errors: list[str] = []
+    validators: dict[str, jsonschema.Draft202012Validator] = {
+        k: jsonschema.Draft202012Validator(s) for k, s in per_kind_schemas.items()
+    }
+    with path.open("r", encoding="utf-8") as fh:
+        for i, line in enumerate(fh):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as exc:
+                errors.append(f"line {i + 1}: not JSON — {exc}")
+                continue
+            for f in outer_required:
+                if f not in obj:
+                    errors.append(f"line {i + 1}: missing required outer field '{f}'")
+                    break
+            else:
+                kind = obj.get("kind")
+                if kind not in valid_kinds:
+                    errors.append(f"line {i + 1}: unknown kind '{kind}'")
+                    continue
+                v = validators[kind]
+                first = next(v.iter_errors(obj), None)
+                if first is not None:
+                    errors.append(f"line {i + 1}: {list(first.absolute_path)}: {first.message}")
     return errors
 
 
@@ -223,21 +289,25 @@ def main(argv: list[str]) -> int:
         else:
             print(f"  ok {label}: {len(samples)}/{len(samples)}")
 
-    # events.jsonl — separate treatment (JSONL, sample first 200 lines)
+    # events.jsonl — full-file validation via fast per-kind dispatch.
+    # See validate_events_jsonl docstring for why we don't just call
+    # validate_jsonl here (the naive draft-2020-12 path over 741k lines
+    # with oneOf + unevaluatedProperties runs ~20 min; the dispatch
+    # variant is ~90s).
     ev_schema = load_schema("events-log.schema.json")
     ev_files = find_events_log(output_dir)
     if ev_files:
         ev = ev_files[0]
-        errs = validate_jsonl(ev_schema, ev, limit=200)
+        errs = validate_events_jsonl(ev_schema, ev)
         if errs:
             any_fail = True
-            print(f"  X  events.jsonl: {len(errs)} errors in first 200 lines")
+            print(f"  X  events.jsonl: {len(errs)} errors across full file")
             for e in errs[:10]:
                 print(f"       {e}")
             if len(errs) > 10:
                 print(f"       ... and {len(errs) - 10} more")
         else:
-            print(f"  ok events.jsonl: first 200 lines valid")
+            print(f"  ok events.jsonl: full file valid")
     else:
         print("  ~  events.jsonl: not found (skipped)")
 

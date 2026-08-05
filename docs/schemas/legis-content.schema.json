@@ -25,8 +25,8 @@
       },
       "section_type": {
         "type": "string",
-        "description": "Structural class. Observed values: 'LT' (long title), 'P' (part), 'S' (section), 'SCH' (schedule).",
-        "examples": ["LT", "P", "S", "SCH"]
+        "description": "Structural class. Ten distinct values observed across the current legis corpus (count in parens across 2,113,257 section items): 'S' section (1,755,266), 'P' part (157,600), 'SCH' schedule (102,066), 'D' division (45,672), 'E' enactment (24,615), 'LT' long title (15,787), 'SD' subdivision (10,791), 'A' article (771), 'PRE' preamble (657), 'N' note (32). Meanings for D/E/SD/A/PRE/N are inferred from HKLII's markup; consult HKLII's legis parser for canonical semantics. No enum constraint — HKLII may add new codes.",
+        "examples": ["LT", "P", "S", "SCH", "D", "E", "SD", "A", "PRE", "N"]
       },
       "prov_num": {
         "type": "string",
@@ -38,7 +38,7 @@
       },
       "noteuplinks": {
         "type": ["array", "null"],
-        "description": "Cases citing this specific provision. Null when the provision has no inbound citations; array of citation objects otherwise.",
+        "description": "Cases citing this specific provision. Null when the provision has no inbound citations; array of citation objects otherwise. In the current corpus 100% of 2,113,257 items are null — HKLII's underlying getlegisnoteup endpoint returns HTTP 500 on every param variant (see docs/backup-coverage-2026-07-06.md 'Confirmed empty API surface'), so the array variant is not currently reachable. Kept in the schema as a forward-compatible union in case HKLII deploys the endpoint later.",
         "items": {"type": "object"}
       },
       "internal_order": {

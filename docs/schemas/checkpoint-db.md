@@ -20,7 +20,7 @@ against this DB.
 
 | Table | Rows (2026-07 run) | Purpose |
 |---|---:|---|
-| `cases` | 162,713 | Per-judgment state for the 13 mainline courts. PK `(court, year, number)`. Tracks fetch status, formats saved, enrichment status (summaries + appeal history), and the `html_pending_at_hklii` flag used by the recheck runner. |
+| `cases` | 162,713 | Per-judgment state for the 12 mainline courts (162,476 rows) + ukpc (237 rows). PK `(court, year, number)`. Tracks fetch status, formats saved, enrichment status (summaries + appeal history), and the `html_pending_at_hklii` flag used by the recheck runner. |
 | `noteup_fetches` | 162,424 | One row per case whose noteups have been fetched. PK `(court, year, number)`. `edge_count` = number of inbound citations captured. |
 | `citations` | 242,488 | Outbound citation edges from noteup responses. PK `(from_key, to_key, citer_lang)`. Keys are `"court/year/number"` strings. `citer_freq` is HKLII's snapshot of citation frequency at fetch time. |
 | `case_parallel_cites` | 11,617 | Per-case parallel citations extracted at scrape time. PK `(case_key, parallel_cite)`. |

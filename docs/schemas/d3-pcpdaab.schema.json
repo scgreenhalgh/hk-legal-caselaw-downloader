@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hklii-downloader.local/schemas/d3-pcpdaab.schema.json",
   "title": "D3 pcpdaab — PDF resolver metadata (Administrative Appeals Board decisions)",
-  "description": "One JSON per (row, lang) at output/d3/pcpdaab/{year}/{num}/pcpdaab_{year}_{num}_{lang}.json alongside a .pdf of the same stem. HKLII does not serve pcpdaab PDFs directly (its /static/ URLs return SPA HTML); the pcpdaab runner resolves each row against pcpd.org.hk's public decisions listing. See src/hklii_downloader/pcpdaab.py.",
+  "description": "One JSON per (row, lang) at output/d3/pcpdaab/{year}/{num}/pcpdaab_{year}_{num}_{lang}.json alongside a matching .pdf and .txt (PDF-extracted plain text) — 735 of each on disk. Bilingual only: {lang} ∈ {en, tc}; no _sc sidecars (unlike the other three D3 families which are en/tc/sc) — pcpdaab.py's _PCPD_LANG_URL_PREFIX map only defines en/tc routes. HKLII does not serve pcpdaab PDFs directly (its /static/ URLs return SPA HTML); the pcpdaab runner resolves each row against pcpd.org.hk's public decisions listing. See src/hklii_downloader/pcpdaab.py.",
   "type": "object",
   "additionalProperties": false,
   "required": ["hklii", "pcpd"],
@@ -28,7 +28,7 @@
         "anchor_text": {"type": "string", "description": "Raw anchor text from the pcpd.org.hk decisions listing."},
         "chinese_only": {
           "type": "boolean",
-          "description": "TRUE when HKLII lists this row under `en` but the linked PDF is Chinese-only ('This decision provides Chinese version only' marker). Trust this flag over the _en filename when determining actual language."
+          "description": "TRUE when the pcpd.org.hk listing marks this PDF as 'provides Chinese version only'. This is an intrinsic property of the PDF (not of the sidecar's language) and is written identically to both the _en and _tc sidecars for that decision. In the current corpus 197/368 EN sidecars and 197/367 TC sidecars carry chinese_only:true. Trust this flag over the _en filename when determining the language of the underlying decision."
         },
         "shares_pdf_with": {
           "type": "array",

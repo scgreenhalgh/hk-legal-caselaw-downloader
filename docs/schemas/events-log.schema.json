@@ -2,11 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hklii-downloader.local/schemas/events-log.schema.json",
   "title": "Pipeline event log entry",
-  "description": "One JSON object per line in output/events.jsonl. Emitted by StructuredEventLogger during scrape runs. Every entry has `ts` (ISO 8601 UTC) and `kind`; other fields vary by kind — see the oneOf branches. Nine kinds observed across the 2026-07 run.",
+  "description": "One JSON object per line in output/events.jsonl. Emitted by StructuredEventLogger during scrape runs. Every entry has `ts` (ISO 8601 UTC) and `kind`; other fields vary by kind — see the oneOf branches. Nine kinds observed in the current corpus; a tenth (enrichment_challenge) is declared for a code path (enrichment.py:94) that emits it on press-summary WAF hits but has not fired in the current run. Strict shape enforcement uses `unevaluatedProperties: false` at the outer level, which in draft-2020-12 semantics rejects any field not declared by the outer schema OR by the matching oneOf branch — this is the correct pattern for a discriminated union and is equivalent to `additionalProperties: false` for non-union schemas.",
   "type": "object",
   "required": ["ts", "kind"],
+  "unevaluatedProperties": false,
   "properties": {
-    "ts": {"type": "string", "description": "ISO 8601 UTC timestamp with microsecond precision (e.g. '2026-07-04T11:58:24.418111+00:00')."},
+    "ts": {
+      "type": "string",
+      "description": "ISO 8601 UTC timestamp with microsecond precision (e.g. '2026-07-04T11:58:24.418111+00:00')."
+    },
     "kind": {
       "type": "string",
       "enum": [
@@ -16,10 +20,16 @@
         "warmup",
         "pool_exhausted",
         "challenge_detected",
+        "enrichment_challenge",
         "doc_invalid_magic",
         "case_failed",
         "degraded"
       ]
+    },
+    "extra": {
+      "type": "object",
+      "description": "Optional bag for per-kind auxiliary data. Contents vary: ip_echo carries {observed_ip}; enrichment_challenge carries {enrichment_kind}. Declared at the outer level so any branch may attach it without exhaustive per-branch listing.",
+      "additionalProperties": true
     }
   },
   "oneOf": [
@@ -34,28 +44,24 @@
       "required": ["kind", "proxy_url", "url", "http_status", "elapsed_ms"]
     },
     {
+      "description": "request_failed has two producer variants: (a) exception path in proxy_pool.py's httpx.RequestError handler — carries error_class + error_msg, no http_status; (b) HTTP-status path in _emit_request_event when response status is in _PROXY_FAILURE_STATUSES (403/429/5xx) — carries http_status, no error_class/error_msg. All three fields are optional here so both variants validate; the schema does not currently discriminate between them.",
       "properties": {
         "kind": {"const": "request_failed"},
         "proxy_url": {"type": "string"},
         "url": {"type": "string"},
         "elapsed_ms": {"type": "number"},
+        "http_status": {"type": "integer"},
         "error_class": {"type": "string"},
         "error_msg": {"type": "string"}
       },
-      "required": ["kind", "proxy_url", "url", "elapsed_ms", "error_class", "error_msg"]
+      "required": ["kind", "proxy_url", "url", "elapsed_ms"]
     },
     {
       "properties": {
         "kind": {"const": "ip_echo"},
         "proxy_url": {"type": "string", "description": "'direct' or 'http://localhost:88XX'."},
         "url": {"type": "string"},
-        "elapsed_ms": {"type": "number"},
-        "extra": {
-          "type": "object",
-          "properties": {
-            "observed_ip": {"type": "string"}
-          }
-        }
+        "elapsed_ms": {"type": "number"}
       },
       "required": ["kind", "proxy_url", "url", "elapsed_ms"]
     },
@@ -80,6 +86,7 @@
       "required": ["kind", "court", "year", "num", "error_class", "error_msg"]
     },
     {
+      "description": "challenge_detected — WAF/interstitial captured mid-scrape. Emitted by scraper.py (which supplies proxy_url via getattr(resp, 'hklii_proxy_url', None)) and by html_recheck.py (which currently does NOT supply proxy_url — a latent bug that will produce a schema-invalid row on the first challenge captured during recheck; see html_recheck.py:150-161).",
       "properties": {
         "kind": {"const": "challenge_detected"},
         "court": {"type": "string"},
@@ -93,6 +100,19 @@
         "response_len": {"type": "integer"}
       },
       "required": ["kind", "court", "year", "num", "proxy_url", "url", "http_status", "error_class", "error_msg", "response_len"]
+    },
+    {
+      "description": "enrichment_challenge — WAF/interstitial captured during press-summary fetch (enrichment.py:94). Zero rows in the current corpus but the code path exists and its test asserts the kind is emitted. `extra.enrichment_kind` names which enrichment step (e.g. 'summary_en').",
+      "properties": {
+        "kind": {"const": "enrichment_challenge"},
+        "court": {"type": "string"},
+        "year": {"type": "integer"},
+        "num": {"type": "integer"},
+        "url": {"type": "string"},
+        "error_class": {"type": "string"},
+        "error_msg": {"type": "string"}
+      },
+      "required": ["kind", "court", "year", "num", "url", "error_class", "error_msg"]
     },
     {
       "properties": {
